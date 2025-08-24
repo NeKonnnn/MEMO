@@ -1,0 +1,77 @@
+version: '3.8'
+
+services:
+  # Backend - FastAPI
+  memoai-backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./models:/app/models:ro
+      - ./model_small:/app/model_small:ro
+      - ./silero_models:/app/silero_models:ro
+      - ./memory:/app/memory
+      - ./backend:/app
+    environment:
+      - PYTHONPATH=/app
+      - MODEL_PATH=/app/models/model.gguf
+    depends_on:
+      - redis
+    restart: unless-stopped
+    networks:
+      - memoai-network
+
+  # Frontend - React
+  memoai-frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - REACT_APP_API_URL=http://localhost:8000
+      - REACT_APP_WS_URL=ws://localhost:8000
+    depends_on:
+      - memoai-backend
+    restart: unless-stopped
+    networks:
+      - memoai-network
+
+  # Redis для кэширования и сессий
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    networks:
+      - memoai-network
+
+  # Nginx для продакшена (опционально)
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - memoai-backend
+      - memoai-frontend
+    restart: unless-stopped
+    networks:
+      - memoai-network
+    profiles:
+      - production
+
+volumes:
+  redis_data:
+    driver: local
+
+networks:
+  memoai-network:
+    driver: bridge

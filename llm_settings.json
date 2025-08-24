@@ -1,0 +1,15 @@
+{
+  "context_size": 2048,
+  "output_tokens": 512,
+  "batch_size": 512,
+  "n_threads": 2,
+  "use_mmap": true,
+  "use_mlock": false,
+  "verbose": true,
+  "temperature": 0.7,
+  "top_p": 0.95,
+  "repeat_penalty": 1.05,
+  "use_gpu": true,
+  "streaming": true,
+  "legacy_api": false
+}
