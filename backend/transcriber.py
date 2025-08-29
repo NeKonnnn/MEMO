@@ -46,7 +46,7 @@ class Transcriber:
         
         self.logger.info("=== Инициализация Vosk Transcriber ===")
         
-        # Получаем абсолютный путь к корневой директории проекта
+        # Получаем абсолютный путь к корневой директории проекта (на уровень выше backend)
         self.project_dir = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
         self.logger.debug(f"Директория проекта: {self.project_dir}")
         
@@ -58,7 +58,7 @@ class Transcriber:
         self.logger.debug(f"Установлен язык: {self.language}")
         
         # Устанавливаем путь к модели - используем model_small в директории проекта
-        self.model_size = os.path.join(os.path.dirname(os.path.dirname(__file__)), "model_small")
+        self.model_size = os.path.join(self.project_dir, "model_small")
         self.logger.info(f"Путь к модели Vosk: {self.model_size}")
         
         # Проверяем существование папки модели и наличие в ней файлов
@@ -1025,7 +1025,7 @@ class Transcriber:
         
         if model_size in standard_sizes:
             # Используем локальную модель из директории проекта
-            model_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "model_small")
+            model_dir = os.path.join(self.project_dir, "model_small")
             
             if os.path.exists(model_dir):
                 self.model_size = model_dir
@@ -1043,7 +1043,7 @@ class Transcriber:
             return True
         else:
             # Проверяем, может быть это относительный путь
-            relative_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), model_size)
+            relative_path = os.path.join(self.project_dir, model_size)
             if os.path.exists(relative_path):
                 self.model_size = relative_path
                 self.model = None
@@ -1051,7 +1051,7 @@ class Transcriber:
                 return True
                 
             # Если ничего не подошло, используем модель по умолчанию
-            default_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "model_small")
+            default_path = os.path.join(self.project_dir, "model_small")
             if os.path.exists(default_path):
                 self.model_size = default_path
                 self.model = None

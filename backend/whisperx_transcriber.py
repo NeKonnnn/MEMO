@@ -37,7 +37,7 @@ LOCAL_DIARIZATION_AVAILABLE = True
 
 # Импортируем пути к локальным моделям
 try:
-    from config import WHISPERX_MODELS_DIR, DIARIZE_MODELS_DIR, WHISPERX_BASE_MODEL, DIARIZE_MODEL
+    from .config.config import WHISPERX_MODELS_DIR, DIARIZE_MODELS_DIR, WHISPERX_BASE_MODEL, DIARIZE_MODEL
     LOCAL_MODELS_AVAILABLE = True
 except ImportError:
     # Если файл с путями не найден, используем дефолтные
@@ -68,8 +68,8 @@ class WhisperXTranscriber:
             self.logger.error("WhisperX не установлен или недоступен")
             raise ImportError("WhisperX не установлен. Используйте: pip install whisperx")
         
-        # Получаем абсолютный путь к директории проекта
-        self.project_dir = os.path.abspath(os.path.dirname(os.path.abspath(__file__)))
+        # Получаем абсолютный путь к корневой директории проекта (на уровень выше backend)
+        self.project_dir = os.path.abspath(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         self.logger.debug(f"Директория проекта: {self.project_dir}")
         
         self.model = None
@@ -189,6 +189,7 @@ class WhisperXTranscriber:
         """Транскрибирует аудио файл с диаризацией"""
         try:
             print(f"=== Начало транскрипции аудио файла: {audio_path} ===")
+            print(f"LOCAL_DIARIZATION_AVAILABLE: {LOCAL_DIARIZATION_AVAILABLE}")
             
             # Проверяем существование файла
             if not os.path.exists(audio_path):
@@ -277,6 +278,7 @@ class WhisperXTranscriber:
             # Диаризация с использованием локального пайплайна
             try:
                 print("Загрузка модели диаризации...")
+                print(f"LOCAL_DIARIZATION_AVAILABLE: {LOCAL_DIARIZATION_AVAILABLE}")
                 
                 # Пробуем использовать локальный пайплайн диаризации
                 if LOCAL_DIARIZATION_AVAILABLE:
@@ -305,85 +307,127 @@ class WhisperXTranscriber:
                     
                     # Выполняем диаризацию
                     print("Выполняю диаризацию...")
-                    diarize_segments = diarize_model(audio_path)
+                    
+                    # Проверяем, является ли файл видео - если да, извлекаем аудио
+                    if audio_path.lower().endswith(('.mp4', '.avi', '.mov', '.mkv', '.webm')):
+                        print("Обнаружен видео файл, извлекаем аудио для диаризации...")
+                        try:
+                            import tempfile
+                            temp_dir = tempfile.gettempdir()
+                            audio_for_diarization = os.path.join(temp_dir, f"audio_for_diarization_{os.path.basename(audio_path)}.wav")
+                            
+                            # Используем ffmpeg для извлечения аудио
+                            if self._check_ffmpeg_availability():
+                                command = [
+                                    "ffmpeg", "-y", "-i", audio_path,
+                                    "-ar", "16000", "-ac", "1", "-f", "wav",
+                                    audio_for_diarization
+                                ]
+                                subprocess.run(command, check=True, capture_output=True)
+                                print(f"Аудио извлечено: {audio_for_diarization}")
+                                
+                                # Выполняем диаризацию на извлеченном аудио
+                                diarize_segments = diarize_model(audio_for_diarization)
+                                
+                                # Удаляем временный аудио файл
+                                if os.path.exists(audio_for_diarization):
+                                    os.remove(audio_for_diarization)
+                            else:
+                                print("FFmpeg недоступен, пропускаем диаризацию")
+                                diarize_segments = None
+                        except Exception as extract_error:
+                            print(f"Ошибка извлечения аудио: {extract_error}")
+                            diarize_segments = None
+                    else:
+                        # Для аудио файлов выполняем диаризацию напрямую
+                        diarize_segments = diarize_model(audio_path)
                     
                     # Диагностика результатов диаризации
                     print(f"Результат диаризации: {type(diarize_segments)}")
                     print(f"Количество сегментов диаризации: {len(diarize_segments) if hasattr(diarize_segments, '__len__') else 'N/A'}")
+                    if diarize_segments:
+                        print(f"Содержимое diarize_segments: {diarize_segments}")
+                        print(f"Атрибуты diarize_segments: {dir(diarize_segments) if hasattr(diarize_segments, '__dir__') else 'N/A'}")
+                    else:
+                        print("Диаризация не выполнена")
                     
                     # Пробуем получить информацию о спикерах из диаризации
-                    try:
-                        if hasattr(diarize_segments, 'get_timeline'):
-                            timeline = diarize_segments.get_timeline()
-                            print(f"Timeline диаризации: {len(timeline) if timeline else 0} сегментов")
-                            if timeline:
-                                for i, segment in enumerate(timeline[:3]):  # Показываем первые 3 сегмента
-                                    print(f"      Сегмент {i+1}: {segment}")
-                    except Exception as timeline_error:
-                        print(f"Не удалось получить timeline: {timeline_error}")
-                    
-                    self._update_progress(90)
-                    
-                    # Объединяем результаты диаризации с транскрипцией
-                    print("   Объединяем результаты диаризации...")
-                    try:
-                        print(f"Результат транскрипции до диаризации: {len(result.get('segments', []))} сегментов")
+                    if diarize_segments:
+                        try:
+                            if hasattr(diarize_segments, 'get_timeline'):
+                                timeline = diarize_segments.get_timeline()
+                                print(f"Timeline диаризации: {len(timeline) if timeline else 0} сегментов")
+                                if timeline:
+                                    for i, segment in enumerate(timeline[:3]):  # Показываем первые 3 сегмента
+                                        print(f"      Сегмент {i+1}: {segment}")
+                        except Exception as timeline_error:
+                            print(f"Не удалось получить timeline: {timeline_error}")
                         
-                        # Показываем первые сегменты транскрипции
-                        for i, seg in enumerate(result.get('segments', [])[:3]):
-                            print(f"      Сегмент {i+1}: {seg.get('text', '')[:50]}... (start: {seg.get('start', 'N/A')}, end: {seg.get('end', 'N/A')})")
+                        self._update_progress(90)
                         
-                        result_with_speakers = whisperx.assign_word_speakers(diarize_segments, result)
-                        
-                        print(f"Результат после assign_word_speakers: {len(result_with_speakers.get('segments', []))} сегментов")
-                        
-                        # Проверяем, что результат корректный
-                        if (isinstance(result_with_speakers, dict) and 
-                            'segments' in result_with_speakers and 
-                            len(result_with_speakers['segments']) > 0):
+                        # Объединяем результаты диаризации с транскрипцией
+                        print("   Объединяем результаты диаризации...")
+                        try:
+                            print(f"Результат транскрипции до диаризации: {len(result.get('segments', []))} сегментов")
                             
-                            # Показываем первые сегменты после объединения
-                            for i, seg in enumerate(result_with_speakers['segments'][:3]):
-                                speaker = seg.get('speaker', 'N/A')
-                                text = seg.get('text', '')[:50]
-                                print(f"      Сегмент {i+1}: Speaker {speaker} - {text}...")
+                            # Показываем первые сегменты транскрипции
+                            for i, seg in enumerate(result.get('segments', [])[:3]):
+                                print(f"      Сегмент {i+1}: {seg.get('text', '')[:50]}... (start: {seg.get('start', 'N/A')}, end: {seg.get('end', 'N/A')})")
                             
-                            # Проверяем, что у сегментов есть информация о спикерах
-                            has_speakers = any('speaker' in segment for segment in result_with_speakers['segments'])
+                            result_with_speakers = whisperx.assign_word_speakers(diarize_segments, result)
                             
-                            if has_speakers:
-                                result = result_with_speakers
-                                # Форматируем результат с диаризацией
-                                transcript = self._format_transcript_with_speakers(result)
-                                print("Диаризация завершена успешно")
-                            else:
-                                print("Диаризация не добавила информацию о спикерах")
-                                print("Пробуем альтернативный способ...")
+                            print(f"Результат после assign_word_speakers: {len(result_with_speakers.get('segments', []))} сегментов")
+                            
+                            # Проверяем, что результат корректный
+                            if (isinstance(result_with_speakers, dict) and 
+                                'segments' in result_with_speakers and 
+                                len(result_with_speakers['segments']) > 0):
                                 
-                                                        # Пробуем альтернативный способ - ручное объединение
-                        manual_result = self._manual_assign_speakers(diarize_segments, result)
-                        if manual_result:
-                            print("Альтернативная диаризация успешна")
-                            # Форматируем результат в строку
-                            transcript = self._format_transcript_with_speakers(manual_result)
-                        else:
-                            transcript = self._format_simple_transcript(result)
-                            transcript = self._format_simple_transcript(result)
+                                # Показываем первые сегменты после объединения
+                                for i, seg in enumerate(result_with_speakers['segments'][:3]):
+                                    speaker = seg.get('speaker', 'N/A')
+                                    text = seg.get('text', '')[:50]
+                                    print(f"      Сегмент {i+1}: Speaker {speaker} - {text}...")
+                                
+                                # Проверяем, что у сегментов есть информация о спикерах
+                                has_speakers = any('speaker' in segment for segment in result_with_speakers['segments'])
+                                
+                                if has_speakers:
+                                    result = result_with_speakers
+                                    # Форматируем результат с диаризацией
+                                    transcript = self._format_transcript_with_speakers(result)
+                                    print("Диаризация завершена успешно")
+                                else:
+                                    print("Диаризация не добавила информацию о спикерах")
+                                    print("Пробуем альтернативный способ...")
+                                    
+                                    # Пробуем альтернативный способ - ручное объединение
+                                    manual_result = self._manual_assign_speakers(diarize_segments, result)
+                                    if manual_result:
+                                        print("Альтернативная диаризация успешна")
+                                        # Форматируем результат в строку
+                                        transcript = self._format_transcript_with_speakers(manual_result)
+                                    else:
+                                        print("Альтернативная диаризация не удалась, используем простую транскрипцию")
+                                        transcript = self._format_simple_transcript(result)
+                                        
+                        except Exception as assign_error:
+                            print(f"Ошибка объединения диаризации: {assign_error}")
+                            print(f"Тип ошибки: {type(assign_error)}")
+                            import traceback
+                            traceback.print_exc()
                             
-                    except Exception as assign_error:
-                        print(f"Ошибка объединения диаризации: {assign_error}")
-                        print(f"Тип ошибки: {type(assign_error)}")
-                        import traceback
-                        traceback.print_exc()
-                        
-                        # Пробуем альтернативный способ
-                        print("Пробуем альтернативный способ диаризации...")
-                        manual_result = self._manual_assign_speakers(diarize_segments, result)
-                        if manual_result:
-                            # Форматируем результат в строку
-                            transcript = self._format_transcript_with_speakers(manual_result)
-                        else:
-                            transcript = self._format_simple_transcript(result)
+                            # Пробуем альтернативный способ
+                            print("Пробуем альтернативный способ диаризации...")
+                            manual_result = self._manual_assign_speakers(diarize_segments, result)
+                            if manual_result:
+                                # Форматируем результат в строку
+                                transcript = self._format_transcript_with_speakers(manual_result)
+                            else:
+                                transcript = self._format_simple_transcript(result)
+                    else:
+                        print("Диаризация не выполнена, используем простую транскрипцию")
+                        transcript = self._format_simple_transcript(result)
                 
                 else:
                     print("Локальный пайплайн диаризации недоступен")
@@ -434,33 +478,45 @@ class WhisperXTranscriber:
     def _format_transcript_with_speakers(self, result: Dict) -> str:
         """Форматирует транскрипт с информацией о спикерах в простом формате времени"""
         try:
+            print(f"=== Форматирование с диаризацией ===")
+            print(f"Тип result: {type(result)}")
+            print(f"Ключи result: {list(result.keys()) if isinstance(result, dict) else 'N/A'}")
+            
             transcript = []
             
             # Проверяем, что у нас есть сегменты
             segments = result.get("segments", [])
+            print(f"Количество сегментов: {len(segments)}")
             if not segments:
                 print("Нет сегментов для форматирования")
                 return self._format_simple_transcript(result)
             
             # Форматируем каждый сегмент отдельно - без группировки
             for i, segment in enumerate(segments):
+                print(f"Обработка сегмента {i+1}: {segment}")
+                
                 # Получаем информацию о спикере
                 speaker = segment.get("speaker", None)
                 text = segment.get("text", "").strip()
                 start_time = segment.get("start", 0)
                 
+                print(f"  Speaker: {speaker}, Start: {start_time}, Text: {text[:50]}...")
+                
                 # Если нет информации о спикере, используем номер сегмента
                 if speaker is None:
                     speaker = f"Спикер_{i+1}"
+                    print(f"  Используем дефолтный speaker: {speaker}")
                 
                 # Если текст пустой, пропускаем
                 if not text:
+                    print(f"  Пропускаем пустой текст")
                     continue
                 
                 # Форматируем в простом виде: "12:23 Спикер_1: текст"
                 time_str = self._format_time_simple(start_time)
                 formatted_line = f"{time_str} {speaker}: {text}"
                 transcript.append(formatted_line)
+                print(f"  Добавлена строка: {formatted_line[:50]}...")
             
             # Если получился пустой результат, используем простую транскрипцию
             if not transcript:

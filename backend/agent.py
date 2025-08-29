@@ -1,5 +1,5 @@
 from llama_cpp import Llama
-from config import MODEL_PATH
+from backend.config.config import MODEL_PATH
 import os
 import glob
 import json
@@ -7,7 +7,7 @@ import json
 # Класс для хранения настроек модели
 class ModelSettings:
     def __init__(self):
-        self.settings_file = "llm_settings.json"
+        self.settings_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), "llm_settings.json")
         # Настройки модели по умолчанию
         self.default_settings = {
             "context_size": 2048,      # Размер контекста
@@ -78,7 +78,7 @@ VERBOSE_OUTPUT = model_settings.get("verbose")
 
 # Поиск доступных моделей
 def find_available_model():
-    models_dir = os.path.join(os.path.dirname(__file__), 'models')
+    models_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'models')
     if not os.path.exists(models_dir):
         print(f"Директория с моделями не существует: {models_dir}")
         return None

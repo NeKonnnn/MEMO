@@ -8,13 +8,13 @@ import time
 import json
 from pathlib import Path
 from vosk import Model, KaldiRecognizer
-from agent import ask_agent
-from memory import save_to_memory
+from backend.agent import ask_agent
+from backend.memory import save_to_memory
 
 # Константы
 SAMPLE_RATE = 16000
-VOSK_MODEL_PATH = "model_small"
-SILERO_MODELS_DIR = os.path.join(os.path.dirname(__file__), 'silero_models')
+VOSK_MODEL_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "model_small")
+SILERO_MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'silero_models')
 MODELS_URLS = {
     'ru': 'https://models.silero.ai/models/tts/ru/v3_1_ru.pt',
     'en': 'https://models.silero.ai/models/tts/en/v3_en.pt'

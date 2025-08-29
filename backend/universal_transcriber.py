@@ -2,8 +2,8 @@ import os
 from typing import Optional, Callable, Tuple
 import logging
 import traceback
-from transcriber import Transcriber
-from whisperx_transcriber import WhisperXTranscriber
+from backend.transcriber import Transcriber
+from backend.whisperx_transcriber import WhisperXTranscriber
 
 class UniversalTranscriber:
     """
@@ -61,8 +61,9 @@ class UniversalTranscriber:
                     self.logger.info("WhisperX инициализирован успешно")
                 except Exception as whisper_error:
                     self.logger.error(f"Ошибка инициализации WhisperX: {whisper_error}")
-                    self.logger.error(f"Traceback: {traceback}")
-                    raise
+                    self.logger.error(f"Traceback: {traceback.format_exc()}")
+                    # Не делаем fallback на Vosk - WhisperX нужен для диаризации
+                    raise Exception(f"WhisperX необходим для диаризации по ролям. Ошибка: {whisper_error}")
             else:
                 self.logger.info("Инициализация Vosk...")
                 try:
@@ -75,20 +76,8 @@ class UniversalTranscriber:
                     raise
         except Exception as e:
             self.logger.error(f"Ошибка инициализации {self.engine}: {e}")
-            # Fallback на Vosk если WhisperX не удалось инициализировать
-            if self.engine == "whisperx":
-                self.logger.warning("Fallback на Vosk из-за ошибки WhisperX...")
-                try:
-                    self.engine = "vosk"
-                    self.vosk_transcriber = Transcriber()
-                    self.current_transcriber = self.vosk_transcriber
-                    self.logger.info("Fallback на Vosk выполнен успешно")
-                except Exception as fallback_error:
-                    self.logger.error(f"Ошибка fallback на Vosk: {fallback_error}")
-                    self.logger.error(f"Traceback: {traceback.format_exc()}")
-                    raise
-            else:
-                raise
+            # Убираем fallback логику - если WhisperX не работает, транскрайбер не будет работать
+            raise
     
     def switch_engine(self, engine: str) -> bool:
         """
@@ -103,6 +92,11 @@ class UniversalTranscriber:
         if engine.lower() == self.engine:
             self.logger.debug(f"Движок {engine} уже активен")
             return True
+        
+        # Предупреждение о потере диаризации при переключении на Vosk
+        if engine.lower() == "vosk":
+            self.logger.warning("⚠️ Внимание: Vosk не поддерживает диаризацию по ролям!")
+            self.logger.warning("Для диаризации рекомендуется использовать WhisperX")
         
         self.logger.info(f"Переключение движка с {self.engine} на {engine.lower()}")
         
@@ -179,6 +173,22 @@ class UniversalTranscriber:
         self.logger.info(f"Начало транскрибации аудио файла: {audio_path}")
         self.logger.debug(f"Используется движок: {self.engine}")
         
+        # Приоритет диаризации: всегда используем WhisperX если он доступен
+        if self.whisperx_transcriber:
+            self.logger.info("Используем WhisperX для диаризации по ролям...")
+            try:
+                result = self.whisperx_transcriber.transcribe_audio_file(audio_path)
+                if result[0]:
+                    self.logger.info("Транскрибация с диаризацией завершена успешно")
+                else:
+                    self.logger.error(f"Ошибка транскрибации с диаризацией: {result[1]}")
+                return result
+            except Exception as e:
+                self.logger.error(f"Ошибка WhisperX транскрибации: {e}")
+                # Fallback на текущий движок только если WhisperX полностью не работает
+                self.logger.warning("Fallback на текущий движок...")
+        
+        # Fallback на текущий движок
         if self.current_transcriber:
             try:
                 # Вызываем правильный метод в зависимости от движка
@@ -239,6 +249,38 @@ class UniversalTranscriber:
         else:
             self.logger.error("Транскрайбер не инициализирован")
             return False, "Транскрайбер не инициализирован"
+    
+    def transcribe_with_diarization(self, audio_path: str) -> Tuple[bool, str]:
+        """
+        Принудительно транскрибирует аудио файл с диаризацией используя WhisperX
+        
+        Args:
+            audio_path: Путь к аудио файлу
+            
+        Returns:
+            Tuple[bool, str]: (успех, результат или ошибка)
+        """
+        self.logger.info(f"Принудительная транскрибация с диаризацией: {audio_path}")
+        
+        if not self.whisperx_transcriber:
+            self.logger.error("WhisperX недоступен для диаризации")
+            return False, "WhisperX недоступен для диаризации по ролям"
+        
+        try:
+            self.logger.info("Используем WhisperX для диаризации по ролям...")
+            result = self.whisperx_transcriber.transcribe_audio_file(audio_path)
+            
+            if result[0]:
+                self.logger.info("Диаризация с WhisperX завершена успешно")
+            else:
+                self.logger.error(f"Ошибка диаризации с WhisperX: {result[1]}")
+            
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка диаризации с WhisperX: {e}")
+            self.logger.error(f"Traceback: {traceback.format_exc()}")
+            return False, f"Ошибка диаризации: {e}"
     
     def get_engine_info(self) -> dict:
         """Возвращает информацию о текущем движке"""

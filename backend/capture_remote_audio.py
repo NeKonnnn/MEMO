@@ -2,8 +2,7 @@ import os
 import sys
 import time
 import argparse
-from .system_audio_capture import WasapiLoopbackCapture
-from .transcriber import Transcriber
+from . import WasapiLoopbackCapture, Transcriber
 
 def main():
     parser = argparse.ArgumentParser(description="Запись и транскрибация звука собеседника из удаленных встреч/звонков")

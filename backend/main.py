@@ -26,7 +26,7 @@ sys.path.insert(0, root_dir)
 
 # Импорты из оригинального MemoAI
 try:
-    from agent import ask_agent, model_settings, update_model_settings, reload_model_by_path, get_model_info, initialize_model
+    from backend.agent import ask_agent, model_settings, update_model_settings, reload_model_by_path, get_model_info, initialize_model
 
 except ImportError as e:
     print(f"Ошибка импорта agent: {e}")
@@ -40,17 +40,18 @@ except ImportError as e:
     initialize_model = None
     
 try:
-    from memory import save_dialog_entry, load_dialog_history, clear_dialog_history, get_recent_dialog_history
+    from backend.memory import save_dialog_entry, load_dialog_history, clear_dialog_history, get_recent_dialog_history
 
 except ImportError as e:
     print(f"Ошибка импорта memory: {e}")
     save_dialog_entry = None
+    load_dialog_entry = None
     load_dialog_history = None
     clear_dialog_history = None
     get_recent_dialog_history = None
     
 try:
-    from voice import speak_text, recognize_speech, recognize_speech_from_file, check_vosk_model
+    from backend.voice import speak_text, recognize_speech, recognize_speech_from_file, check_vosk_model
 
 except ImportError as e:
     print(f"Ошибка импорта voice: {e}")
@@ -60,7 +61,7 @@ except ImportError as e:
     check_vosk_model = None
 
 try:
-    from document_processor import DocumentProcessor
+    from backend.document_processor import DocumentProcessor
 except ImportError:
     print("Предупреждение: модуль document_processor не найден")
     DocumentProcessor = None
@@ -75,7 +76,7 @@ try:
     logger = logging.getLogger(__name__)
     
     logger.info("Попытка импорта universal_transcriber...")
-    from universal_transcriber import UniversalTranscriber
+    from backend.universal_transcriber import UniversalTranscriber
     logger.info("universal_transcriber импортирован успешно")
 except ImportError as e:
     logger.error(f"Ошибка импорта universal_transcriber: {e}")
@@ -91,7 +92,7 @@ except Exception as e:
     
 try:
     logger.info("Попытка импорта online_transcription...")
-    from online_transcription import OnlineTranscriber
+    from backend.online_transcription import OnlineTranscriber
     logger.info("online_transcription импортирован успешно")
 except ImportError as e:
     logger.error(f"Ошибка импорта online_transcription: {e}")
@@ -800,7 +801,7 @@ async def get_chat_history(limit: int = 50):
         try:
             import json
             import os
-            from config import MEMORY_PATH
+            from backend.config.config import MEMORY_PATH
             
             dialog_file = os.path.join(MEMORY_PATH, "dialog_history_dialog.json")
             
@@ -855,7 +856,7 @@ async def clear_chat_history():
         # Попытка прямого удаления файлов если модуль memory недоступен
         try:
             import os
-            from config import MEMORY_PATH
+            from backend.config.config import MEMORY_PATH
             
             dialog_file = os.path.join(MEMORY_PATH, "dialog_history_dialog.json")
             memory_file = os.path.join(MEMORY_PATH, "dialog_history.txt")
@@ -1315,8 +1316,8 @@ async def query_document(request: DocumentQueryRequest):
 
 @app.post("/api/transcribe/upload")
 async def transcribe_file(file: UploadFile = File(...)):
-    """Транскрибировать аудио/видео файл"""
-    logger.info(f"=== Начало транскрибации файла: {file.filename} ===")
+    """Транскрибировать аудио/видео файл с диаризацией по ролям"""
+    logger.info(f"=== Начало транскрибации файла с диаризацией: {file.filename} ===")
     
     if not transcriber:
         logger.error("Transcriber не доступен")
@@ -1335,18 +1336,27 @@ async def transcribe_file(file: UploadFile = File(...)):
         
         logger.info(f"Файл сохранен, размер: {len(content)} байт")
         
-        # Транскрибируем
-        logger.info(f"Начинаем транскрибацию с движком: {current_transcription_engine}")
-        success, result = transcriber.transcribe_audio_file(file_path)
+        # Транскрибируем с принудительной диаризацией
+        logger.info(f"Начинаем транскрибацию с диаризацией по ролям...")
+        
+        # Проверяем, поддерживает ли транскрайбер диаризацию
+        if hasattr(transcriber, 'transcribe_with_diarization'):
+            logger.info("Используем принудительную диаризацию...")
+            success, result = transcriber.transcribe_with_diarization(file_path)
+        else:
+            logger.info("Используем стандартную транскрибацию...")
+            success, result = transcriber.transcribe_audio_file(file_path)
+        
         logger.info(f"Результат транскрибации: success={success}, result_length={len(str(result)) if result else 0}")
         
         if success:
-            logger.info("Транскрибация завершена успешно")
+            logger.info("Транскрибация с диаризацией завершена успешно")
             return {
                 "transcription": result,
                 "filename": file.filename,
                 "success": True,
-                "timestamp": datetime.now().isoformat()
+                "timestamp": datetime.now().isoformat(),
+                "diarization": True
             }
         else:
             logger.error(f"Ошибка транскрибации: {result}")
@@ -1358,27 +1368,81 @@ async def transcribe_file(file: UploadFile = File(...)):
         logger.error(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/api/transcribe/youtube")
-async def transcribe_youtube(request: YouTubeTranscribeRequest):
-    """Транскрибировать видео с YouTube"""
-    logger.info(f"=== Начало YouTube транскрибации: {request.url} ===")
+@app.post("/api/transcribe/upload/diarization")
+async def transcribe_file_with_diarization(file: UploadFile = File(...)):
+    """Принудительно транскрибировать аудио/видео файл с диаризацией по ролям"""
+    logger.info(f"=== Начало принудительной диаризации файла: {file.filename} ===")
     
     if not transcriber:
         logger.error("Transcriber не доступен")
         raise HTTPException(status_code=503, detail="Transcriber не доступен")
         
     try:
-        logger.info("Начинаем YouTube транскрибацию...")
+        # Сохраняем файл
+        import tempfile
+        temp_dir = tempfile.gettempdir()
+        file_path = os.path.join(temp_dir, f"media_diarization_{datetime.now().timestamp()}_{file.filename}")
+        logger.info(f"Временный путь файла для диаризации: {file_path}")
+        
+        with open(file_path, "wb") as f:
+            content = await file.read()
+            f.write(content)
+        
+        logger.info(f"Файл сохранен, размер: {len(content)} байт")
+        
+        # Принудительная диаризация с WhisperX
+        logger.info("Начинаем принудительную диаризацию по ролям...")
+        
+        if hasattr(transcriber, 'transcribe_with_diarization'):
+            success, result = transcriber.transcribe_with_diarization(file_path)
+        else:
+            logger.warning("Транскрайбер не поддерживает диаризацию, используем стандартную транскрибацию")
+            success, result = transcriber.transcribe_audio_file(file_path)
+        
+        logger.info(f"Результат диаризации: success={success}, result_length={len(str(result)) if result else 0}")
+        
+        if success:
+            logger.info("Диаризация завершена успешно")
+            return {
+                "transcription": result,
+                "filename": file.filename,
+                "success": True,
+                "timestamp": datetime.now().isoformat(),
+                "diarization": True,
+                "forced_diarization": True
+            }
+        else:
+            logger.error(f"Ошибка диаризации: {result}")
+            raise HTTPException(status_code=400, detail=result)
+            
+    except Exception as e:
+        logger.error(f"Ошибка в эндпоинте диаризации: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/transcribe/youtube")
+async def transcribe_youtube(request: YouTubeTranscribeRequest):
+    """Транскрибировать видео с YouTube с диаризацией по ролям"""
+    logger.info(f"=== Начало YouTube транскрибации с диаризацией: {request.url} ===")
+    
+    if not transcriber:
+        logger.error("Transcriber не доступен")
+        raise HTTPException(status_code=503, detail="Transcriber не доступен")
+        
+    try:
+        logger.info("Начинаем YouTube транскрибацию с диаризацией...")
         success, result = transcriber.transcribe_youtube(request.url)
         logger.info(f"Результат YouTube транскрибации: success={success}, result_length={len(str(result)) if result else 0}")
         
         if success:
-            logger.info("YouTube транскрибация завершена успешно")
+            logger.info("YouTube транскрибация с диаризацией завершена успешно")
             return {
                 "transcription": result,
                 "url": request.url,
                 "success": True,
-                "timestamp": datetime.now().isoformat()
+                "timestamp": datetime.now().isoformat(),
+                "diarization": True
             }
         else:
             logger.error(f"Ошибка YouTube транскрибации: {result}")

@@ -1,4 +1,4 @@
-from config import MEMORY_PATH
+from backend.config.config import MEMORY_PATH
 import json
 import os
 

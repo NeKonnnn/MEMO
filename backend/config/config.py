@@ -1,15 +1,14 @@
 """
-Конфигурация путей к локальным моделям WhisperX и диаризации
-Этот файл обновляется автоматически скриптом download_whisperx_models.py
+Конфигурация путей к локальным моделям WhisperX и диаризации для backend
 """
 
 import os
 from pathlib import Path
 
-# Получаем абсолютный путь к корневой директории проекта
-PROJECT_ROOT = Path(__file__).parent.absolute()
+# Получаем абсолютный путь к корневой директории проекта (на уровень выше backend)
+PROJECT_ROOT = Path(__file__).parent.parent.parent.absolute()
 
-# Пути к папкам с моделями
+# Пути к папкам с моделями (относительно корня проекта)
 WHISPERX_MODELS_DIR = str(PROJECT_ROOT / "whisperx_models")
 DIARIZE_MODELS_DIR = str(PROJECT_ROOT / "diarize_models")
 
