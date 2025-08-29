@@ -24,11 +24,27 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 root_dir = os.path.dirname(current_dir)
 sys.path.insert(0, root_dir)
 
+# Настройка логирования в самом начале
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='[%(asctime)s] %(levelname)s [Backend] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
+logger.info("Логирование настроено")
+
 # Импорты из оригинального MemoAI
 try:
+    logger.info("Попытка импорта agent...")
     from backend.agent import ask_agent, model_settings, update_model_settings, reload_model_by_path, get_model_info, initialize_model
+    logger.info("agent импортирован успешно")
+    if ask_agent:
+        logger.info("ask_agent функция доступна")
+    else:
+        logger.warning("ask_agent функция не доступна")
 
 except ImportError as e:
+    logger.error(f"Ошибка импорта agent: {e}")
     print(f"Ошибка импорта agent: {e}")
     print(f"Текущий путь: {os.getcwd()}")
     print(f"Python path: {sys.path}")
@@ -38,12 +54,38 @@ except ImportError as e:
     reload_model_by_path = None
     get_model_info = None
     initialize_model = None
+except Exception as e:
+    logger.error(f"Неожиданная ошибка при импорте agent: {e}")
+    import traceback
+    logger.error(f"Traceback: {traceback.format_exc()}")
+    ask_agent = None
+    model_settings = None
+    update_model_settings = None
+    reload_model_by_path = None
+    get_model_info = None
+    initialize_model = None
     
 try:
+    logger.info("Попытка импорта memory...")
     from backend.memory import save_dialog_entry, load_dialog_history, clear_dialog_history, get_recent_dialog_history
+    logger.info("memory импортирован успешно")
+    if save_dialog_entry:
+        logger.info("save_dialog_entry функция доступна")
+    else:
+        logger.warning("save_dialog_entry функция не доступна")
 
 except ImportError as e:
+    logger.error(f"Ошибка импорта memory: {e}")
     print(f"Ошибка импорта memory: {e}")
+    save_dialog_entry = None
+    load_dialog_entry = None
+    load_dialog_history = None
+    clear_dialog_history = None
+    get_recent_dialog_history = None
+except Exception as e:
+    logger.error(f"Неожиданная ошибка при импорте memory: {e}")
+    import traceback
+    logger.error(f"Traceback: {traceback.format_exc()}")
     save_dialog_entry = None
     load_dialog_entry = None
     load_dialog_history = None
@@ -51,30 +93,41 @@ except ImportError as e:
     get_recent_dialog_history = None
     
 try:
+    logger.info("Попытка импорта voice...")
     from backend.voice import speak_text, recognize_speech, recognize_speech_from_file, check_vosk_model
+    logger.info("voice импортирован успешно")
 
 except ImportError as e:
+    logger.error(f"Ошибка импорта voice: {e}")
     print(f"Ошибка импорта voice: {e}")
+    speak_text = None
+    recognize_speech = None
+    recognize_speech_from_file = None
+    check_vosk_model = None
+except Exception as e:
+    logger.error(f"Неожиданная ошибка при импорте voice: {e}")
+    import traceback
+    logger.error(f"Traceback: {traceback.format_exc()}")
     speak_text = None
     recognize_speech = None
     recognize_speech_from_file = None
     check_vosk_model = None
 
 try:
+    logger.info("Попытка импорта document_processor...")
     from backend.document_processor import DocumentProcessor
-except ImportError:
+    logger.info("document_processor импортирован успешно")
+except ImportError as e:
+    logger.error(f"Ошибка импорта document_processor: {e}")
     print("Предупреждение: модуль document_processor не найден")
+    DocumentProcessor = None
+except Exception as e:
+    logger.error(f"Неожиданная ошибка при импорте document_processor: {e}")
+    import traceback
+    logger.error(f"Traceback: {traceback.format_exc()}")
     DocumentProcessor = None
     
 try:
-    import logging
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format='[%(asctime)s] %(levelname)s [Backend] %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-    logger = logging.getLogger(__name__)
-    
     logger.info("Попытка импорта universal_transcriber...")
     from backend.universal_transcriber import UniversalTranscriber
     logger.info("universal_transcriber импортирован успешно")
@@ -94,6 +147,10 @@ try:
     logger.info("Попытка импорта online_transcription...")
     from backend.online_transcription import OnlineTranscriber
     logger.info("online_transcription импортирован успешно")
+    if OnlineTranscriber:
+        logger.info("OnlineTranscriber класс доступен")
+    else:
+        logger.warning("OnlineTranscriber класс не доступен")
 except ImportError as e:
     logger.error(f"Ошибка импорта online_transcription: {e}")
     logger.error(f"Traceback: {traceback.format_exc()}")
@@ -148,9 +205,45 @@ app.mount("/socket.io", socket_app)
 logger.info("=== Инициализация сервисов ===")
 
 try:
+    logger.info("Импортируем DocumentProcessor...")
     doc_processor = DocumentProcessor() if DocumentProcessor else None
     if doc_processor:
         logger.info("DocumentProcessor инициализирован успешно")
+        # Проверяем состояние
+        doc_list = doc_processor.get_document_list()
+        logger.info(f"Начальное состояние документов: {doc_list}")
+        logger.info(f"Количество документов: {len(doc_list) if doc_list else 0}")
+        
+        # Проверяем атрибуты
+        logger.info(f"Vectorstore доступен: {hasattr(doc_processor, 'vectorstore')}")
+        logger.info(f"Documents доступен: {hasattr(doc_processor, 'documents')}")
+        logger.info(f"Doc_names доступен: {hasattr(doc_processor, 'doc_names')}")
+        logger.info(f"Embeddings доступен: {hasattr(doc_processor, 'embeddings')}")
+        
+        if hasattr(doc_processor, 'vectorstore'):
+            logger.info(f"Vectorstore значение: {doc_processor.vectorstore is not None}")
+            if doc_processor.vectorstore:
+                logger.info("Vectorstore инициализирован успешно")
+            else:
+                logger.warning("Vectorstore не инициализирован")
+        if hasattr(doc_processor, 'documents'):
+            logger.info(f"Documents значение: {len(doc_processor.documents) if doc_processor.documents else 0}")
+            if doc_processor.documents:
+                logger.info("Documents коллекция содержит документы")
+            else:
+                logger.info("Documents коллекция пуста")
+        if hasattr(doc_processor, 'doc_names'):
+            logger.info(f"Doc_names значение: {len(doc_processor.doc_names) if doc_processor.doc_names else 0}")
+            if doc_processor.doc_names:
+                logger.info("Doc_names содержит имена документов")
+            else:
+                logger.info("Doc_names пуст")
+        if hasattr(doc_processor, 'embeddings'):
+            logger.info(f"Embeddings значение: {doc_processor.embeddings is not None}")
+            if doc_processor.embeddings:
+                logger.info("Embeddings модель загружена успешно")
+            else:
+                logger.warning("Embeddings модель не загружена")
     else:
         logger.warning("DocumentProcessor не доступен")
 except Exception as e:
@@ -162,7 +255,10 @@ try:
     if UniversalTranscriber:
         logger.info("Инициализация UniversalTranscriber с движком whisperx...")
         transcriber = UniversalTranscriber(engine="whisperx")
-        logger.info("UniversalTranscriber инициализирован успешно")
+        if transcriber:
+            logger.info("UniversalTranscriber инициализирован успешно")
+        else:
+            logger.warning("UniversalTranscriber не удалось создать")
     else:
         logger.warning("UniversalTranscriber не доступен")
         transcriber = None
@@ -172,11 +268,16 @@ except Exception as e:
     transcriber = None
 
 try:
-    online_transcriber = OnlineTranscriber() if OnlineTranscriber else None
-    if online_transcriber:
-        logger.info("OnlineTranscriber инициализирован успешно")
+    if OnlineTranscriber:
+        logger.info("Инициализация OnlineTranscriber...")
+        online_transcriber = OnlineTranscriber()
+        if online_transcriber:
+            logger.info("OnlineTranscriber инициализирован успешно")
+        else:
+            logger.warning("OnlineTranscriber не удалось создать")
     else:
-        logger.warning("OnlineTranscriber не доступен")
+        logger.warning("OnlineTranscriber класс не доступен")
+        online_transcriber = None
 except Exception as e:
     logger.error(f"Ошибка инициализации OnlineTranscriber: {e}")
     logger.error(f"Traceback: {traceback.format_exc()}")
@@ -337,6 +438,49 @@ async def chat_message(sid, data):
                 logger.error(f"Ошибка планирования задачи для chunk: {e}")
         
         try:
+            # =============================================
+            # ЛОГИКА ОБРАБОТКИ С ДОКУМЕНТАМИ (как в WebSocket)
+            # =============================================
+            final_message = user_message
+            
+            # Проверяем наличие документов и используем их контекст
+            if doc_processor:
+                logger.info("Socket.IO: doc_processor доступен")
+                doc_list = doc_processor.get_document_list()
+                logger.info(f"Socket.IO: список документов: {doc_list}")
+                
+                if doc_list and len(doc_list) > 0:
+                    logger.info(f"Socket.IO: найдены документы: {doc_list}")
+                    # Используем document processor для ответа с контекстом документов
+                    logger.info("Socket.IO: используем document processor для ответа с контекстом документов")
+                    
+                    # Получаем контекст из документов
+                    try:
+                        doc_context = doc_processor.get_document_context(user_message)
+                        logger.info(f"Socket.IO: получен контекст документов, длина: {len(doc_context) if doc_context else 0} символов")
+                        
+                        if doc_context:
+                            # Формируем промпт с контекстом документов (упрощенный)
+                            final_message = f"""Документы: {doc_context}
+
+Вопрос: {user_message}
+
+Ответь на основе документов."""
+                            
+                            logger.info("Socket.IO: отправляем промпт с контекстом в AI agent")
+                        else:
+                            logger.warning("Socket.IO: контекст документов пуст, используем исходное сообщение")
+                            
+                    except Exception as e:
+                        logger.error(f"Socket.IO: ошибка при получении контекста документов: {e}")
+                        # Fallback к обычному сообщению
+                        logger.info("Socket.IO: используем fallback к исходному сообщению")
+                else:
+                    logger.info("Socket.IO: список документов пуст, используем исходное сообщение")
+            else:
+                logger.info("Socket.IO: doc_processor не доступен, используем исходное сообщение")
+            
+            # Генерация ответа
             if streaming:
                 # Потоковая генерация в отдельном потоке
                 import concurrent.futures
@@ -344,12 +488,13 @@ async def chat_message(sid, data):
                     response = await asyncio.get_event_loop().run_in_executor(
                         executor,
                         ask_agent,
-                        user_message,
+                        final_message,
                         history,
                         None,  # max_tokens
                         True,  # streaming
                         sync_stream_callback
                     )
+                logger.info(f"Socket.IO: получен потоковый ответ, длина: {len(response)} символов")
             else:
                 # Обычная генерация в отдельном потоке
                 import concurrent.futures
@@ -357,12 +502,13 @@ async def chat_message(sid, data):
                     response = await asyncio.get_event_loop().run_in_executor(
                         executor,
                         ask_agent,
-                        user_message,
+                        final_message,
                         history,
                         None,  # max_tokens
                         False,  # streaming
                         None   # stream_callback
                     )
+                logger.info(f"Socket.IO: получен ответ, длина: {len(response)} символов")
             
             # Сохраняем ответ
             save_dialog_entry("assistant", response)
@@ -372,6 +518,7 @@ async def chat_message(sid, data):
                 'response': response,
                 'timestamp': datetime.now().isoformat()
             }, room=sid)
+            logger.info("Socket.IO: финальное сообщение отправлено")
             
         except Exception as e:
             logger.error(f"Ошибка генерации: {e}")
@@ -477,12 +624,37 @@ async def chat_with_ai(message: ChatMessage):
         # Получаем историю диалога
         history = get_recent_dialog_history(max_entries=20) if get_recent_dialog_history else []
         
-        # Отправляем запрос к модели
-        response = ask_agent(
-            message.message,
-            history=history,
-            streaming=False  # Для REST API используем обычный режим
-        )
+        # Проверяем, есть ли загруженные документы
+        logger.info(f"doc_processor доступен: {doc_processor is not None}")
+        if doc_processor:
+            doc_list = doc_processor.get_document_list()
+            logger.info(f"Список документов: {doc_list}")
+            logger.info(f"Количество документов: {len(doc_list) if doc_list else 0}")
+            
+            if doc_list and len(doc_list) > 0:
+                logger.info(f"Найдены документы: {doc_list}")
+                # Используем document processor для ответа с контекстом документов
+                logger.info("Используем document processor для ответа с контекстом документов")
+                response = doc_processor.process_query(message.message, ask_agent)
+                logger.info(f"Получен ответ от document processor, длина: {len(response)} символов")
+            else:
+                logger.info("Список документов пуст, используем обычный AI agent")
+                # Отправляем запрос к модели без контекста документов
+                response = ask_agent(
+                    message.message,
+                    history=history,
+                    streaming=False  # Для REST API используем обычный режим
+                )
+                logger.info(f"Получен ответ от AI agent, длина: {len(response)} символов")
+        else:
+            logger.info("doc_processor не доступен, используем обычный AI agent")
+            # Отправляем запрос к модели без контекста документов
+            response = ask_agent(
+                message.message,
+                history=history,
+                streaming=False  # Для REST API используем обычный режим
+            )
+            logger.info(f"Получен ответ от AI agent, длина: {len(response)} символов")
         
         # Сохраняем в память
         save_dialog_entry("user", message.message)
@@ -535,21 +707,107 @@ async def websocket_chat(websocket: WebSocket):
                     pass
             
             try:
-                if streaming:
-                    # Потоковая генерация
-                    response = ask_agent(
-                        user_message,
-                        history=history,
-                        streaming=True,
-                        stream_callback=stream_callback
-                    )
+                # Проверяем, есть ли загруженные документы
+                logger.info(f"WebSocket: doc_processor доступен: {doc_processor is not None}")
+                if doc_processor:
+                    doc_list = doc_processor.get_document_list()
+                    logger.info(f"WebSocket: список документов: {doc_list}")
+                    logger.info(f"WebSocket: количество документов: {len(doc_list) if doc_list else 0}")
+                    logger.info(f"WebSocket: doc_list is None: {doc_list is None}")
+                    logger.info(f"WebSocket: doc_list == []: {doc_list == []}")
+                    logger.info(f"WebSocket: bool(doc_list): {bool(doc_list)}")
+                    
+                    if doc_list and len(doc_list) > 0:
+                        logger.info(f"WebSocket: найдены документы: {doc_list}")
+                        # Используем document processor для ответа с контекстом документов
+                        logger.info("WebSocket: используем document processor для ответа с контекстом документов")
+                        
+                        # Получаем контекст из документов
+                        try:
+                            doc_context = doc_processor.get_document_context(user_message)
+                            logger.info(f"WebSocket: получен контекст документов, длина: {len(doc_context) if doc_context else 0} символов")
+                            
+                            # Формируем промпт с контекстом документов
+                            enhanced_prompt = f"""Контекст из загруженных документов:
+{doc_context}
+
+Вопрос пользователя: {user_message}
+
+Пожалуйста, ответьте на вопрос пользователя, используя информацию из предоставленных документов. Если в документах нет информации для ответа, честно скажите об этом."""
+                            
+                            logger.info("WebSocket: отправляем промпт с контекстом в AI agent")
+                            
+                            if streaming:
+                                response = ask_agent(
+                                    enhanced_prompt,
+                                    history=history,
+                                    streaming=True,
+                                    stream_callback=stream_callback
+                                )
+                            else:
+                                response = ask_agent(
+                                    enhanced_prompt,
+                                    history=history,
+                                    streaming=False
+                                )
+                            
+                            logger.info(f"WebSocket: получен ответ от AI agent с контекстом документов, длина: {len(response)} символов")
+                            
+                        except Exception as e:
+                            logger.error(f"WebSocket: ошибка при получении контекста документов: {e}")
+                            # Fallback к обычному AI agent
+                            if streaming:
+                                response = ask_agent(
+                                    user_message,
+                                    history=history,
+                                    streaming=True,
+                                    stream_callback=stream_callback
+                                )
+                            else:
+                                response = ask_agent(
+                                    user_message,
+                                    history=history,
+                                    streaming=False
+                                )
+                            logger.info(f"WebSocket: использован fallback к обычному AI agent")
+                    else:
+                        logger.info("WebSocket: список документов пуст, используем обычный AI agent")
+                        if streaming:
+                            # Потоковая генерация
+                            response = ask_agent(
+                                user_message,
+                                history=history,
+                                streaming=True,
+                                stream_callback=stream_callback
+                            )
+                            logger.info(f"WebSocket: получен потоковый ответ от AI agent, длина: {len(response)} символов")
+                        else:
+                            # Обычная генерация
+                            response = ask_agent(
+                                user_message,
+                                history=history,
+                                streaming=False
+                            )
+                            logger.info(f"WebSocket: получен ответ от AI agent, длина: {len(response)} символов")
                 else:
-                    # Обычная генерация
-                    response = ask_agent(
-                        user_message,
-                        history=history,
-                        streaming=False
-                    )
+                    logger.info("WebSocket: doc_processor не доступен, используем обычный AI agent")
+                    if streaming:
+                        # Потоковая генерация
+                        response = ask_agent(
+                            user_message,
+                            history=history,
+                            streaming=True,
+                            stream_callback=stream_callback
+                        )
+                        logger.info(f"WebSocket: получен потоковый ответ от AI agent, длина: {len(response)} символов")
+                    else:
+                        # Обычная генерация
+                        response = ask_agent(
+                            user_message,
+                            history=history,
+                            streaming=False
+                        )
+                        logger.info(f"WebSocket: получен ответ от AI agent, длина: {len(response)} символов")
                 
                 # Сохраняем ответ
                 save_dialog_entry("assistant", response)
@@ -1262,7 +1520,10 @@ async def update_transcription_settings(settings: TranscriptionSettings):
 @app.post("/api/documents/upload")
 async def upload_document(file: UploadFile = File(...)):
     """Загрузить и обработать документ"""
+    logger.info(f"=== Загрузка документа: {file.filename} ===")
+    
     if not doc_processor:
+        logger.error("Document processor не доступен")
         raise HTTPException(status_code=503, detail="Document processor не доступен")
         
     try:
@@ -1270,37 +1531,88 @@ async def upload_document(file: UploadFile = File(...)):
         import tempfile
         temp_dir = tempfile.gettempdir()
         file_path = os.path.join(temp_dir, f"doc_{datetime.now().timestamp()}_{file.filename}")
+        logger.info(f"Временный путь файла: {file_path}")
         
         with open(file_path, "wb") as f:
             content = await file.read()
             f.write(content)
         
+        logger.info(f"Файл сохранен, размер: {len(content)} байт")
+        
         # Обрабатываем документ
+        logger.info("Начинаем обработку документа...")
+        logger.info(f"Файл существует: {os.path.exists(file_path)}")
+        logger.info(f"Размер файла: {os.path.getsize(file_path) if os.path.exists(file_path) else 'N/A'} байт")
+        
         success, message = doc_processor.process_document(file_path)
+        logger.info(f"Результат обработки: success={success}, message={message}")
         
         if success:
+            # Получаем список документов после обработки
+            doc_list = doc_processor.get_document_list()
+            logger.info(f"Список документов после обработки: {doc_list}")
+            logger.info(f"Количество документов: {len(doc_list) if doc_list else 0}")
+            
+            # Проверяем состояние vectorstore
+            if hasattr(doc_processor, 'vectorstore'):
+                logger.info(f"Vectorstore доступен: {doc_processor.vectorstore is not None}")
+                if hasattr(doc_processor, 'documents'):
+                    logger.info(f"Количество документов в коллекции: {len(doc_processor.documents) if doc_processor.documents else 0}")
+            
+            # Очищаем временный файл
+            try:
+                os.remove(file_path)
+                logger.info(f"Временный файл удален: {file_path}")
+            except Exception as e:
+                logger.warning(f"Не удалось удалить временный файл: {e}")
+            
             return {
                 "message": "Документ успешно загружен и обработан",
                 "filename": file.filename,
                 "success": True
             }
         else:
+            # Очищаем временный файл в случае ошибки
+            try:
+                os.remove(file_path)
+                logger.info(f"Временный файл удален после ошибки: {file_path}")
+            except Exception as e:
+                logger.warning(f"Не удалось удалить временный файл после ошибки: {e}")
+            
             raise HTTPException(status_code=400, detail=message)
             
     except Exception as e:
+        logger.error(f"Ошибка при загрузке документа: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/documents/query")
 async def query_document(request: DocumentQueryRequest):
     """Задать вопрос по загруженному документу"""
+    logger.info(f"=== Запрос к документам: {request.query[:50]}... ===")
+    
     if not doc_processor:
+        logger.error("Document processor не доступен")
         raise HTTPException(status_code=503, detail="Document processor не доступен")
         
     try:
         if not ask_agent:
+            logger.error("AI agent не доступен")
             raise HTTPException(status_code=503, detail="AI agent не доступен")
         
+        # Получаем список документов
+        doc_list = doc_processor.get_document_list()
+        logger.info(f"Доступные документы: {doc_list}")
+        logger.info(f"Количество документов: {len(doc_list) if doc_list else 0}")
+        
+        # Проверяем состояние vectorstore
+        if hasattr(doc_processor, 'vectorstore'):
+            logger.info(f"Vectorstore доступен: {doc_processor.vectorstore is not None}")
+            if hasattr(doc_processor, 'documents'):
+                logger.info(f"Количество документов в коллекции: {len(doc_processor.documents) if doc_processor.documents else 0}")
+        
         response = doc_processor.process_query(request.query, ask_agent)
+        logger.info(f"Получен ответ от document processor, длина: {len(response)} символов")
+        
         return {
             "response": response,
             "query": request.query,
@@ -1308,6 +1620,68 @@ async def query_document(request: DocumentQueryRequest):
             "timestamp": datetime.now().isoformat()
         }
     except Exception as e:
+        logger.error(f"Ошибка при запросе к документам: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/documents")
+async def get_documents():
+    """Получить список загруженных документов"""
+    logger.info("=== Получение списка документов ===")
+    
+    if not doc_processor:
+        logger.error("Document processor не доступен")
+        raise HTTPException(status_code=503, detail="Document processor не доступен")
+        
+    try:
+        doc_list = doc_processor.get_document_list()
+        logger.info(f"Список документов: {doc_list}")
+        
+        return {
+            "documents": doc_list,
+            "count": len(doc_list) if doc_list else 0,
+            "success": True
+        }
+    except Exception as e:
+        logger.error(f"Ошибка при получении списка документов: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/documents/{filename}")
+async def delete_document(filename: str):
+    """Удалить документ по имени файла"""
+    logger.info(f"=== Удаление документа: {filename} ===")
+    
+    if not doc_processor:
+        logger.error("Document processor не доступен")
+        raise HTTPException(status_code=503, detail="Document processor не доступен")
+        
+    try:
+        # Получаем список документов
+        doc_list = doc_processor.get_document_list()
+        logger.info(f"Доступные документы до удаления: {doc_list}")
+        
+        if not doc_list or filename not in doc_list:
+            logger.warning(f"Документ {filename} не найден")
+            raise HTTPException(status_code=404, detail=f"Документ {filename} не найден")
+        
+        # Удаляем документ
+        success = doc_processor.remove_document(filename)
+        logger.info(f"Результат удаления: {success}")
+        
+        if success:
+            # Получаем обновленный список документов
+            new_doc_list = doc_processor.get_document_list()
+            logger.info(f"Документы после удаления: {new_doc_list}")
+            
+            return {
+                "message": f"Документ {filename} успешно удален",
+                "success": True,
+                "remaining_documents": new_doc_list
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Не удалось удалить документ")
+            
+    except Exception as e:
+        logger.error(f"Ошибка при удалении документа: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # ================================

@@ -4,7 +4,7 @@ import { ThemeProvider, createTheme } from '@mui/material/styles';
 import { CssBaseline, Box, IconButton, AppBar, Toolbar } from '@mui/material';
 import { Menu as MenuIcon } from '@mui/icons-material';
 import Sidebar from './components/Sidebar';
-import ChatPage from './pages/ChatPage';
+import UnifiedChatPage from './pages/UnifiedChatPage';
 import VoicePage from './pages/VoicePage';
 import DocumentsPage from './pages/DocumentsPage';
 import TranscriptionPage from './pages/TranscriptionPage';
@@ -109,28 +109,30 @@ function App() {
                   overflow: 'hidden',
                   marginLeft: sidebarOpen ? 0 : '-280px',
                   transition: 'margin-left 0.3s ease',
+                  position: 'relative',
                 }}
               >
-                {/* AppBar с кнопкой меню (показывается только когда сайдбар закрыт) */}
-                {!sidebarOpen && (
-                  <AppBar position="static" sx={{ zIndex: 1201 }}>
-                    <Toolbar>
-                      <IconButton
-                        edge="start"
-                        color="inherit"
-                        aria-label="menu"
-                        onClick={toggleSidebar}
-                        sx={{ mr: 2 }}
-                      >
-                        <MenuIcon />
-                      </IconButton>
-                    </Toolbar>
-                  </AppBar>
-                )}
+                {/* Кнопка меню - всегда видна для открытия сайдбара */}
+                <Box
+                  sx={{
+                    position: 'fixed',
+                    top: 16,
+                    left: sidebarOpen ? 296 : 16,
+                    zIndex: 1200,
+                    transition: 'left 0.3s ease',
+                  }}
+                >
+                  <IconButton
+                    onClick={toggleSidebar}
+                    className="menu-button"
+                  >
+                    <MenuIcon />
+                  </IconButton>
+                </Box>
                 
                 <Routes>
-                  <Route path="/" element={<ChatPage />} />
-                  <Route path="/chat" element={<ChatPage />} />
+                  <Route path="/" element={<UnifiedChatPage isDarkMode={isDarkMode} />} />
+                  <Route path="/chat" element={<UnifiedChatPage isDarkMode={isDarkMode} />} />
                   <Route path="/voice" element={<VoicePage />} />
                   <Route path="/documents" element={<DocumentsPage />} />
                   <Route path="/transcription" element={<TranscriptionPage />} />

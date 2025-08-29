@@ -25,6 +25,8 @@ export const API_CONFIG = {
     // Документы
     DOCUMENTS_UPLOAD: '/api/documents/upload',
     DOCUMENTS_QUERY: '/api/documents/query',
+    DOCUMENTS_LIST: '/api/documents',
+    DOCUMENTS_DELETE: '/api/documents',
     
     // Модели
     MODELS: '/api/models',

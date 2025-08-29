@@ -182,7 +182,7 @@ export default function HistoryPage() {
           <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
             <Box>
               <Typography variant="h5" fontWeight="600">
-                📚 История диалогов
+                История диалогов
               </Typography>
               <Typography variant="body2" color="text.secondary">
                 Просмотр и управление историей общения с AI ассистентом

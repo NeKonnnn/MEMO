@@ -41,9 +41,7 @@ interface SidebarProps {
 }
 
 const menuItems = [
-  { path: '/chat', label: 'Текстовый чат', icon: ChatIcon },
-  { path: '/voice', label: 'Голосовой чат', icon: MicIcon },
-  { path: '/documents', label: 'Документы', icon: DocumentIcon },
+  { path: '/chat', label: 'AI Ассистент', icon: ChatIcon, description: 'Чат, голос, документы' },
   { path: '/transcription', label: 'Транскрибация', icon: TranscribeIcon },
   { path: '/history', label: 'История', icon: HistoryIcon },
   { path: '/settings', label: 'Настройки', icon: SettingsIcon },
@@ -99,9 +97,7 @@ export default function Sidebar({ open, onToggle, isDarkMode, onToggleTheme }: S
             </Typography>
           </Box>
         </Box>
-        <IconButton onClick={onToggle} sx={{ color: 'white' }}>
-          <MenuIcon />
-        </IconButton>
+
       </Box>
 
       {/* Статус соединения */}
@@ -145,8 +141,12 @@ export default function Sidebar({ open, onToggle, isDarkMode, onToggleTheme }: S
                 </ListItemIcon>
                 <ListItemText 
                   primary={item.label}
+                  secondary={item.description}
                   primaryTypographyProps={{
                     fontWeight: isActive ? 600 : 400,
+                  }}
+                  secondaryTypographyProps={{
+                    sx: { opacity: 0.8, fontSize: '0.75rem' }
                   }}
                 />
               </ListItemButton>

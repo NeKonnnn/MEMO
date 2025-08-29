@@ -267,3 +267,297 @@
     page-break-before: always;
   }
 }
+
+/* Стили для кнопки меню */
+.menu-button {
+  position: fixed;
+  top: 16px;
+  z-index: 1200;
+  background: rgba(0, 0, 0, 0.7);
+  backdrop-filter: blur(10px);
+  color: white;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  transition: all 0.2s ease;
+}
+
+.menu-button:hover {
+  background: rgba(0, 0, 0, 0.8);
+  border-color: rgba(255, 255, 255, 0.3);
+  transform: scale(1.05);
+}
+
+/* Стили для чата на весь экран */
+.fullscreen-chat {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  transition: background 0.3s ease;
+}
+
+.chat-messages-area {
+  flex: 1;
+  overflow: auto;
+  padding: 16px;
+  background: transparent;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+}
+
+.chat-input-area {
+  background: rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(10px);
+  padding: 20px;
+}
+
+/* Улучшенные стили для сообщений */
+.message-bubble {
+  transition: all 0.3s ease;
+  border-radius: 16px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+  margin-bottom: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.message-bubble:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 25px rgba(0, 0, 0, 0.15);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+/* Адаптация для светлой темы */
+.message-bubble[data-theme="light"] {
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+  border: 1px solid rgba(0, 0, 0, 0.1);
+}
+
+.message-bubble[data-theme="light"]:hover {
+  box-shadow: 0 8px 25px rgba(0, 0, 0, 0.12);
+  border-color: rgba(0, 0, 0, 0.15);
+}
+
+/* Стили для кнопок управления */
+.control-buttons {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 16px;
+  justify-content: flex-end;
+}
+
+.control-button {
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 8px;
+  transition: all 0.2s ease;
+  color: rgba(255, 255, 255, 0.8) !important;
+}
+
+.control-button:hover {
+  background: rgba(255, 255, 255, 0.2);
+  border-color: rgba(255, 255, 255, 0.3);
+  transform: scale(1.05);
+  color: white !important;
+}
+
+/* Стили для поля ввода */
+.chat-input-area .MuiTextField-root {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  transition: background 0.3s ease;
+}
+
+.chat-input-area .MuiTextField-root .MuiOutlinedInput-root {
+  color: white;
+  transition: color 0.3s ease;
+}
+
+.chat-input-area .MuiTextField-root .MuiOutlinedInput-root .MuiOutlinedInput-notchedOutline {
+  border-color: rgba(255, 255, 255, 0.3);
+  transition: border-color 0.3s ease;
+}
+
+.chat-input-area .MuiTextField-root .MuiOutlinedInput-root:hover .MuiOutlinedInput-notchedOutline {
+  border-color: rgba(255, 255, 255, 0.5);
+}
+
+.chat-input-area .MuiTextField-root .MuiOutlinedInput-root.Mui-focused .MuiOutlinedInput-notchedOutline {
+  border-color: #2196f3;
+}
+
+/* Адаптация для светлой темы */
+.chat-input-area[data-theme="light"] .MuiTextField-root {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+.chat-input-area[data-theme="light"] .MuiTextField-root .MuiOutlinedInput-root {
+  color: #333;
+}
+
+.chat-input-area[data-theme="light"] .MuiTextField-root .MuiOutlinedInput-root .MuiOutlinedInput-notchedOutline {
+  border-color: rgba(0, 0, 0, 0.2);
+}
+
+.chat-input-area[data-theme="light"] .MuiTextField-root .MuiOutlinedInput-root:hover .MuiOutlinedInput-notchedOutline {
+  border-color: rgba(0, 0, 0, 0.3);
+}
+
+/* Стили для кнопок в поле ввода */
+.chat-input-area .MuiIconButton-root {
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  transition: all 0.2s ease;
+}
+
+.chat-input-area .MuiIconButton-root:hover {
+  background: rgba(255, 255, 255, 0.2);
+  border-color: rgba(255, 255, 255, 0.3);
+  transform: scale(1.05);
+}
+
+/* Стили для загруженных файлов */
+.file-attachment {
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 8px;
+  transition: all 0.2s ease;
+}
+
+.file-attachment:hover {
+  background: rgba(255, 255, 255, 0.15);
+  border-color: rgba(255, 255, 255, 0.3);
+}
+
+/* Стили для Markdown элементов */
+.message-bubble ul {
+  margin: 8px 0;
+  padding-left: 20px;
+}
+
+.message-bubble ol {
+  margin: 8px 0;
+  padding-left: 20px;
+}
+
+.message-bubble li {
+  margin: 4px 0;
+  line-height: 1.5;
+}
+
+.message-bubble blockquote {
+  border-left: 4px solid;
+  border-color: inherit;
+  padding-left: 16px;
+  margin: 16px 0;
+  font-style: italic;
+  opacity: 0.8;
+}
+
+.message-bubble hr {
+  border: none;
+  border-top: 1px solid;
+  border-color: inherit;
+  margin: 16px 0;
+  opacity: 0.3;
+}
+
+.message-bubble h1,
+.message-bubble h2,
+.message-bubble h3 {
+  margin: 16px 0 8px 0;
+  font-weight: bold;
+  line-height: 1.3;
+}
+
+.message-bubble h1 {
+  font-size: 1.5rem;
+}
+
+.message-bubble h2 {
+  font-size: 1.3rem;
+}
+
+.message-bubble h3 {
+  font-size: 1.1rem;
+}
+
+.message-bubble code {
+  background-color: rgba(175, 184, 193, 0.2);
+  padding: 2px 4px;
+  border-radius: 3px;
+  font-family: monospace;
+  font-size: 0.875em;
+}
+
+.message-bubble pre {
+  background-color: rgba(0, 0, 0, 0.1);
+  padding: 12px;
+  border-radius: 4px;
+  overflow-x: auto;
+  margin: 8px 0;
+}
+
+.message-bubble pre code {
+  background: none;
+  padding: 0;
+  border-radius: 0;
+}
+
+.message-bubble a {
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-color: currentColor;
+  text-underline-offset: 2px;
+}
+
+.message-bubble a:hover {
+  text-decoration: none;
+}
+
+.message-bubble img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 4px;
+  margin: 8px 0;
+  display: block;
+}
+
+/* Стили для кнопки копирования сообщений */
+.message-copy-button {
+  color: rgba(255, 255, 255, 0.7) !important;
+  transition: all 0.2s ease;
+}
+
+.message-copy-button:hover {
+  color: rgba(255, 255, 255, 0.9) !important;
+  transform: scale(1.1);
+  background-color: rgba(255, 255, 255, 0.1) !important;
+}
+
+/* Адаптация для светлой темы */
+.message-bubble[data-theme="light"] code {
+  background-color: rgba(0, 0, 0, 0.1);
+}
+
+.message-bubble[data-theme="light"] pre {
+  background-color: rgba(0, 0, 0, 0.05);
+}
+
+.message-bubble[data-theme="light"] a {
+  color: #1976d2;
+}
+
+.message-bubble[data-theme="light"] a:hover {
+  color: #1565c0;
+}
+
+/* Адаптация кнопки копирования для светлой темы */
+.message-copy-button[data-theme="light"] {
+  color: rgba(0, 0, 0, 0.6) !important;
+}
+
+.message-copy-button[data-theme="light"]:hover {
+  color: rgba(0, 0, 0, 0.8) !important;
+  background-color: rgba(0, 0, 0, 0.1) !important;
+}
