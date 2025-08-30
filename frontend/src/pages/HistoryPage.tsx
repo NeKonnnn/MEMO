@@ -117,7 +117,7 @@ export default function HistoryPage() {
     const text = filteredHistory
       .map(entry => {
         const timestamp = new Date(entry.timestamp).toLocaleString('ru-RU');
-        const role = entry.role === 'user' ? 'Пользователь' : 'MemoAI';
+        const role = entry.role === 'user' ? 'Пользователь' : 'Газик ИИ';
         return `[${timestamp}] ${role}: ${entry.content}`;
       })
       .join('\n\n');
@@ -126,7 +126,7 @@ export default function HistoryPage() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `memoai_history_${new Date().toISOString().split('T')[0]}.txt`;
+    a.download = `gazikii_history_${new Date().toISOString().split('T')[0]}.txt`;
     a.click();
     URL.revokeObjectURL(url);
     
@@ -185,7 +185,7 @@ export default function HistoryPage() {
                 История диалогов
               </Typography>
               <Typography variant="body2" color="text.secondary">
-                Просмотр и управление историей общения с AI ассистентом
+                Просмотр и управление историей общения с Газик ИИ
               </Typography>
             </Box>
             
@@ -352,7 +352,7 @@ export default function HistoryPage() {
                           <Box sx={{ flexGrow: 1, minWidth: 0 }}>
                             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5 }}>
                               <Typography variant="subtitle2" fontWeight="500">
-                                {isUser ? 'Вы' : 'MemoAI'}
+                                {isUser ? 'Вы' : 'Газик ИИ'}
                               </Typography>
                               <Chip
                                 size="small"
@@ -442,7 +442,7 @@ export default function HistoryPage() {
             </Avatar>
             <Box>
               <Typography variant="h6">
-                {selectedEntry?.role === 'user' ? 'Сообщение пользователя' : 'Ответ MemoAI'}
+                {selectedEntry?.role === 'user' ? 'Сообщение пользователя' : 'Ответ Газик ИИ'}
               </Typography>
               <Typography variant="caption" color="text.secondary">
                 {selectedEntry && formatTimestamp(selectedEntry.timestamp)}

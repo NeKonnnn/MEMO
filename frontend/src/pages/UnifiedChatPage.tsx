@@ -532,9 +532,9 @@ export default function UnifiedChatPage({ isDarkMode }: UnifiedChatPageProps) {
               >
                 {isUser ? <PersonIcon /> : <BotIcon />}
               </Avatar>
-              <Typography variant="caption" sx={{ opacity: 0.8, fontSize: '0.75rem', fontWeight: 500 }}>
-                {isUser ? 'Вы' : 'AI Ассистент'}
-              </Typography>
+                             <Typography variant="caption" sx={{ opacity: 0.8, fontSize: '0.75rem', fontWeight: 500 }}>
+                 {isUser ? 'Вы' : 'Газик ИИ'}
+               </Typography>
               <Typography variant="caption" sx={{ ml: 'auto', opacity: 0.6, fontSize: '0.7rem' }}>
                 {formatTimestamp(message.timestamp)}
               </Typography>
@@ -785,9 +785,9 @@ export default function UnifiedChatPage({ isDarkMode }: UnifiedChatPageProps) {
                }}
              >
                <BotIcon sx={{ fontSize: 64, mb: 2, opacity: 0.7, color: '#2196f3' }} />
-               <Typography variant="h6" sx={{ mb: 1, color: isDarkMode ? 'white' : '#333' }}>
-                 Добро пожаловать в AI Ассистент!
-               </Typography>
+                               <Typography variant="h6" sx={{ mb: 1, color: isDarkMode ? 'white' : '#333' }}>
+                  Добро пожаловать в Газик ИИ!
+                </Typography>
                <Typography variant="body1" sx={{ color: isDarkMode ? 'rgba(255, 255, 255, 0.9)' : 'rgba(0, 0, 0, 0.9)' }}>
                  Задайте вопрос, загрузите документ или используйте голосовой ввод
                </Typography>
@@ -852,7 +852,7 @@ export default function UnifiedChatPage({ isDarkMode }: UnifiedChatPageProps) {
                textAlign: 'center', 
                color: isDarkMode ? 'white' : '#333' 
              }}>
-               AI думает...
+                               Газик ИИ думает...
              </Typography>
            </Box>
          )}

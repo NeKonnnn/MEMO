@@ -122,7 +122,7 @@ export default function SettingsPage() {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          text: `Это тестовое сообщение для проверки голоса ${voiceName}.`,
+          text: `Привет, я Газик И И ${voiceName}.`,
           voice_id: voiceSettings.voice_id,
           voice_speaker: voiceName,
         }),
@@ -431,7 +431,7 @@ export default function SettingsPage() {
         <Card sx={{ mb: 3 }}>
           <CardContent>
             <Typography variant="h6" gutterBottom>
-              Настройки AI модели
+                              Настройки модели Газик ИИ
             </Typography>
             
             <Box display="grid" gridTemplateColumns="repeat(auto-fit, minmax(250px, 1fr))" gap={2}>
@@ -745,10 +745,10 @@ export default function SettingsPage() {
             <Box display="grid" gridTemplateColumns="repeat(auto-fit, minmax(200px, 1fr))" gap={2}>
               <Box>
                 <Typography variant="subtitle2" color="text.secondary">
-                  Версия MemoAI
+                  Версия веб-приложения
                 </Typography>
                 <Typography variant="body1">
-                  Web Interface v1.0.0
+                  Web Interface v1.0.3
                 </Typography>
               </Box>
               

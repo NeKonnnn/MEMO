@@ -41,7 +41,7 @@ interface SidebarProps {
 }
 
 const menuItems = [
-  { path: '/chat', label: 'AI Ассистент', icon: ChatIcon, description: 'Чат, голос, документы' },
+  { path: '/chat', label: 'Чат', icon: ChatIcon, description: 'Чат, голос, документы' },
   { path: '/transcription', label: 'Транскрибация', icon: TranscribeIcon },
   { path: '/history', label: 'История', icon: HistoryIcon },
   { path: '/settings', label: 'Настройки', icon: SettingsIcon },
@@ -90,7 +90,7 @@ export default function Sidebar({ open, onToggle, isDarkMode, onToggleTheme }: S
           </Avatar>
           <Box>
             <Typography variant="h6" fontWeight="bold">
-              MemoAI
+              Газик ИИ
             </Typography>
             <Typography variant="caption" sx={{ opacity: 0.8 }}>
               Web Interface

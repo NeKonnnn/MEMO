@@ -120,7 +120,7 @@ export default function ChatPage() {
                 {isUser ? <PersonIcon fontSize="small" /> : <BotIcon fontSize="small" />}
               </Avatar>
               <Typography variant="caption" sx={{ opacity: 0.8 }}>
-                {isUser ? 'Вы' : 'MemoAI'}
+                {isUser ? 'Вы' : 'ГазикИИ'}
               </Typography>
               <Typography variant="caption" sx={{ opacity: 0.6, ml: 'auto' }}>
                 {formatTimestamp(message.timestamp)}
@@ -221,7 +221,7 @@ export default function ChatPage() {
                 Текстовый чат
               </Typography>
               <Typography variant="body2" color="text.secondary">
-                Общайтесь с вашим AI-ассистентом
+                Общайтесь с вашим ИИ-ассистентом
               </Typography>
             </Box>
             
@@ -344,10 +344,10 @@ export default function ChatPage() {
                   <BotIcon sx={{ fontSize: 40 }} />
                 </Avatar>
                 <Typography variant="h5" fontWeight="600" gutterBottom>
-                  Добро пожаловать в MemoAI! 👋
+                  Добро пожаловать в Газик ИИ! 👋
                 </Typography>
                 <Typography variant="body1" color="text.secondary" sx={{ mb: 3 }}>
-                  Я ваш персональный AI-ассистент. Задавайте любые вопросы,
+                  Я ваш персональный ассистент - Газик ИИ. Задавайте любые вопросы,
                   и я постараюсь помочь вам найти ответы.
                 </Typography>
                 <Typography variant="body2" color="text.secondary">

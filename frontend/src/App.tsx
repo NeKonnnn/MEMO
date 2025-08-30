@@ -66,14 +66,14 @@ const createAppTheme = (isDark: boolean) => createTheme({
 
 function App() {
   const [isDarkMode, setIsDarkMode] = useState(() => {
-    const saved = localStorage.getItem('memoai-dark-mode');
+    const saved = localStorage.getItem('gazikii-dark-mode');
     return saved ? JSON.parse(saved) : false;
   });
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
   useEffect(() => {
-    localStorage.setItem('memoai-dark-mode', JSON.stringify(isDarkMode));
+    localStorage.setItem('gazikii-dark-mode', JSON.stringify(isDarkMode));
   }, [isDarkMode]);
 
   const theme = createAppTheme(isDarkMode);
