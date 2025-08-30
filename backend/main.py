@@ -161,6 +161,9 @@ except Exception as e:
     logger.error(f"Traceback: {traceback.format_exc()}")
     OnlineTranscriber = None
 
+# Глобальный словарь для хранения флагов остановки генерации
+stop_generation_flags = {}
+
 # Создание Socket.IO сервера
 sio = AsyncServer(
     async_mode='asgi',
@@ -289,12 +292,17 @@ logger.info("=== Инициализация сервисов завершена 
 current_transcription_engine = "whisperx"
 current_transcription_language = "ru"
 
+# Глобальные настройки памяти
+memory_max_messages = 20
+memory_include_system_prompts = True
+memory_clear_on_restart = False
+
 # Путь к файлу настроек
 SETTINGS_FILE = os.path.join(os.path.dirname(__file__), "..", "settings.json")
 
 def load_app_settings():
     """Загрузить настройки приложения из файла"""
-    global current_transcription_engine, current_transcription_language
+    global current_transcription_engine, current_transcription_language, memory_max_messages, memory_include_system_prompts, memory_clear_on_restart
     
     try:
         if os.path.exists(SETTINGS_FILE):
@@ -304,7 +312,12 @@ def load_app_settings():
             current_transcription_engine = settings.get('transcription_engine', 'whisperx')
             current_transcription_language = settings.get('transcription_language', 'ru')
             
-            logger.info(f"Настройки загружены: engine={current_transcription_engine}, language={current_transcription_language}")
+            # Загружаем настройки памяти
+            memory_max_messages = settings.get('memory_max_messages', 20)
+            memory_include_system_prompts = settings.get('memory_include_system_prompts', True)
+            memory_clear_on_restart = settings.get('memory_clear_on_restart', False)
+            
+            logger.info(f"Настройки загружены: engine={current_transcription_engine}, language={current_transcription_language}, memory_max_messages={memory_max_messages}")
             return settings
     except Exception as e:
         logger.error(f"Ошибка загрузки настроек: {e}")
@@ -313,6 +326,9 @@ def load_app_settings():
     return {
         'transcription_engine': current_transcription_engine,
         'transcription_language': current_transcription_language,
+        'memory_max_messages': memory_max_messages,
+        'memory_include_system_prompts': memory_include_system_prompts,
+        'memory_clear_on_restart': memory_clear_on_restart,
         'current_model_path': None
     }
 
@@ -340,6 +356,15 @@ def save_app_settings(settings_to_save):
 
 # Загружаем настройки при старте
 loaded_settings = load_app_settings()
+
+# Очищаем память при перезапуске, если это настроено
+if memory_clear_on_restart and clear_dialog_history:
+    try:
+        logger.info("Очистка памяти при перезапуске (настройка включена)")
+        clear_dialog_history()
+        logger.info("Память очищена при перезапуске")
+    except Exception as e:
+        logger.warning(f"Не удалось очистить память при перезапуске: {e}")
 
 # WebSocket менеджер для управления соединениями
 class ConnectionManager:
@@ -371,11 +396,16 @@ manager = ConnectionManager()
 @sio.event
 async def connect(sid, environ):
     logger.info(f"Socket.IO client connected: {sid}")
+    # Очищаем флаг остановки при подключении
+    stop_generation_flags[sid] = False
     await sio.emit('connected', {'data': 'Connected to MemoAI'}, room=sid)
 
 @sio.event
 async def disconnect(sid):
     logger.info(f"Socket.IO client disconnected: {sid}")
+    # Удаляем флаг остановки при отключении
+    if sid in stop_generation_flags:
+        del stop_generation_flags[sid]
 
 @sio.event
 async def ping(sid, data):
@@ -388,6 +418,22 @@ async def ping(sid, data):
         }, room=sid)
     except Exception as e:
         logger.error(f"Ошибка обработки ping: {e}")
+
+@sio.event
+async def stop_generation(sid, data):
+    """Обработка команды остановки генерации через Socket.IO"""
+    logger.info(f"Socket.IO: получена команда остановки генерации от {sid}")
+    
+    # Устанавливаем флаг остановки для этого пользователя
+    stop_generation_flags[sid] = True  # True = остановить генерацию
+    
+    # Отправляем подтверждение остановки
+    await sio.emit('generation_stopped', {
+        'content': 'Генерация остановлена',
+        'timestamp': datetime.now().isoformat()
+    }, room=sid)
+    
+    logger.info(f"Socket.IO: установлен флаг остановки для {sid}")
 
 @sio.event
 async def chat_message(sid, data):
@@ -404,8 +450,11 @@ async def chat_message(sid, data):
         
         logger.info(f"Socket.IO chat: {user_message[:50]}...")
         
+        # Сбрасываем флаг остановки для нового сообщения
+        stop_generation_flags[sid] = False
+        
         # Получаем историю
-        history = get_recent_dialog_history(max_entries=20) if get_recent_dialog_history else []
+        history = get_recent_dialog_history(max_entries=memory_max_messages) if get_recent_dialog_history else []
         
         # Сохраняем сообщение пользователя
         save_dialog_entry("user", user_message)
@@ -429,19 +478,29 @@ async def chat_message(sid, data):
         # Синхронная обертка для потокового callback
         def sync_stream_callback(chunk: str, accumulated_text: str):
             try:
+                # Проверяем флаг остановки
+                if stop_generation_flags.get(sid, False):
+                    logger.info(f"Socket.IO: генерация остановлена для {sid}, возвращаем False")
+                    return False
+                
                 # Планируем выполнение в основном event loop
                 asyncio.run_coroutine_threadsafe(
                     async_stream_callback(chunk, accumulated_text), 
                     loop
                 )
+                
+                return True
             except Exception as e:
                 logger.error(f"Ошибка планирования задачи для chunk: {e}")
+                return True
         
         try:
             # =============================================
             # ЛОГИКА ОБРАБОТКИ С ДОКУМЕНТАМИ (как в WebSocket)
             # =============================================
             final_message = user_message
+            
+
             
             # Проверяем наличие документов и используем их контекст
             if doc_processor:
@@ -495,6 +554,11 @@ async def chat_message(sid, data):
                         sync_stream_callback
                     )
                 logger.info(f"Socket.IO: получен потоковый ответ, длина: {len(response)} символов")
+                
+                # Проверяем, не была ли генерация остановлена
+                if response is None:
+                    logger.info(f"Socket.IO: потоковая генерация была остановлена для {sid}")
+                    return
             else:
                 # Обычная генерация в отдельном потоке
                 import concurrent.futures
@@ -510,8 +574,19 @@ async def chat_message(sid, data):
                     )
                 logger.info(f"Socket.IO: получен ответ, длина: {len(response)} символов")
             
+            # Проверяем, не была ли запрошена остановка
+            if stop_generation_flags.get(sid, False):
+                logger.info(f"Socket.IO: генерация была остановлена для {sid}, не отправляем финальное сообщение")
+                # Очищаем флаг остановки
+                stop_generation_flags[sid] = False
+                return
+            
             # Сохраняем ответ
             save_dialog_entry("assistant", response)
+            
+            # Очищаем флаг остановки после завершения генерации
+            if sid in stop_generation_flags:
+                stop_generation_flags[sid] = False
             
             # Отправляем финальное сообщение
             await sio.emit('chat_complete', {
@@ -554,6 +629,12 @@ class ModelSettings(BaseModel):
 class VoiceSettings(BaseModel):
     voice_id: str = "ru"
     speech_rate: float = 1.0
+    voice_speaker: str = "baya"
+
+class MemorySettings(BaseModel):
+    max_messages: int = 20
+    include_system_prompts: bool = True
+    clear_on_restart: bool = False
 
 class ModelLoadRequest(BaseModel):
     model_path: str
@@ -622,7 +703,7 @@ async def chat_with_ai(message: ChatMessage):
         logger.info(f"Chat request: {message.message[:50]}...")
         
         # Получаем историю диалога
-        history = get_recent_dialog_history(max_entries=20) if get_recent_dialog_history else []
+        history = get_recent_dialog_history(max_entries=memory_max_messages) if get_recent_dialog_history else []
         
         # Проверяем, есть ли загруженные документы
         logger.info(f"doc_processor доступен: {doc_processor is not None}")
@@ -684,27 +765,32 @@ async def websocket_chat(websocket: WebSocket):
             data = await websocket.receive_text()
             message_data = json.loads(data)
             
+            # Получаем сообщение чата
             user_message = message_data.get("message", "")
             streaming = message_data.get("streaming", True)
             
             logger.info(f"WebSocket chat: {user_message[:50]}...")
             
             # Получаем историю
-            history = get_recent_dialog_history(max_entries=20) if get_recent_dialog_history else []
+            history = get_recent_dialog_history(max_entries=memory_max_messages) if get_recent_dialog_history else []
             
             # Сохраняем сообщение пользователя
             save_dialog_entry("user", user_message)
             
             # Функция для отправки частей ответа
-            async def stream_callback(chunk: str, accumulated_text: str):
+            def stream_callback(chunk: str, accumulated_text: str):
                 try:
-                    await websocket.send_text(json.dumps({
+                    logger.info(f"WebSocket: отправляем чанк, длина: {len(chunk)} символов, накоплено: {len(accumulated_text)} символов")
+                    asyncio.create_task(websocket.send_text(json.dumps({
                         "type": "chunk",
                         "chunk": chunk,
                         "accumulated": accumulated_text
-                    }))
-                except:
-                    pass
+                    })))
+                    logger.info("WebSocket: чанк успешно отправлен")
+                    return True  # Возвращаем True для продолжения
+                except Exception as e:
+                    logger.error(f"WebSocket: ошибка отправки чанка: {e}")
+                    return False
             
             try:
                 # Проверяем, есть ли загруженные документы
@@ -788,7 +874,7 @@ async def websocket_chat(websocket: WebSocket):
                                 history=history,
                                 streaming=False
                             )
-                            logger.info(f"WebSocket: получен ответ от AI agent, длина: {len(response)} символов")
+                            logger.info(f"WebSocket: получен потоковый ответ от AI agent, длина: {len(response)} символов")
                 else:
                     logger.info("WebSocket: doc_processor не доступен, используем обычный AI agent")
                     if streaming:
@@ -811,6 +897,10 @@ async def websocket_chat(websocket: WebSocket):
                 
                 # Сохраняем ответ
                 save_dialog_entry("assistant", response)
+                
+                # Очищаем флаг остановки после завершения генерации
+                if sid in stop_generation_flags:
+                    stop_generation_flags[sid] = False
                 
                 # Отправляем финальное сообщение
                 await websocket.send_text(json.dumps({
@@ -884,7 +974,7 @@ async def process_audio_data(websocket: WebSocket, data: bytes):
                 }))
                 return
                 
-            history = get_recent_dialog_history(max_entries=20) if get_recent_dialog_history else []
+            history = get_recent_dialog_history(max_entries=memory_max_messages) if get_recent_dialog_history else []
             logger.info(f"ОТПРАВЛЯЮ В LLM: текст='{recognized_text}', история={len(history)} записей")
             
             try:
@@ -1052,7 +1142,11 @@ async def websocket_voice(websocket: WebSocket):
 # ================================
 
 @app.get("/api/history")
-async def get_chat_history(limit: int = 50):
+async def get_chat_history(limit: int = None):
+    """Получить историю диалогов"""
+    # Если лимит не указан, используем настройку памяти
+    if limit is None:
+        limit = memory_max_messages if 'memory_max_messages' in globals() else 20
     """Получить историю диалогов"""
     if not get_recent_dialog_history:
         # Попытка прямого чтения файла если модуль memory недоступен
@@ -1066,12 +1160,14 @@ async def get_chat_history(limit: int = 50):
             if os.path.exists(dialog_file):
                 with open(dialog_file, "r", encoding="utf-8") as f:
                     history = json.load(f)
-                    # Ограничиваем количество записей
-                    limited_history = history[-limit:] if len(history) > limit else history
-                    logger.info(f"Загружено {len(limited_history)} записей истории из файла (модуль memory недоступен)")
+                    # Ограничиваем количество записей настройкой памяти
+                    max_entries = memory_max_messages if 'memory_max_messages' in globals() else 20
+                    limited_history = history[-max_entries:] if len(history) > max_entries else history
+                    logger.info(f"Загружено {len(limited_history)} записей истории из файла (модуль memory недоступен, лимит: {max_entries})")
                     return {
                         "history": limited_history,
                         "count": len(limited_history),
+                        "max_messages": max_entries,
                         "timestamp": datetime.now().isoformat(),
                         "source": "file_fallback"
                     }
@@ -1080,6 +1176,7 @@ async def get_chat_history(limit: int = 50):
                 return {
                     "history": [],
                     "count": 0,
+                    "max_messages": memory_max_messages if 'memory_max_messages' in globals() else 20,
                     "timestamp": datetime.now().isoformat(),
                     "source": "file_fallback",
                     "message": "Файл истории не найден"
@@ -1089,6 +1186,7 @@ async def get_chat_history(limit: int = 50):
             return {
                 "history": [],
                 "count": 0,
+                "max_messages": memory_max_messages if 'memory_max_messages' in globals() else 20,
                 "timestamp": datetime.now().isoformat(),
                 "source": "fallback_error",
                 "error": str(e)
@@ -1100,6 +1198,7 @@ async def get_chat_history(limit: int = 50):
         return {
             "history": history,
             "count": len(history),
+            "max_messages": memory_max_messages,
             "timestamp": datetime.now().isoformat(),
             "source": "memory_module"
         }
@@ -1512,6 +1611,97 @@ async def update_transcription_settings(settings: TranscriptionSettings):
     except Exception as e:
         logger.error(f"Ошибка обновления настроек транскрибации: {e}")
         raise HTTPException(status_code=500, detail=f"Ошибка обновления настроек: {str(e)}")
+
+# ================================
+# НАСТРОЙКИ ПАМЯТИ
+# ================================
+
+@app.get("/api/memory/settings")
+async def get_memory_settings():
+    """Получить настройки памяти"""
+    global memory_max_messages, memory_include_system_prompts, memory_clear_on_restart
+    
+    return {
+        "max_messages": memory_max_messages,
+        "include_system_prompts": memory_include_system_prompts,
+        "clear_on_restart": memory_clear_on_restart
+    }
+
+@app.put("/api/memory/settings")
+async def update_memory_settings(settings: MemorySettings):
+    """Обновить настройки памяти"""
+    global memory_max_messages, memory_include_system_prompts, memory_clear_on_restart
+    
+    try:
+        # Обновляем глобальные настройки
+        memory_max_messages = settings.max_messages
+        memory_include_system_prompts = settings.include_system_prompts
+        memory_clear_on_restart = settings.clear_on_restart
+        
+        logger.info(f"Настройки памяти обновлены: max_messages={memory_max_messages}, include_system_prompts={memory_include_system_prompts}, clear_on_restart={memory_clear_on_restart}")
+        
+        # Сохраняем настройки в файл
+        save_app_settings({
+            'memory_max_messages': memory_max_messages,
+            'memory_include_system_prompts': memory_include_system_prompts,
+            'memory_clear_on_restart': memory_clear_on_restart
+        })
+        
+        return {
+            "message": "Настройки памяти обновлены",
+            "success": True,
+            "settings": {
+                "max_messages": memory_max_messages,
+                "include_system_prompts": memory_include_system_prompts,
+                "clear_on_restart": memory_clear_on_restart
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Ошибка обновления настроек памяти: {e}")
+        raise HTTPException(status_code=500, detail=f"Ошибка обновления настроек памяти: {str(e)}")
+
+@app.get("/api/memory/status")
+async def get_memory_status():
+    """Получить статус памяти"""
+    try:
+        if not get_recent_dialog_history:
+            raise HTTPException(status_code=503, detail="Memory module не доступен")
+        
+        # Получаем текущую историю
+        history = get_recent_dialog_history(max_entries=memory_max_messages)
+        
+        return {
+            "message_count": len(history),
+            "max_messages": memory_max_messages,
+            "include_system_prompts": memory_include_system_prompts,
+            "clear_on_restart": memory_clear_on_restart,
+            "success": True
+        }
+        
+    except Exception as e:
+        logger.error(f"Ошибка получения статуса памяти: {e}")
+        raise HTTPException(status_code=500, detail=f"Ошибка получения статуса памяти: {str(e)}")
+
+@app.post("/api/memory/clear")
+async def clear_memory():
+    """Очистить память"""
+    try:
+        if not clear_dialog_history:
+            raise HTTPException(status_code=503, detail="Memory module не доступен")
+        
+        result = clear_dialog_history()
+        logger.info(f"Память очищена: {result}")
+        
+        return {
+            "message": "Память успешно очищена",
+            "success": True,
+            "result": result
+        }
+        
+    except Exception as e:
+        logger.error(f"Ошибка очистки памяти: {e}")
+        raise HTTPException(status_code=500, detail=f"Ошибка очистки памяти: {str(e)}")
 
 # ================================
 # РАБОТА С ДОКУМЕНТАМИ

@@ -186,7 +186,12 @@ function appReducer(state: AppState, action: AppAction): AppState {
       };
       
     case 'UPDATE_MESSAGE': {
+      console.log('🔧 UPDATE_MESSAGE вызван для ID:', action.payload.id);
+      console.log('🔧 Новый контент:', action.payload.content);
+      console.log('🔧 Новый isStreaming:', action.payload.isStreaming);
+      
       const updatedMessage = state.messages.find(msg => msg.id === action.payload.id);
+      console.log('🔧 Найдено сообщение для обновления:', updatedMessage ? 'да' : 'нет');
       
       return {
         ...state,
@@ -208,8 +213,15 @@ function appReducer(state: AppState, action: AppAction): AppState {
     }
       
     case 'APPEND_CHUNK': {
+      console.log('🔧 APPEND_CHUNK вызван для ID:', action.payload.id);
+      console.log('🔧 Текст чанка:', action.payload.chunk);
+      console.log('🔧 isStreaming:', action.payload.isStreaming);
+      
       const chunkMessage = state.messages.find(msg => msg.id === action.payload.id);
+      console.log('🔧 Найдено сообщение:', chunkMessage ? 'да' : 'нет');
+      
       const newContent = chunkMessage ? smartConcatenateChunk(chunkMessage.content, action.payload.chunk) : action.payload.chunk;
+      console.log('🔧 Новое содержимое:', newContent.substring(0, 100) + '...');
       
       return {
         ...state,
@@ -361,6 +373,11 @@ export function useAppActions() {
   return {
     addMessage: (message: Omit<Message, 'id'>) => {
       const messageId = Date.now().toString() + Math.random().toString(36).substr(2, 9);
+      console.log('🔧 ADD_MESSAGE вызван для роли:', message.role);
+      console.log('🔧 Содержимое:', message.content.substring(0, 100) + '...');
+      console.log('🔧 isStreaming:', message.isStreaming);
+      console.log('🔧 Сгенерированный ID:', messageId);
+      
       dispatch({
         type: 'ADD_MESSAGE',
         payload: {
@@ -380,6 +397,7 @@ export function useAppActions() {
     },
     
     setLoading: (loading: boolean) => {
+      console.log('🔧 SET_LOADING вызван:', loading);
       dispatch({ type: 'SET_LOADING', payload: loading });
     },
     

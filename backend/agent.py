@@ -449,6 +449,7 @@ def ask_agent(prompt, history=None, max_tokens=None, streaming=False, stream_cal
         
         # Если включен режим потоковой генерации
         if streaming and stream_callback:
+            print("ask_agent: начинаем потоковую генерацию...")
             # Инициализируем переменную для накопления текста
             accumulated_text = ""
             
@@ -464,6 +465,8 @@ def ask_agent(prompt, history=None, max_tokens=None, streaming=False, stream_cal
                 stream=True  # Включаем потоковую генерацию
             )
             
+            print("ask_agent: генератор создан, начинаем обработку чанков...")
+            
             # Обрабатываем каждый фрагмент
             chunk_counter = 0
             for output in generator:
@@ -471,12 +474,16 @@ def ask_agent(prompt, history=None, max_tokens=None, streaming=False, stream_cal
                 accumulated_text += chunk
                 chunk_counter += 1
                 
-
+                print(f"ask_agent: получен чанк #{chunk_counter}, длина: {len(chunk)} символов")
                 
                 # Вызываем колбэк с текущим фрагментом
-                stream_callback(chunk, accumulated_text)
-            
-
+                print(f"ask_agent: вызываем stream_callback для чанка #{chunk_counter}")
+                result = stream_callback(chunk, accumulated_text)
+                
+                # Если колбэк вернул False, останавливаем генерацию
+                if result is False:
+                    print("ask_agent: получен сигнал остановки от stream_callback, прерываем генерацию")
+                    return None  # Возвращаем None вместо накопленного текста
             
             return accumulated_text
         else:

@@ -32,6 +32,7 @@ import {
   ListItemIcon,
   ListItemText,
   Divider,
+  Menu,
 } from '@mui/material';
 import {
   Send as SendIcon,
@@ -51,6 +52,8 @@ import {
   TableChart as ExcelIcon,
   Delete as DeleteIcon,
   GetApp as DownloadIcon,
+  Settings as SettingsIcon,
+  Square as SquareIcon,
 } from '@mui/icons-material';
 import { useAppContext, useAppActions, Message } from '../contexts/AppContext';
 import { useSocket } from '../contexts/SocketContext';
@@ -93,6 +96,7 @@ export default function UnifiedChatPage({ isDarkMode }: UnifiedChatPageProps) {
     uploadDate: string;
   }>>([]);
   const [showDocumentDialog, setShowDocumentDialog] = useState(false);
+  const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
   
   // Refs
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -141,7 +145,7 @@ export default function UnifiedChatPage({ isDarkMode }: UnifiedChatPageProps) {
   // Context и Socket
   const { state } = useAppContext();
   const { clearMessages, showNotification, setSpeaking, setRecording } = useAppActions();
-  const { sendMessage, isConnected, reconnect } = useSocket();
+  const { sendMessage, isConnected, reconnect, stopGeneration } = useSocket();
 
   // Автоскролл к последнему сообщению
   useEffect(() => {
@@ -485,6 +489,30 @@ export default function UnifiedChatPage({ isDarkMode }: UnifiedChatPageProps) {
     }
   };
 
+  const handleMenuOpen = (event: React.MouseEvent<HTMLElement>): void => {
+    setAnchorEl(event.currentTarget);
+  };
+
+  const handleMenuClose = (): void => {
+    setAnchorEl(null);
+  };
+
+  const handleClearChat = (): void => {
+    clearMessages();
+    handleMenuClose();
+  };
+
+  const handleReconnect = (): void => {
+    reconnect();
+    handleMenuClose();
+  };
+
+  const handleStopGeneration = (): void => {
+    // Останавливаем генерацию через WebSocket
+    stopGeneration();
+    showNotification('info', 'Генерация остановлена');
+  };
+
   // ================================
   // КОМПОНЕНТЫ СООБЩЕНИЙ
   // ================================
@@ -499,7 +527,7 @@ export default function UnifiedChatPage({ isDarkMode }: UnifiedChatPageProps) {
           display: 'flex',
           flexDirection: 'column',
           alignItems: isUser ? 'flex-end' : 'flex-start',
-          mb: 1,
+          mb: 1.5, /* Увеличиваем отступ между сообщениями (соответствует CSS margin-bottom: 28px) */
           width: '100%',
         }}
         onMouseEnter={() => setIsHovered(true)}
@@ -547,31 +575,30 @@ export default function UnifiedChatPage({ isDarkMode }: UnifiedChatPageProps) {
         </Card>
         
         {/* Кнопка копирования снизу карточки - для всех сообщений при наведении */}
-        {isHovered && (
-          <Box sx={{ 
-            display: 'flex', 
-            justifyContent: 'center',
-            mt: 1,
-          }}>
-            <Tooltip title="Копировать">
-              <IconButton
-                size="small"
-                onClick={() => handleCopyMessage(message.content)}
-                className="message-copy-button"
-                data-theme={isDarkMode ? 'dark' : 'light'}
-                sx={{ 
-                  opacity: 0.7,
-                  p: 0.5,
-                  '&:hover': { 
-                    opacity: 1,
-                  },
-                }}
-              >
-                <CopyIcon fontSize="small" />
-              </IconButton>
-            </Tooltip>
-          </Box>
-        )}
+        <Box sx={{ 
+          display: 'flex', 
+          justifyContent: 'center',
+          mt: 1,
+          height: 20, /* Фиксированная высота для кнопки */
+          opacity: isHovered ? 1 : 0, /* Мгновенное появление/исчезновение */
+          visibility: isHovered ? 'visible' : 'hidden', /* Скрываем кнопку, но сохраняем место */
+        }}>
+          <Tooltip title="Копировать">
+            <IconButton
+              size="small"
+              onClick={() => handleCopyMessage(message.content)}
+              className="message-copy-button"
+              data-theme={isDarkMode ? 'dark' : 'light'}
+                             sx={{ 
+                 opacity: 0.7,
+                 p: 0.5,
+                 /* Убираем hover эффекты, чтобы кнопка была статичной */
+               }}
+            >
+              <CopyIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
+        </Box>
       </Box>
     );
   };
@@ -586,6 +613,8 @@ export default function UnifiedChatPage({ isDarkMode }: UnifiedChatPageProps) {
       onClose={() => setShowVoiceDialog(false)}
       maxWidth="sm"
       fullWidth
+      TransitionComponent={undefined}
+      transitionDuration={0}
       PaperProps={{
         sx: {
           bgcolor: 'background.paper',
@@ -605,12 +634,17 @@ export default function UnifiedChatPage({ isDarkMode }: UnifiedChatPageProps) {
             <IconButton
               size="large"
               onClick={startRecording}
+              disabled={state.isLoading && !state.messages.some(msg => msg.isStreaming)}
               sx={{
                 width: 80,
                 height: 80,
                 bgcolor: 'primary.main',
                 color: 'white',
                 '&:hover': { bgcolor: 'primary.dark' },
+                '&:disabled': {
+                  bgcolor: 'action.disabledBackground',
+                  color: 'action.disabled',
+                },
               }}
             >
               <MicIcon sx={{ fontSize: 40 }} />
@@ -691,6 +725,8 @@ export default function UnifiedChatPage({ isDarkMode }: UnifiedChatPageProps) {
       onClose={() => setShowDocumentDialog(false)}
       maxWidth="md"
       fullWidth
+      TransitionComponent={undefined}
+      transitionDuration={0}
     >
       <DialogTitle>Загрузка документов</DialogTitle>
       <DialogContent>
@@ -705,7 +741,6 @@ export default function UnifiedChatPage({ isDarkMode }: UnifiedChatPageProps) {
             p: 4,
             textAlign: 'center',
             bgcolor: isDragging ? 'action.hover' : 'background.paper',
-            transition: 'all 0.2s',
             cursor: 'pointer',
           }}
           onClick={() => fileInputRef.current?.click()}
@@ -754,19 +789,18 @@ export default function UnifiedChatPage({ isDarkMode }: UnifiedChatPageProps) {
       {/* Область сообщений */}
       <Box
         className="chat-messages-area"
-        sx={{
-          border: isDragging ? '2px dashed' : 'none',
-          borderColor: isDragging ? 'primary.main' : 'transparent',
-          bgcolor: isDragging ? 'action.hover' : 'transparent',
-          transition: 'all 0.2s',
-          position: 'relative',
-          minHeight: '60vh',
-          display: 'flex',
-          flexDirection: 'column',
-          justifyContent: state.messages.length === 0 ? 'center' : 'flex-start',
-          alignItems: 'center',
-          py: 4,
-        }}
+                 sx={{
+           border: isDragging ? '2px dashed' : 'none',
+           borderColor: isDragging ? 'primary.main' : 'transparent',
+           bgcolor: isDragging ? 'action.hover' : 'transparent',
+           position: 'relative',
+           minHeight: '60vh',
+           display: 'flex',
+           flexDirection: 'column',
+           justifyContent: state.messages.length === 0 ? 'center' : 'flex-start',
+           alignItems: 'center',
+           py: 4,
+         }}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
@@ -836,24 +870,139 @@ export default function UnifiedChatPage({ isDarkMode }: UnifiedChatPageProps) {
           )}
         </Box>
 
-                 {/* Индикатор загрузки */}
-         {state.isLoading && (
+                 {/* Индикатор размышления - показывается только до начала потоковой генерации */}
+         {state.isLoading && !state.messages.some(msg => msg.isStreaming) && (
            <Box sx={{ 
-             p: 2, 
-             bgcolor: isDarkMode ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)' 
+             width: '100%', 
+             maxWidth: '800px', 
+             mx: 'auto',
+             px: 2,
+             mb: 3,
            }}>
-             <LinearProgress sx={{ 
-               '& .MuiLinearProgress-bar': { 
-                 bgcolor: '#2196f3' 
-               } 
-             }} />
-             <Typography variant="body2" sx={{ 
-               mt: 1, 
-               textAlign: 'center', 
-               color: isDarkMode ? 'white' : '#333' 
-             }}>
-                               Газик ИИ думает...
-             </Typography>
+             <Box
+               sx={{
+                 display: 'flex',
+                 flexDirection: 'column',
+                 alignItems: 'flex-start',
+                 maxWidth: '75%',
+                 minWidth: '180px',
+               }}
+             >
+               <Card
+                 sx={{
+                   backgroundColor: isDarkMode ? 'background.paper' : '#f8f9fa',
+                   color: isDarkMode ? 'text.primary' : '#333',
+                   boxShadow: isDarkMode 
+                     ? '0 2px 8px rgba(0, 0, 0, 0.15)' 
+                     : '0 2px 8px rgba(0, 0, 0, 0.1)',
+                   width: '100%',
+                 }}
+               >
+                 <CardContent sx={{ p: 1.2, pb: 0.8 }}>
+                   <Box sx={{ display: 'flex', alignItems: 'center', mb: 0.3 }}>
+                     <Avatar
+                       sx={{
+                         width: 24,
+                         height: 24,
+                         mr: 1,
+                         bgcolor: 'secondary.main',
+                         position: 'relative',
+                         '&::before': {
+                           content: '""',
+                           position: 'absolute',
+                           top: '-2px',
+                           left: '-2px',
+                           right: '-2px',
+                           bottom: '-2px',
+                           borderRadius: '50%',
+                           background: 'radial-gradient(circle, rgba(33, 150, 243, 0.3) 0%, transparent 70%)',
+                           animation: 'thinking-glow 2s ease-in-out infinite',
+                           '@keyframes thinking-glow': {
+                             '0%, 100%': { 
+                               opacity: 0.3,
+                               transform: 'scale(1)',
+                             },
+                             '50%': { 
+                               opacity: 0.8,
+                               transform: 'scale(1.3)',
+                             },
+                           },
+                         },
+                         animation: 'thinking 2s ease-in-out infinite',
+                       }}
+                     >
+                       <BotIcon />
+                     </Avatar>
+                     <Typography variant="caption" sx={{ opacity: 0.8, fontSize: '0.75rem', fontWeight: 500 }}>
+                       Газик ИИ
+                     </Typography>
+                     <Typography variant="caption" sx={{ ml: 'auto', opacity: 0.6, fontSize: '0.7rem' }}>
+                       {new Date().toLocaleTimeString('ru-RU', {
+                         hour: '2-digit',
+                         minute: '2-digit',
+                       })}
+                     </Typography>
+                   </Box>
+                   
+                   <Box sx={{ 
+                     display: 'flex', 
+                     alignItems: 'center', 
+                     gap: 1,
+                     minHeight: '24px',
+                   }}>
+                     <Box sx={{ display: 'flex', gap: 0.5 }}>
+                       <Box
+                         sx={{
+                           width: 6,
+                           height: 6,
+                           borderRadius: '50%',
+                           bgcolor: '#2196f3',
+                           animation: 'dot1 1.4s ease-in-out infinite both',
+                           '@keyframes dot1': {
+                             '0%, 80%, 100%': { transform: 'scale(0)' },
+                             '40%': { transform: 'scale(1)' },
+                           },
+                         }}
+                       />
+                       <Box
+                         sx={{
+                           width: 6,
+                           height: 6,
+                           borderRadius: '50%',
+                           bgcolor: '#2196f3',
+                           animation: 'dot2 1.4s ease-in-out infinite both',
+                           animationDelay: '0.2s',
+                           '@keyframes dot2': {
+                             '0%, 80%, 100%': { transform: 'scale(0)' },
+                             '40%': { transform: 'scale(1)' },
+                           },
+                         }}
+                       />
+                       <Box
+                         sx={{
+                           width: 6,
+                           height: 6,
+                           borderRadius: '50%',
+                           bgcolor: '#2196f3',
+                           animation: 'dot3 1.4s ease-in-out infinite both',
+                           animationDelay: '0.4s',
+                           '@keyframes dot3': {
+                             '0%, 80%, 100%': { transform: 'scale(0)' },
+                             '40%': { transform: 'scale(1)' },
+                           },
+                         }}
+                       />
+                     </Box>
+                     <Typography variant="body2" sx={{ 
+                       color: isDarkMode ? 'rgba(255, 255, 255, 0.8)' : 'rgba(0, 0, 0, 0.8)',
+                       fontSize: '0.875rem',
+                     }}>
+                       думает...
+                     </Typography>
+                   </Box>
+                 </CardContent>
+               </Card>
+             </Box>
            </Box>
          )}
 
@@ -861,11 +1010,10 @@ export default function UnifiedChatPage({ isDarkMode }: UnifiedChatPageProps) {
          <Box
            className="chat-input-area"
            data-theme={isDarkMode ? 'dark' : 'light'}
-           sx={{
-             borderColor: isDragging ? 'primary.main' : 'divider',
-             bgcolor: isDragging ? 'action.hover' : 'transparent',
-             transition: 'all 0.2s',
-           }}
+                       sx={{
+              borderColor: isDragging ? 'primary.main' : 'divider',
+              bgcolor: isDragging ? 'action.hover' : 'transparent',
+            }}
            onDragOver={handleDragOver}
            onDragLeave={handleDragLeave}
            onDrop={handleDrop}
@@ -964,117 +1112,241 @@ export default function UnifiedChatPage({ isDarkMode }: UnifiedChatPageProps) {
             </Box>
           )}
 
-          {/* Поле ввода и кнопки */}
-          <Box className="control-buttons">
-            {/* Кнопки управления */}
-            <Box sx={{ display: 'flex', gap: 1 }}>
-              <Tooltip title="Очистить чат">
-                <IconButton 
-                  onClick={clearMessages} 
-                  color="inherit" 
-                  size="small"
-                  className="control-button"
-                >
-                  <ClearIcon />
-                </IconButton>
-              </Tooltip>
-              <Tooltip title="Переподключиться">
-                <IconButton 
-                  onClick={reconnect} 
-                  color="inherit" 
-                  size="small"
-                  className="control-button"
-                >
-                  <RefreshIcon />
-                </IconButton>
-              </Tooltip>
-            </Box>
-          </Box>
           
-          <Box
-            sx={{
-              display: 'flex',
-              alignItems: 'flex-end',
-              gap: 1,
-              mt: 2,
-            }}
-          >
-            {/* Кнопка загрузки документов */}
-            <Tooltip title="Загрузить документ">
-              <IconButton
-                onClick={() => fileInputRef.current?.click()}
-                sx={{ color: 'primary.main' }}
-                disabled={isUploading}
-              >
-                {isUploading ? <CircularProgress size={20} /> : <AttachFileIcon />}
-              </IconButton>
-            </Tooltip>
-            
-            {/* Скрытый input для выбора файла */}
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".pdf,.docx,.xlsx,.txt"
-              onChange={handleFileSelect}
-              style={{ display: 'none' }}
-            />
+          
+                     {/* Объединенное поле ввода с кнопками */}
+           <Box
+             sx={{
+               mt: 2,
+               p: 2,
+               borderRadius: 2,
+               bgcolor: isDarkMode ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)',
+               border: `1px solid ${isDarkMode ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)'}`,
+               maxWidth: '800px', // Расширяем до ширины карточек сообщений
+               width: '100%', // Занимает всю доступную ширину до maxWidth
+               mx: 'auto', // Центрируем по горизонтали
+             }}
+           >
+             {/* Поле ввода текста сверху */}
+             <TextField
+               ref={inputRef}
+               fullWidth
+               multiline
+               maxRows={4}
+               value={inputMessage}
+               onChange={(e) => setInputMessage(e.target.value)}
+               onKeyPress={handleKeyPress}
+               placeholder={
+                 !isConnected 
+                   ? "Нет соединения с сервером. Запустите backend на порту 8000" 
+                   : state.isLoading && !state.messages.some(msg => msg.isStreaming)
+                     ? "ГазикИИ думает..." 
+                     : state.isLoading && state.messages.some(msg => msg.isStreaming)
+                       ? "ГазикИИ генерирует ответ... Нажмите ⏹️ чтобы остановить"
+                       : "Чем я могу помочь вам сегодня?"
+               }
+               variant="outlined"
+               size="small"
+               disabled={!isConnected || (state.isLoading && !state.messages.some(msg => msg.isStreaming))}
+               sx={{
+                 mb: 2,
+                 '& .MuiOutlinedInput-root': {
+                   bgcolor: 'transparent',
+                   border: 'none',
+                   '&:hover': {
+                     bgcolor: 'transparent',
+                   },
+                   '&.Mui-focused': {
+                     bgcolor: 'transparent',
+                   }
+                 }
+               }}
+             />
 
-            {/* Поле ввода текста */}
-            <TextField
-              ref={inputRef}
-              fullWidth
-              multiline
-              maxRows={4}
-              value={inputMessage}
-              onChange={(e) => setInputMessage(e.target.value)}
-              onKeyPress={handleKeyPress}
-              placeholder="Спросите что-нибудь..."
-              variant="outlined"
-              size="small"
-              disabled={!isConnected || state.isLoading}
-            />
+             {/* Скрытый input для выбора файла */}
+             <input
+               ref={fileInputRef}
+               type="file"
+               accept=".pdf,.docx,.xlsx,.txt"
+               onChange={handleFileSelect}
+               style={{ display: 'none' }}
+             />
 
-            {/* Кнопка отправки */}
-            <Tooltip title="Отправить">
-              <IconButton
-                onClick={handleSendMessage}
-                disabled={!inputMessage.trim() || !isConnected || state.isLoading}
-                color="primary"
-              >
-                <SendIcon />
-              </IconButton>
-            </Tooltip>
-
-            {/* Кнопка голосового ввода */}
-            <Tooltip title="Голосовой ввод">
-              <IconButton
-                onClick={() => setShowVoiceDialog(true)}
+                           {/* Кнопки снизу */}
+              <Box
                 sx={{
-                  bgcolor: 'secondary.main',
-                  color: 'white',
-                  '&:hover': { bgcolor: 'secondary.dark' },
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 1,
+                  justifyContent: 'space-between',
                 }}
               >
-                <MicIcon />
-              </IconButton>
-            </Tooltip>
-          </Box>
+                                 {/* Левая группа кнопок */}
+                 <Box sx={{ display: 'flex', gap: 1 }}>
+                   {/* Кнопка загрузки документов */}
+                   <Tooltip title="Загрузить документ">
+                     <IconButton
+                       onClick={() => fileInputRef.current?.click()}
+                       sx={{ 
+                         color: '#2196f3',
+                         bgcolor: isDarkMode ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)',
+                         '&:hover': {
+                           bgcolor: isDarkMode ? 'rgba(255, 255, 255, 0.2)' : 'rgba(0, 0, 0, 0.2)',
+                         },
+                         '&:active': {
+                           transform: 'none',
+                         }
+                       }}
+                       disableRipple
+                       disabled={isUploading || (state.isLoading && !state.messages.some(msg => msg.isStreaming))}
+                     >
+                       {isUploading ? <CircularProgress size={20} /> : <AttachFileIcon sx={{ color: '#2196f3' }} />}
+                     </IconButton>
+                   </Tooltip>
+
+                                       {/* Кнопка меню с шестеренкой */}
+                    <Tooltip title="Дополнительные действия">
+                      <IconButton
+                        onClick={handleMenuOpen}
+                        disabled={state.isLoading && !state.messages.some(msg => msg.isStreaming)}
+                        sx={{ 
+                          color: isDarkMode ? 'rgba(255, 255, 255, 0.7)' : 'rgba(0, 0, 0, 0.7)',
+                          bgcolor: isDarkMode ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)',
+                          '&:hover': {
+                            bgcolor: isDarkMode ? 'rgba(255, 255, 255, 0.2)' : 'rgba(0, 0, 0, 0.2)',
+                          },
+                          '&:disabled': {
+                            color: isDarkMode ? 'rgba(255, 255, 255, 0.3)' : 'rgba(0, 0, 0, 0.3)',
+                            bgcolor: isDarkMode ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)',
+                          }
+                        }}
+                      >
+                        <SettingsIcon />
+                      </IconButton>
+                    </Tooltip>
+                 </Box>
+
+                                 {/* Правая группа кнопок */}
+                 <Box sx={{ display: 'flex', gap: 1 }}>
+                   {/* Кнопка отправки/остановки генерации */}
+                   {state.messages.some(msg => msg.isStreaming) ? (
+                     <Tooltip title="Прервать генерацию">
+                       <IconButton
+                         onClick={handleStopGeneration}
+                         color="error"
+                         sx={{
+                           bgcolor: 'error.main',
+                           color: 'white',
+                           '&:hover': {
+                             bgcolor: 'error.dark',
+                           },
+                           animation: 'pulse 2s ease-in-out infinite',
+                           '@keyframes pulse': {
+                             '0%': { opacity: 1 },
+                             '50%': { opacity: 0.7 },
+                             '100%': { opacity: 1 },
+                           },
+                         }}
+                       >
+                         <SquareIcon />
+                       </IconButton>
+                     </Tooltip>
+                   ) : (
+                     <Tooltip title="Отправить">
+                       <IconButton
+                         onClick={handleSendMessage}
+                         disabled={!inputMessage.trim() || !isConnected || (state.isLoading && !state.messages.some(msg => msg.isStreaming))}
+                         color="primary"
+                         sx={{
+                           bgcolor: 'primary.main',
+                           color: 'white',
+                           '&:hover': {
+                             bgcolor: 'primary.dark',
+                           },
+                           '&:disabled': {
+                             bgcolor: isDarkMode ? 'rgba(255, 255, 255, 0.15)' : 'rgba(0, 0, 0, 0.12)',
+                             color: isDarkMode ? 'rgba(255, 255, 255, 0.6)' : 'rgba(0, 0, 0, 0.26)',
+                               border: isDarkMode ? '1px solid rgba(255, 255, 255, 0.2)' : 'none',
+                           }
+                         }}
+                       >
+                         <SendIcon />
+                       </IconButton>
+                     </Tooltip>
+                   )}
+
+                  {/* Кнопка голосового ввода */}
+                  <Tooltip title="Голосовой ввод">
+                    <IconButton
+                      onClick={() => setShowVoiceDialog(true)}
+                      disabled={state.isLoading && !state.messages.some(msg => msg.isStreaming)}
+                      sx={{
+                        bgcolor: 'secondary.main',
+                        color: 'white',
+                        '&:hover': { 
+                          bgcolor: 'secondary.dark' 
+                        },
+                        '&:disabled': {
+                          bgcolor: isDarkMode ? 'rgba(255, 255, 255, 0.15)' : 'rgba(0, 0, 0, 0.12)',
+                          color: isDarkMode ? 'rgba(255, 255, 255, 0.6)' : 'rgba(0, 0, 0, 0.26)',
+                        }
+                      }}
+                    >
+                      <MicIcon />
+                    </IconButton>
+                  </Tooltip>
+                </Box>
+              </Box>
+           </Box>
         </Box>
 
-      {/* Диалоги */}
-      <VoiceDialog />
-      <DocumentDialog />
+             {/* Диалоги */}
+       <VoiceDialog />
+       <DocumentDialog />
 
-      {/* Уведомления */}
-      <Snackbar
-        open={showCopyAlert}
-        autoHideDuration={2000}
-        onClose={() => setShowCopyAlert(false)}
-      >
-        <Alert severity="success" onClose={() => setShowCopyAlert(false)}>
-          Текст скопирован в буфер обмена
-        </Alert>
-      </Snackbar>
-    </Box>
-  );
-}
+               {/* Выпадающее меню с дополнительными действиями (шестеренка) */}
+       <Menu
+         anchorEl={anchorEl}
+         open={Boolean(anchorEl)}
+         onClose={handleMenuClose}
+         anchorOrigin={{
+           vertical: 'top',
+           horizontal: 'left',
+         }}
+         transformOrigin={{
+           vertical: 'bottom',
+           horizontal: 'left',
+         }}
+         PaperProps={{
+           sx: {
+             bgcolor: isDarkMode ? 'background.paper' : 'white',
+             border: `1px solid ${isDarkMode ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)'}`,
+             boxShadow: isDarkMode 
+               ? '0 4px 20px rgba(0, 0, 0, 0.3)' 
+               : '0 4px 20px rgba(0, 0, 0, 0.15)',
+           }
+         }}
+       >
+         <MenuItem onClick={handleClearChat} sx={{ gap: 1 }}>
+           <ClearIcon fontSize="small" />
+           Очистить чат
+         </MenuItem>
+         <MenuItem onClick={handleReconnect} sx={{ gap: 1 }}>
+           <RefreshIcon fontSize="small" />
+           Переподключиться
+         </MenuItem>
+       </Menu>
+
+       {/* Уведомления */}
+       <Snackbar
+         open={showCopyAlert}
+         autoHideDuration={2000}
+         onClose={() => setShowCopyAlert(false)}
+       >
+         <Alert severity="success" onClose={() => setShowCopyAlert(false)}>
+           Текст скопирован в буфер обмена
+         </Alert>
+       </Snackbar>
+     </Box>
+   );
+ }

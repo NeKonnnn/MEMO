@@ -34,7 +34,7 @@ export default function ChatPage() {
   const [showCopyAlert, setShowCopyAlert] = useState(false);
   const { state } = useAppContext();
   const { clearMessages, showNotification } = useAppActions();
-  const { sendMessage, isConnected, reconnect } = useSocket();
+  const { sendMessage, isConnected, reconnect, stopGeneration } = useSocket();
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 

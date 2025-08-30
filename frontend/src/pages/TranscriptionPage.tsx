@@ -413,6 +413,8 @@ export default function TranscriptionPage() {
         maxWidth="md"
         fullWidth
         scroll="paper"
+        TransitionComponent={undefined}
+        transitionDuration={0}
       >
         <DialogTitle>
           <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>

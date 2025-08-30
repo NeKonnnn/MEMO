@@ -429,6 +429,8 @@ export default function DocumentsPage() {
         onClose={() => setShowUploadDialog(false)}
         maxWidth="sm"
         fullWidth
+        TransitionComponent={undefined}
+        transitionDuration={0}
       >
         <DialogTitle>Загрузить документ</DialogTitle>
         <DialogContent>

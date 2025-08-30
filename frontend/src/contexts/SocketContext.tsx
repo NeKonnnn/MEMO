@@ -7,6 +7,7 @@ interface SocketContextType {
   socket: Socket | null;
   isConnected: boolean;
   sendMessage: (message: string, streaming?: boolean) => void;
+  stopGeneration: () => void;
   reconnect: () => void;
 }
 
@@ -15,6 +16,7 @@ const SocketContext = createContext<SocketContextType | null>(null);
 export function SocketProvider({ children }: { children: ReactNode }) {
   const [socket, setSocket] = useState<Socket | null>(null);
   const [isConnected, setIsConnected] = useState(false);
+
   const { addMessage, updateMessage, setLoading, showNotification } = useAppActions();
   const currentMessageRef = useRef<string | null>(null);
 
@@ -85,6 +87,11 @@ export function SocketProvider({ children }: { children: ReactNode }) {
       handleServerMessage({ type: 'error', ...data });
     });
 
+    newSocket.on('generation_stopped', (data) => {
+      console.log('Генерация остановлена:', data);
+      handleServerMessage({ type: 'stopped', ...data });
+    });
+
     setSocket(newSocket);
     newSocket.connect();
   };
@@ -133,6 +140,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
           console.log('Финальное сообщение создано, ID:', finalMessageId);
         }
         setLoading(false);
+
         break;
 
       case 'error':
@@ -140,6 +148,18 @@ export function SocketProvider({ children }: { children: ReactNode }) {
         showNotification('error', `Ошибка сервера: ${data.error}`);
         setLoading(false);
         currentMessageRef.current = null;
+
+        break;
+        
+      case 'stopped':
+        console.log('Генерация остановлена сервером');
+
+        setLoading(false);
+        // Убираем флаг стриминга у текущего сообщения
+        if (currentMessageRef.current) {
+          updateMessage(currentMessageRef.current, undefined, false);
+          currentMessageRef.current = null;
+        }
         break;
 
       default:
@@ -155,6 +175,8 @@ export function SocketProvider({ children }: { children: ReactNode }) {
 
     console.log('Отправка сообщения:', message.substring(0, 50) + '...');
     
+
+    
     // Добавляем сообщение пользователя
     const userMessageId = addMessage({
       role: 'user',
@@ -167,7 +189,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
     setLoading(true);
     currentMessageRef.current = null;
 
-    // Отправляем сообщение через WebSocket
+    // Отправляем сообщение через Socket.IO
     const messageData = {
       message,
       streaming,
@@ -175,6 +197,32 @@ export function SocketProvider({ children }: { children: ReactNode }) {
     };
 
     socket.emit('chat_message', messageData);
+  };
+
+  const stopGeneration = () => {
+    if (!socket || !isConnected) {
+      showNotification('error', 'Нет соединения с сервером');
+      return;
+    }
+
+    console.log('Отправка команды остановки генерации...');
+    
+    // Отправляем команду остановки через Socket.IO
+    socket.emit('stop_generation', {
+      timestamp: new Date().toISOString(),
+    });
+    
+    // Сразу останавливаем загрузку на фронтенде
+    setLoading(false);
+    
+    // Очищаем текущее сообщение и убираем флаг стриминга у всех сообщений
+    if (currentMessageRef.current) {
+      // Убираем флаг стриминга у текущего сообщения
+      updateMessage(currentMessageRef.current, undefined, false);
+      currentMessageRef.current = null;
+    }
+    
+    showNotification('info', 'Генерация остановлена');
   };
 
   const reconnect = () => {
@@ -199,6 +247,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
     socket,
     isConnected,
     sendMessage,
+    stopGeneration,
     reconnect,
   };
 

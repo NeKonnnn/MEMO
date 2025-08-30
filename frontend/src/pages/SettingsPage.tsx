@@ -36,6 +36,7 @@ import {
   Upload as UploadIcon,
   Computer as ComputerIcon,
   VolumeUp as VolumeUpIcon,
+  Memory as MemoryIcon,
 } from '@mui/icons-material';
 import { useAppActions } from '../contexts/AppContext';
 
@@ -70,6 +71,12 @@ export default function SettingsPage() {
     engine: "whisperx" as "whisperx" | "vosk",
     language: "ru",
     auto_detect: true,
+  });
+
+  const [memorySettings, setMemorySettings] = useState({
+    max_messages: 20,
+    include_system_prompts: true,
+    clear_on_restart: false,
   });
 
   const [availableModels, setAvailableModels] = useState<Array<{
@@ -197,12 +204,23 @@ export default function SettingsPage() {
         setVoiceSettings(prev => ({ ...prev, ...voiceData }));
       }
       
-      // Загружаем настройки транскрибации
-      const transcriptionResponse = await fetch(`${API_BASE_URL}/api/transcription/settings`);
-      if (transcriptionResponse.ok) {
-        const transcriptionData = await transcriptionResponse.json();
-        setTranscriptionSettings(prev => ({ ...prev, ...transcriptionData }));
-      }
+             // Загружаем настройки транскрибации
+       const transcriptionResponse = await fetch(`${API_BASE_URL}/api/transcription/settings`);
+       if (transcriptionResponse.ok) {
+         const transcriptionData = await transcriptionResponse.json();
+         setTranscriptionSettings(prev => ({ ...prev, ...transcriptionData }));
+       }
+       
+       // Загружаем настройки памяти
+       try {
+         const memoryResponse = await fetch(`${API_BASE_URL}/api/memory/settings`);
+         if (memoryResponse.ok) {
+           const memoryData = await memoryResponse.json();
+           setMemorySettings(prev => ({ ...prev, ...memoryData }));
+         }
+       } catch (error) {
+         console.warn('Не удалось загрузить настройки памяти:', error);
+       }
       
       setSuccess('Настройки загружены');
     } catch (error) {
@@ -265,16 +283,31 @@ export default function SettingsPage() {
         throw new Error(`Ошибка сохранения настроек голоса: ${voiceResponse.status}`);
       }
       
-      // Сохраняем настройки транскрибации
-      const transcriptionResponse = await fetch(`${API_BASE_URL}/api/transcription/settings`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(transcriptionSettings),
-      });
-      
-      if (!transcriptionResponse.ok) {
-        throw new Error(`Ошибка сохранения настроек транскрибации: ${transcriptionResponse.status}`);
-      }
+             // Сохраняем настройки транскрибации
+       const transcriptionResponse = await fetch(`${API_BASE_URL}/api/transcription/settings`, {
+         method: 'PUT',
+         headers: { 'Content-Type': 'application/json' },
+         body: JSON.stringify(transcriptionSettings),
+       });
+       
+       if (!transcriptionResponse.ok) {
+         throw new Error(`Ошибка сохранения настроек транскрибации: ${transcriptionResponse.status}`);
+       }
+       
+       // Сохраняем настройки памяти
+       try {
+         const memoryResponse = await fetch(`${API_BASE_URL}/api/memory/settings`, {
+           method: 'PUT',
+           headers: { 'Content-Type': 'application/json' },
+           body: JSON.stringify(memorySettings),
+         });
+         
+         if (!memoryResponse.ok) {
+           console.warn(`Предупреждение: не удалось сохранить настройки памяти: ${memoryResponse.status}`);
+         }
+       } catch (error) {
+         console.warn('Предупреждение: не удалось сохранить настройки памяти:', error);
+       }
       
       setSuccess('Настройки сохранены успешно');
       showNotification('success', 'Настройки сохранены');
@@ -735,12 +768,180 @@ export default function SettingsPage() {
           </CardContent>
         </Card>
 
-        {/* Системная информация */}
-        <Card>
-          <CardContent>
-            <Typography variant="h6" gutterBottom>
-              Системная информация
-            </Typography>
+                 {/* Настройки памяти */}
+         <Card sx={{ mb: 3 }}>
+           <CardContent>
+             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+               <MemoryIcon color="primary" />
+               <Typography variant="h6" gutterBottom sx={{ mb: 0 }}>
+                 Настройки памяти ассистента
+               </Typography>
+             </Box>
+             
+             <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+               Управление контекстом и памятью ассистента для более эффективного общения
+             </Typography>
+             
+             <Alert severity="info" sx={{ mb: 2 }}>
+               <Typography variant="body2">
+                 <strong>Как это работает:</strong> Ассистент использует последние сообщения из диалога для понимания контекста. 
+                 Больше сообщений = лучше понимание, но больше потребление памяти. Рекомендуется: 20-40 сообщений для обычного общения.
+               </Typography>
+             </Alert>
+             
+             <Alert severity="success" sx={{ mb: 2 }}>
+               <Typography variant="body2">
+                 <strong>Важно:</strong> Изменения вступят в силу после нажатия кнопки "Сохранить настройки" вверху страницы.
+               </Typography>
+             </Alert>
+             
+             <Box display="grid" gridTemplateColumns="repeat(auto-fit, minmax(250px, 1fr))" gap={2}>
+               <TextField
+                 label="Максимум сообщений в контексте"
+                 type="number"
+                 value={memorySettings.max_messages}
+                 onChange={(e) => {
+                   const value = parseInt(e.target.value);
+                   if (value >= 5 && value <= 100) {
+                     setMemorySettings(prev => ({ 
+                       ...prev, 
+                       max_messages: value 
+                     }));
+                   }
+                 }}
+                 inputProps={{ min: 5, max: 100, step: 5 }}
+                 fullWidth
+                 helperText="Количество последних сообщений, которые ассистент запоминает (5-100)"
+                 error={memorySettings.max_messages < 5 || memorySettings.max_messages > 100}
+               />
+               
+               <TextField
+                 label="Размер контекста (токены)"
+                 type="number"
+                 value={Math.round(memorySettings.max_messages * 150)}
+                 disabled
+                 fullWidth
+                 helperText="Примерный размер контекста в токенах (только для чтения)"
+               />
+             </Box>
+             
+             <Box mt={2}>
+               <FormControlLabel
+                 control={
+                   <Switch
+                     checked={memorySettings.include_system_prompts}
+                     onChange={(e) => setMemorySettings(prev => ({ 
+                       ...prev, 
+                       include_system_prompts: e.target.checked 
+                     }))}
+                   />
+                 }
+                 label="Включать системные промпты в контекст"
+               />
+               
+               <FormControlLabel
+                 control={
+                   <Switch
+                     checked={memorySettings.clear_on_restart}
+                     onChange={(e) => setMemorySettings(prev => ({ 
+                       ...prev, 
+                       clear_on_restart: e.target.checked 
+                     }))}
+                   />
+                 }
+                 label="Очищать память при перезапуске"
+               />
+             </Box>
+             
+             {memorySettings.max_messages > 50 && (
+               <Alert severity="warning" sx={{ mb: 2 }}>
+                 <Typography variant="body2">
+                   <strong>Внимание:</strong> Установлено большое количество сообщений ({memorySettings.max_messages}). 
+                   Это может замедлить работу ассистента и увеличить потребление памяти.
+                 </Typography>
+               </Alert>
+             )}
+             
+             <Box sx={{ mt: 2, p: 2, bgcolor: 'background.default', borderRadius: 1 }}>
+               <Typography variant="body2" color="text.secondary" gutterBottom>
+                 <strong>Текущие настройки памяти:</strong>
+               </Typography>
+               <Typography variant="body2" color="text.secondary">
+                 • Ассистент запоминает последние <strong>{memorySettings.max_messages}</strong> сообщений
+               </Typography>
+               <Typography variant="body2" color="text.secondary">
+                 • Примерный размер контекста: <strong>{Math.round(memorySettings.max_messages * 150)}</strong> токенов
+               </Typography>
+               <Typography variant="body2" color="text.secondary">
+                 • Системные промпты: <strong>{memorySettings.include_system_prompts ? 'включены' : 'отключены'}</strong>
+               </Typography>
+               <Typography variant="body2" color="text.secondary">
+                 • Очистка при перезапуске: <strong>{memorySettings.clear_on_restart ? 'включена' : 'отключена'}</strong>
+               </Typography>
+             </Box>
+             
+             <Box sx={{ mt: 2, display: 'flex', gap: 2, flexWrap: 'wrap' }}>
+               <Button
+                 variant="outlined"
+                 color="warning"
+                 onClick={async () => {
+                   try {
+                     const response = await fetch(`${API_BASE_URL}/api/memory/clear`, {
+                       method: 'POST',
+                     });
+                     if (response.ok) {
+                       showNotification('success', 'Память ассистента очищена');
+                     } else {
+                       showNotification('error', 'Не удалось очистить память');
+                     }
+                   } catch (error) {
+                     showNotification('error', 'Ошибка при очистке памяти');
+                   }
+                 }}
+               >
+                 Очистить память сейчас
+               </Button>
+               <Button
+                 variant="outlined"
+                 color="info"
+                 onClick={async () => {
+                   try {
+                     const response = await fetch(`${API_BASE_URL}/api/memory/status`);
+                     if (response.ok) {
+                       const data = await response.json();
+                       showNotification('info', `В памяти: ${data.message_count || 0} сообщений`);
+                     }
+                   } catch (error) {
+                     showNotification('error', 'Не удалось получить статус памяти');
+                   }
+                 }}
+               >
+                 Статус памяти
+               </Button>
+               <Button
+                 variant="outlined"
+                 color="secondary"
+                 onClick={() => {
+                   setMemorySettings({
+                     max_messages: 20,
+                     include_system_prompts: true,
+                     clear_on_restart: false,
+                   });
+                   showNotification('info', 'Настройки памяти сброшены к значениям по умолчанию');
+                 }}
+               >
+                 Сбросить к умолчаниям
+               </Button>
+             </Box>
+           </CardContent>
+         </Card>
+
+         {/* Системная информация */}
+         <Card>
+           <CardContent>
+             <Typography variant="h6" gutterBottom>
+               Системная информация
+             </Typography>
             
             <Box display="grid" gridTemplateColumns="repeat(auto-fit, minmax(200px, 1fr))" gap={2}>
               <Box>
@@ -808,6 +1009,8 @@ export default function SettingsPage() {
         onClose={() => setShowModelDialog(false)}
         maxWidth="md"
         fullWidth
+        TransitionComponent={undefined}
+        transitionDuration={0}
       >
         <DialogTitle>Выбор модели</DialogTitle>
         <DialogContent>
@@ -879,6 +1082,8 @@ export default function SettingsPage() {
         onClose={() => setShowVoiceTestDialog(false)}
         maxWidth="sm"
         fullWidth
+        TransitionComponent={undefined}
+        transitionDuration={0}
       >
         <DialogTitle>
           Тестирование голоса

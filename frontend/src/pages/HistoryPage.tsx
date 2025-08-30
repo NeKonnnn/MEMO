@@ -402,6 +402,8 @@ export default function HistoryPage() {
       <Dialog
         open={showClearDialog}
         onClose={() => setShowClearDialog(false)}
+        TransitionComponent={undefined}
+        transitionDuration={0}
       >
         <DialogTitle>Очистить историю?</DialogTitle>
         <DialogContent>
@@ -428,6 +430,8 @@ export default function HistoryPage() {
         onClose={() => setShowDetailDialog(false)}
         maxWidth="md"
         fullWidth
+        TransitionComponent={undefined}
+        transitionDuration={0}
       >
         <DialogTitle>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
