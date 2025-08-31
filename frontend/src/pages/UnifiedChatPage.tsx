@@ -1018,99 +1018,11 @@ export default function UnifiedChatPage({ isDarkMode }: UnifiedChatPageProps) {
            onDragLeave={handleDragLeave}
            onDrop={handleDrop}
          >
-          {/* Загруженные файлы */}
-          {uploadedFiles.length > 0 && (
-            <Box sx={{ mb: 2 }}>
-              <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1 }}>
-                {uploadedFiles.map((file, index) => (
-                  <Box
-                    key={index}
-                    className="file-attachment"
-                    sx={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 1,
-                      p: 1,
-                      borderRadius: 2,
-                      maxWidth: '300px',
-                    }}
-                  >
-                    <Box
-                      sx={{
-                        width: 32,
-                        height: 32,
-                        borderRadius: 1,
-                        bgcolor: 'rgba(255, 255, 255, 0.2)',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        color: 'white',
-                        flexShrink: 0,
-                        border: '1px solid rgba(255, 255, 255, 0.3)',
-                      }}
-                    >
-                      {file.type.includes('pdf') ? <PdfIcon fontSize="small" /> : 
-                       file.type.includes('word') ? <DocumentIcon fontSize="small" /> : 
-                       file.type.includes('excel') ? <DocumentIcon fontSize="small" /> : <DocumentIcon fontSize="small" />}
-                    </Box>
-                    <Box sx={{ minWidth: 0, flex: 1 }}>
-                      <Typography 
-                        variant="caption" 
-                        sx={{ 
-                          fontWeight: 'medium', 
-                          display: 'block', 
-                          color: 'white',
-                          overflow: 'hidden',
-                          textOverflow: 'ellipsis',
-                          whiteSpace: 'nowrap'
-                        }}
-                        title={file.name}
-                      >
-                        {file.name}
-                      </Typography>
-                    </Box>
-                    <IconButton
-                      size="small"
-                      onClick={() => handleFileDelete(file.name)}
-                      sx={{ 
-                        color: 'rgba(255, 255, 255, 0.7)',
-                        '&:hover': { 
-                          color: '#ff6b6b',
-                          bgcolor: 'rgba(255, 107, 107, 0.2)',
-                        },
-                        p: 0.5,
-                        borderRadius: 1,
-                        flexShrink: 0,
-                      }}
-                    >
-                      <CloseIcon fontSize="small" />
-                    </IconButton>
-                  </Box>
-                ))}
-              </Box>
-            </Box>
-          )}
+
           
-          {/* Индикатор загрузки файла в поле ввода */}
-          {isUploading && (
-            <Box sx={{ mb: 2, p: 1 }}>
-              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                <CircularProgress size={16} sx={{ color: 'white' }} />
-                <Typography variant="caption" sx={{ color: 'white' }}>
-                  Загрузка документа...
-                </Typography>
-              </Box>
-            </Box>
-          )}
+
           
-          {/* Подсказка о перетаскивании */}
-          {isDragging && (
-            <Box sx={{ mb: 2, p: 2, textAlign: 'center' }}>
-              <Typography variant="body2" sx={{ color: 'white' }}>
-                Отпустите файл для загрузки
-              </Typography>
-            </Box>
-          )}
+
 
           
           
@@ -1127,50 +1039,137 @@ export default function UnifiedChatPage({ isDarkMode }: UnifiedChatPageProps) {
                mx: 'auto', // Центрируем по горизонтали
              }}
            >
-             {/* Поле ввода текста сверху */}
-             <TextField
-               ref={inputRef}
-               fullWidth
-               multiline
-               maxRows={4}
-               value={inputMessage}
-               onChange={(e) => setInputMessage(e.target.value)}
-               onKeyPress={handleKeyPress}
-               placeholder={
-                 !isConnected 
-                   ? "Нет соединения с сервером. Запустите backend на порту 8000" 
-                   : state.isLoading && !state.messages.some(msg => msg.isStreaming)
-                     ? "ГазикИИ думает..." 
-                     : state.isLoading && state.messages.some(msg => msg.isStreaming)
-                       ? "ГазикИИ генерирует ответ... Нажмите ⏹️ чтобы остановить"
-                       : "Чем я могу помочь вам сегодня?"
-               }
-               variant="outlined"
-               size="small"
-               disabled={!isConnected || (state.isLoading && !state.messages.some(msg => msg.isStreaming))}
-               sx={{
-                 mb: 2,
-                 '& .MuiOutlinedInput-root': {
-                   bgcolor: 'transparent',
-                   border: 'none',
-                   '&:hover': {
-                     bgcolor: 'transparent',
-                   },
-                   '&.Mui-focused': {
-                     bgcolor: 'transparent',
-                   }
-                 }
-               }}
-             />
+                           {/* Скрытый input для выбора файла */}
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".pdf,.docx,.xlsx,.txt"
+                onChange={handleFileSelect}
+                style={{ display: 'none' }}
+              />
 
-             {/* Скрытый input для выбора файла */}
-             <input
-               ref={fileInputRef}
-               type="file"
-               accept=".pdf,.docx,.xlsx,.txt"
-               onChange={handleFileSelect}
-               style={{ display: 'none' }}
-             />
+              {/* Прикрепленные файлы - выше поля ввода */}
+              {uploadedFiles.length > 0 && (
+                <Box sx={{ mb: 2 }}>
+                  <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1 }}>
+                    {uploadedFiles.map((file, index) => (
+                      <Box
+                        key={index}
+                        className="file-attachment"
+                        sx={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 1,
+                          p: 1,
+                          borderRadius: 2,
+                          maxWidth: '300px',
+                          bgcolor: isDarkMode ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)',
+                          border: `1px solid ${isDarkMode ? 'rgba(255, 255, 255, 0.2)' : 'rgba(0, 0, 0, 0.2)'}`,
+                        }}
+                      >
+                        <Box
+                          sx={{
+                            width: 32,
+                            height: 32,
+                            borderRadius: 1,
+                            bgcolor: isDarkMode ? 'rgba(255, 255, 255, 0.2)' : 'rgba(0, 0, 0, 0.2)',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            color: isDarkMode ? 'white' : '#333',
+                            flexShrink: 0,
+                            border: `1px solid ${isDarkMode ? 'rgba(255, 255, 255, 0.3)' : 'rgba(0, 0, 0, 0.3)'}`,
+                          }}
+                        >
+                          {file.type.includes('pdf') ? <PdfIcon fontSize="small" /> : 
+                           file.type.includes('word') ? <DocumentIcon fontSize="small" /> : 
+                           file.type.includes('excel') ? <DocumentIcon fontSize="small" /> : <DocumentIcon fontSize="small" />}
+                        </Box>
+                        <Box sx={{ minWidth: 0, flex: 1 }}>
+                          <Typography 
+                            variant="caption" 
+                            sx={{ 
+                              fontWeight: 'medium', 
+                              display: 'block', 
+                              color: isDarkMode ? 'white' : '#333',
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap'
+                            }}
+                            title={file.name}
+                          >
+                            {file.name}
+                          </Typography>
+                        </Box>
+                        <IconButton
+                          size="small"
+                          onClick={() => handleFileDelete(file.name)}
+                          sx={{ 
+                            color: isDarkMode ? 'rgba(255, 255, 255, 0.7)' : 'rgba(0, 0, 0, 0.7)',
+                            '&:hover': { 
+                              color: '#ff6b6b',
+                              bgcolor: isDarkMode ? 'rgba(255, 107, 107, 0.2)' : 'rgba(255, 107, 107, 0.1)',
+                            },
+                            p: 0.5,
+                            borderRadius: 1,
+                            flexShrink: 0,
+                          }}
+                        >
+                          <CloseIcon fontSize="small" />
+                        </IconButton>
+                      </Box>
+                    ))}
+                  </Box>
+                </Box>
+              )}
+
+              {/* Индикатор загрузки файла */}
+              {isUploading && (
+                <Box sx={{ mb: 2, p: 1 }}>
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                    <CircularProgress size={16} sx={{ color: isDarkMode ? 'white' : '#333' }} />
+                    <Typography variant="caption" sx={{ color: isDarkMode ? 'white' : '#333' }}>
+                      Загрузка документа...
+                    </Typography>
+                  </Box>
+                </Box>
+              )}
+
+              {/* Поле ввода текста */}
+              <TextField
+                ref={inputRef}
+                fullWidth
+                multiline
+                maxRows={4}
+                value={inputMessage}
+                onChange={(e) => setInputMessage(e.target.value)}
+                onKeyPress={handleKeyPress}
+                placeholder={
+                  !isConnected 
+                    ? "Нет соединения с сервером. Запустите backend на порту 8000" 
+                    : state.isLoading && !state.messages.some(msg => msg.isStreaming)
+                      ? "ГазикИИ думает..." 
+                      : state.isLoading && state.messages.some(msg => msg.isStreaming)
+                        ? "ГазикИИ генерирует ответ... Нажмите ⏹️ чтобы остановить"
+                        : "Чем я могу помочь вам сегодня?"
+                }
+                variant="outlined"
+                size="small"
+                disabled={!isConnected || (state.isLoading && !state.messages.some(msg => msg.isStreaming))}
+                sx={{
+                  mb: 2,
+                  '& .MuiOutlinedInput-root': {
+                    bgcolor: 'transparent',
+                    border: 'none',
+                    '&:hover': {
+                      bgcolor: 'transparent',
+                    },
+                    '&.Mui-focused': {
+                      bgcolor: 'transparent',
+                    }
+                  }
+                }}
+              />
 
                            {/* Кнопки снизу */}
               <Box
