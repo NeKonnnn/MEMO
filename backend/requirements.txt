@@ -15,3 +15,6 @@ langchain==0.1.0
 langchain-community==0.0.13
 faiss-cpu==1.7.4
 sentence-transformers==2.2.2
+
+# Зависимости для изменения темпа аудио
+librosa==0.10.1

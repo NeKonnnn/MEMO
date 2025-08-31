@@ -71,6 +71,9 @@ export default function VoicePage() {
 
   // Функция очистки всех ресурсов
   const cleanupResources = () => {
+    console.log('Начинаю очистку ресурсов...');
+    
+    // Сначала останавливаем локальные ресурсы
     // Останавливаем таймер тишины
     if (silenceTimerRef.current) {
       clearTimeout(silenceTimerRef.current);
@@ -110,6 +113,8 @@ export default function VoicePage() {
     
     // Сбрасываем состояние
     setIsRecording(false);
+    setIsProcessing(false);
+    setIsSpeaking(false);
     setRecordingTime(0);
     setRealtimeText('');
     setAudioLevel(0);
@@ -117,6 +122,26 @@ export default function VoicePage() {
     // Сбрасываем глобальное состояние
     setRecording(false);
     setSpeaking(false);
+    
+    // Теперь отправляем команду остановки на backend (если WebSocket активен)
+    if (voiceSocket && voiceSocket.readyState === WebSocket.OPEN) {
+      try {
+        console.log('Отправляю команду остановки на backend...');
+        voiceSocket.send(JSON.stringify({
+          type: "stop_processing",
+          timestamp: new Date().toISOString()
+        }));
+        console.log('Команда остановки отправлена успешно');
+      } catch (error) {
+        console.error('Ошибка отправки команды остановки:', error);
+        // Не критично - локальные ресурсы уже очищены
+      }
+    } else {
+      console.log('WebSocket не активен, пропускаю отправку команды остановки');
+    }
+    
+    console.log('Все ресурсы очищены, генерация остановлена');
+    showNotification('info', 'Все процессы остановлены');
   };
 
   // Подключение к WebSocket голосового чата
@@ -177,6 +202,16 @@ export default function VoicePage() {
               showNotification('error', data.error || 'Ошибка WebSocket');
               break;
               
+            case 'processing_stopped':
+              console.log('WebSocket: Обработка остановлена');
+              showNotification('info', 'Обработка остановлена');
+              break;
+              
+            case 'processing_reset':
+              console.log('WebSocket: Обработка возобновлена');
+              showNotification('success', 'Обработка возобновлена');
+              break;
+              
             default:
               console.log('WebSocket: Неизвестный тип сообщения:', data.type);
           }
@@ -191,20 +226,26 @@ export default function VoicePage() {
     };
     
     ws.onerror = (error) => {
-      setIsVoiceConnected(false);
-      showNotification('error', 'Ошибка подключения к голосовому чату');
       console.error('WebSocket error:', error);
+      // Не устанавливаем isVoiceConnected в false при ошибке
+      // Ошибки могут быть временными и не должны разрывать соединение
+      showNotification('warning', 'Временная ошибка WebSocket, пытаюсь восстановить...');
       
-      // Автоматически переподключаемся через 5 секунд, только если разрешено
-      setTimeout(() => {
-        if (!isVoiceConnected && shouldReconnect) {
-          showNotification('info', 'Попытка переподключения...');
-          connectVoiceWebSocket();
-        }
-      }, 5000);
+      // Проверяем состояние соединения
+      if (ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+        setIsVoiceConnected(false);
+        // Автоматически переподключаемся через 3 секунды, только если разрешено
+        setTimeout(() => {
+          if (!isVoiceConnected && shouldReconnect) {
+            showNotification('info', 'Попытка переподключения...');
+            connectVoiceWebSocket();
+          }
+        }, 3000);
+      }
     };
     
     ws.onclose = (event) => {
+      console.log('WebSocket закрыт, код:', event.code, 'причина:', event.reason);
       setIsVoiceConnected(false);
       setVoiceSocket(null);
       
@@ -472,6 +513,10 @@ export default function VoicePage() {
         if (voiceSocket && voiceSocket.readyState === WebSocket.OPEN) {
           voiceSocket.send(JSON.stringify({ type: 'start_listening' }));
           showNotification('info', 'Отправляю команду начала прослушивания...');
+          
+          // Также отправляем команду сброса флага остановки
+          voiceSocket.send(JSON.stringify({ type: 'reset_processing' }));
+          console.log('Отправлена команда сброса флага остановки');
         }
       
       // Очищаем предыдущие ресурсы перед началом новой записи

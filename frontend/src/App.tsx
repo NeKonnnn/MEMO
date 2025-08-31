@@ -83,7 +83,7 @@ function App() {
   };
 
   const toggleSidebar = () => {
-    console.log('🔄 Переключение сайдбара:', sidebarOpen, '->', !sidebarOpen);
+    console.log('Переключение сайдбара:', sidebarOpen, '->', !sidebarOpen);
     setSidebarOpen(!sidebarOpen);
   };
 

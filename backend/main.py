@@ -164,6 +164,9 @@ except Exception as e:
 # Глобальный словарь для хранения флагов остановки генерации
 stop_generation_flags = {}
 
+# Глобальный флаг для остановки голосового чата
+voice_chat_stop_flag = False
+
 # Создание Socket.IO сервера
 sio = AsyncServer(
     async_mode='asgi',
@@ -916,7 +919,11 @@ async def websocket_chat(websocket: WebSocket):
                 }))
                 
     except WebSocketDisconnect:
-        manager.disconnect(websocket)
+        logger.info("WebSocket отключен клиентом - нормальное отключение")
+        try:
+            manager.disconnect(websocket)
+        except Exception as e:
+            logger.warning(f"Ошибка при отключении WebSocket в менеджере: {e}")
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
         manager.disconnect(websocket)
@@ -926,6 +933,11 @@ async def process_audio_data(websocket: WebSocket, data: bytes):
     import tempfile
     temp_dir = tempfile.gettempdir()
     audio_file = os.path.join(temp_dir, f"voice_{datetime.now().timestamp()}.wav")
+    
+    # Проверяем флаг остановки голосового чата
+    if globals().get('voice_chat_stop_flag', False):
+        logger.info("Обработка аудио данных остановлена - установлен флаг остановки")
+        return
     
     logger.info(f"Начинаю обработку аудио данных размером {len(data)} байт")
     
@@ -1066,11 +1078,15 @@ async def websocket_voice(websocket: WebSocket):
     # Проверяем доступность сервисов после подключения
     if not ask_agent or not save_dialog_entry:
         logger.warning("AI services недоступны для WebSocket /ws/voice")
-        await websocket.send_text(json.dumps({
-            "type": "error",
-            "error": "AI сервисы недоступны. Проверьте настройки модели."
-        }))
+        try:
+            await websocket.send_text(json.dumps({
+                "type": "error",
+                "error": "AI сервисы недоступны. Проверьте настройки модели."
+            }))
+        except Exception as e:
+            logger.warning(f"Не удалось отправить сообщение об ошибке: {e}")
         # Не закрываем соединение, просто отправляем ошибку
+        
     try:
         while True:
             # Получаем сообщение (может быть JSON команда или аудио байты)
@@ -1091,6 +1107,28 @@ async def websocket_voice(websocket: WebSocket):
                             "message": "Готов к приему голоса"
                         }))
                         continue
+                    elif data.get("type") == "stop_processing":
+                        # Команда остановить обработку (новое)
+                        logger.info("Получена команда stop_processing")
+                        # Используем globals() для доступа к глобальной переменной
+                        globals()['voice_chat_stop_flag'] = True
+                        await websocket.send_text(json.dumps({
+                            "type": "processing_stopped",
+                            "message": "Обработка остановлена"
+                        }))
+                        logger.info("Флаг остановки голосового чата установлен")
+                        continue
+                    elif data.get("type") == "reset_processing":
+                        # Команда сбросить флаг остановки
+                        logger.info("Получена команда reset_processing")
+                        # Используем globals() для доступа к глобальной переменной
+                        globals()['voice_chat_stop_flag'] = False
+                        await websocket.send_text(json.dumps({
+                            "type": "processing_reset",
+                            "message": "Обработка возобновлена"
+                        }))
+                        logger.info("Флаг остановки голосового чата сброшен")
+                        continue
                     else:
                         logger.warning(f"Неизвестный тип сообщения: {data.get('type', 'unknown')}")
                         logger.debug(f"Полные данные неизвестного сообщения: {data}")
@@ -1107,8 +1145,26 @@ async def websocket_voice(websocket: WebSocket):
                     data = await websocket.receive_bytes()
                     logger.info(f"Получены аудио данные размером: {len(data)} байт")
                     
-                    # Обрабатываем аудио данные
-                    await process_audio_data(websocket, data)
+                    # Обрабатываем аудио данные с дополнительной защитой
+                    try:
+                        await process_audio_data(websocket, data)
+                    except Exception as process_error:
+                        logger.error(f"Ошибка обработки аудио данных: {process_error}")
+                        logger.error(f"Тип ошибки: {type(process_error).__name__}")
+                        import traceback
+                        logger.error(f"Traceback: {traceback.format_exc()}")
+                        
+                        # Отправляем ошибку клиенту, но не закрываем соединение
+                        try:
+                            await websocket.send_text(json.dumps({
+                                "type": "error",
+                                "error": f"Ошибка обработки аудио: {str(process_error)}"
+                            }))
+                        except Exception as send_error:
+                            logger.error(f"Не удалось отправить сообщение об ошибке: {send_error}")
+                        
+                        # Продолжаем работу WebSocket
+                        continue
                     
                 except Exception as e:
                     logger.error(f"Ошибка получения аудио данных: {e}")
@@ -1119,23 +1175,28 @@ async def websocket_voice(websocket: WebSocket):
                 continue
                     
     except WebSocketDisconnect:
-        logger.info("WebSocket отключен клиентом")
-        manager.disconnect(websocket)
+        logger.info("WebSocket отключен клиентом - нормальное отключение")
+        try:
+            manager.disconnect(websocket)
+        except Exception as e:
+            logger.warning(f"Ошибка при отключении WebSocket в менеджере: {e}")
     except Exception as e:
         logger.error(f"Voice WebSocket error: {e}")
         logger.error(f"Тип ошибки: {type(e).__name__}")
         import traceback
         logger.error(f"Full traceback: {traceback.format_exc()}")
         
+        # Не закрываем соединение при ошибках, только логируем их
+        # Это позволит WebSocket оставаться активным
         try:
             await websocket.send_text(json.dumps({
                 "type": "error",
-                "error": str(e)
+                "error": f"Временная ошибка: {str(e)}"
             }))
         except Exception as send_error:
             logger.error(f"Не удалось отправить сообщение об ошибке: {send_error}")
-        finally:
-            manager.disconnect(websocket)
+            # Не закрываем соединение даже при ошибке отправки
+        # Убираем finally блок, который закрывал соединение
 
 # ================================
 # ИСТОРИЯ ДИАЛОГОВ
@@ -1419,6 +1480,7 @@ class VoiceSynthesizeRequest(BaseModel):
     text: str
     voice_id: str = "ru"
     voice_speaker: str = "baya"
+    speech_rate: float = 1.0
 
 class TranscriptionSettings(BaseModel):
     engine: str = "whisperx"  # whisperx или vosk
@@ -1445,13 +1507,14 @@ async def synthesize_speech(request: VoiceSynthesizeRequest):
     try:
         # Логируем отладочную информацию
         logger.info(f"Синтезирую речь: '{request.text[:100]}{'...' if len(request.text) > 100 else ''}'")
-        logger.info(f"Параметры: voice_id={request.voice_id}, voice_speaker={request.voice_speaker}")
+        logger.info(f"Параметры: voice_id={request.voice_id}, voice_speaker={request.voice_speaker}, speech_rate={request.speech_rate}")
         
         # Синтезируем речь с правильными параметрами
         success = speak_text(
             text=request.text, 
             speaker=request.voice_speaker, 
             voice_id=request.voice_id, 
+            speech_rate=request.speech_rate,
             save_to_file=audio_file
         )
         
@@ -1463,15 +1526,20 @@ async def synthesize_speech(request: VoiceSynthesizeRequest):
             import shutil
             shutil.copy2(audio_file, temp_copy)
             
-            # Удаляем оригинальный файл
-            os.remove(audio_file)
-            
             # Возвращаем копию, которая удалится после отправки
+            async def cleanup_temp_file():
+                try:
+                    if os.path.exists(temp_copy):
+                        os.remove(temp_copy)
+                        logger.info(f"Временный файл удален: {temp_copy}")
+                except Exception as e:
+                    logger.error(f"Ошибка при удалении временного файла: {e}")
+            
             return FileResponse(
                 temp_copy,
                 media_type="audio/wav",
                 filename="speech.wav",
-                background=lambda: os.remove(temp_copy) if os.path.exists(temp_copy) else None
+                background=cleanup_temp_file
             )
         else:
             logger.error(f"Не удалось создать аудиофайл: success={success}, exists={os.path.exists(audio_file)}")
@@ -1479,10 +1547,15 @@ async def synthesize_speech(request: VoiceSynthesizeRequest):
             
     except Exception as e:
         logger.error(f"Ошибка синтеза речи: {e}")
-        # Очищаем временный файл в случае ошибки
-        if os.path.exists(audio_file):
-            os.remove(audio_file)
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        # Всегда очищаем временные файлы
+        try:
+            if os.path.exists(audio_file):
+                os.remove(audio_file)
+                logger.info(f"Оригинальный временный файл удален: {audio_file}")
+        except Exception as e:
+            logger.error(f"Ошибка при удалении оригинального временного файла: {e}")
 
 @app.post("/api/voice/recognize")
 async def recognize_speech_api(audio_file: UploadFile = File(...)):

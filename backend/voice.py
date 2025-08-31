@@ -11,6 +11,16 @@ from vosk import Model, KaldiRecognizer
 from backend.agent import ask_agent
 from backend.memory import save_to_memory
 
+# Попытка импорта librosa для изменения темпа аудио
+try:
+    import librosa
+    import librosa.effects
+    librosa_available = True
+    print("librosa доступна для изменения темпа аудио")
+except ImportError:
+    librosa_available = False
+    print("librosa не установлена, изменение темпа аудио будет недоступно")
+
 # Константы
 SAMPLE_RATE = 16000
 VOSK_MODEL_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "model_small")
@@ -36,6 +46,34 @@ try:
 except ImportError:
     pyttsx3_available = False
     print("ПРЕДУПРЕЖДЕНИЕ: pyttsx3 не установлен, запасной TTS будет недоступен")
+
+#---------- Функции для изменения темпа аудио ----------#
+
+def change_audio_speed(audio, sample_rate, speed_factor):
+    """Изменяет скорость воспроизведения аудио без изменения частоты"""
+    if not librosa_available:
+        print("librosa недоступна, возвращаю оригинальное аудио")
+        return audio
+    
+    try:
+        # Конвертируем torch tensor в numpy array
+        if isinstance(audio, torch.Tensor):
+            audio_numpy = audio.cpu().numpy()
+        else:
+            audio_numpy = audio
+        
+        # Изменяем темп аудио
+        audio_fast = librosa.effects.time_stretch(audio_numpy, rate=speed_factor)
+        
+        # Конвертируем обратно в torch tensor
+        if isinstance(audio, torch.Tensor):
+            return torch.from_numpy(audio_fast)
+        else:
+            return audio_fast
+            
+    except Exception as e:
+        print(f"Ошибка при изменении темпа аудио: {e}")
+        return audio
 
 #---------- Функции для озвучивания текста (Silero TTS) ----------#
 
@@ -145,7 +183,7 @@ def detect_language(text):
     else:
         return 'en'
 
-def speak_text_silero(text, speaker='baya', sample_rate=48000, lang=None, save_to_file=None):
+def speak_text_silero(text, speaker='baya', sample_rate=48000, lang=None, speech_rate=1.0, save_to_file=None):
     """Озвучивание текста с помощью Silero TTS"""
     global models
     
@@ -162,6 +200,16 @@ def speak_text_silero(text, speaker='baya', sample_rate=48000, lang=None, save_t
             return False
     
     try:
+        # Логируем параметры скорости речи
+        print(f"Применяю скорость речи: {speech_rate}x")
+        print(f"Исходная частота дискретизации: {sample_rate} Hz")
+        
+        # Используем стандартную частоту дискретизации для Silero
+        effective_sample_rate = 48000  # Всегда используем максимальное качество
+        
+        print(f"Использую стандартную частоту дискретизации: {effective_sample_rate} Hz")
+        print(f"Скорость речи будет изменена через изменение темпа аудио: {speech_rate}x")
+        
         # Обрабатываем короткие тексты и проблемные символы
         if len(text.strip()) < 10:
             # Для коротких текстов добавляем контекст и заменяем проблемные символы
@@ -179,15 +227,20 @@ def speak_text_silero(text, speaker='baya', sample_rate=48000, lang=None, save_t
                 audio = models[lang].apply_tts(
                     text=chunk, 
                     speaker=speaker,
-                    sample_rate=sample_rate,
+                    sample_rate=effective_sample_rate,
                     put_accent=False,  # Убираем акценты для стабильности
                     put_yo=False       # Убираем ё для стабильности
                 )
                 
+                # Изменяем темп аудио для изменения скорости речи
+                if speech_rate != 1.0:
+                    print(f"Изменяю темп аудио с {speech_rate}x")
+                    audio = change_audio_speed(audio, effective_sample_rate, speech_rate)
+                
                 if save_to_file:
                     all_audio.append(audio)
                 else:
-                    sd.play(audio, sample_rate)
+                    sd.play(audio, effective_sample_rate)
                     sd.wait()
                     
             except Exception as chunk_error:
@@ -199,15 +252,20 @@ def speak_text_silero(text, speaker='baya', sample_rate=48000, lang=None, save_t
                         audio = models[lang].apply_tts(
                             text=simplified_chunk, 
                             speaker='baya',  # Принудительно используем простой голос
-                            sample_rate=22050,  # Уменьшаем частоту дискретизации
+                            sample_rate=effective_sample_rate,  # Используем ту же частоту
                             put_accent=False,
                             put_yo=False
                         )
                         
+                        # Изменяем темп аудио для изменения скорости речи
+                        if speech_rate != 1.0:
+                            print(f"Fallback: изменяю темп аудио с {speech_rate}x")
+                            audio = change_audio_speed(audio, effective_sample_rate, speech_rate)
+                        
                         if save_to_file:
                             all_audio.append(audio)
                         else:
-                            sd.play(audio, 22050)
+                            sd.play(audio, effective_sample_rate)
                             sd.wait()
                 except Exception as fallback_error:
                     print(f"Fallback тоже не сработал: {fallback_error}")
@@ -226,8 +284,8 @@ def speak_text_silero(text, speaker='baya', sample_rate=48000, lang=None, save_t
                 if audio_numpy.max() <= 1.0:
                     audio_numpy = (audio_numpy * 32767).astype('int16')
                 
-                # Сохраняем в файл
-                scipy.io.wavfile.write(save_to_file, sample_rate, audio_numpy)
+                # Сохраняем в файл с учетом измененной частоты дискретизации
+                scipy.io.wavfile.write(save_to_file, effective_sample_rate, audio_numpy)
                 print(f"Аудио сохранено в {save_to_file}")
                 return True
                 
@@ -242,7 +300,7 @@ def speak_text_silero(text, speaker='baya', sample_rate=48000, lang=None, save_t
         traceback.print_exc()
         return False
 
-def speak_text_pyttsx3(text):
+def speak_text_pyttsx3(text, speech_rate=1.0):
     """Озвучивание текста с помощью pyttsx3"""
     global pyttsx3_engine
     
@@ -250,6 +308,10 @@ def speak_text_pyttsx3(text):
         return False
     
     try:
+        # Устанавливаем скорость речи
+        rate = int(200 * speech_rate)
+        print(f"pyttsx3: устанавливаю скорость речи {speech_rate}x (rate={rate})")
+        pyttsx3_engine.setProperty('rate', rate)  # Базовая скорость 200
         pyttsx3_engine.say(text)
         pyttsx3_engine.runAndWait()
         return True
@@ -257,17 +319,19 @@ def speak_text_pyttsx3(text):
         print(f"Ошибка при синтезе речи через pyttsx3: {e}")
         return False
 
-def speak_text(text, speaker='baya', voice_id='ru', save_to_file=None):
+def speak_text(text, speaker='baya', voice_id='ru', speech_rate=1.0, save_to_file=None):
     """Основная функция озвучивания текста"""
+    print(f"🔧 speak_text вызвана с параметрами: speaker={speaker}, voice_id={voice_id}, speech_rate={speech_rate}")
+    
     if not text:
         return False
     
     # Пытаемся озвучить через Silero
-    if tts_model_loaded and speak_text_silero(text, speaker, lang=voice_id, save_to_file=save_to_file):
+    if tts_model_loaded and speak_text_silero(text, speaker, lang=voice_id, speech_rate=speech_rate, save_to_file=save_to_file):
         return True
     
     # Если не получилось, используем pyttsx3 (только для воспроизведения, не для сохранения)
-    if not save_to_file and speak_text_pyttsx3(text):
+    if not save_to_file and speak_text_pyttsx3(text, speech_rate):
         return True
     
     # Если ничего не сработало
