@@ -1531,11 +1531,6 @@ export default function UnifiedChatPage({ isDarkMode }: UnifiedChatPageProps) {
                     transform: 'scale(1.05)',
                   },
                   transition: 'all 0.3s ease',
-                  animation: 'pulse 2s ease-in-out infinite',
-                  '@keyframes pulse': {
-                    '0%, 100%': { transform: 'scale(1)' },
-                    '50%': { transform: 'scale(1.1)' },
-                  },
                 }}
               >
                 <StopIcon />
@@ -1949,20 +1944,32 @@ export default function UnifiedChatPage({ isDarkMode }: UnifiedChatPageProps) {
               
               {isSpeaking && (
                 <Box sx={{ position: 'absolute', bottom: -10, right: -10 }}>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-                    {[...Array(3)].map((_, index) => (
+                  <Box sx={{ 
+                    display: 'flex', 
+                    alignItems: 'center', 
+                    gap: 0.5,
+                    height: 32
+                  }}>
+                    {[...Array(5)].map((_, index) => (
                       <Box
                         key={index}
                         sx={{
-                          width: 3,
-                          height: 12,
-                          backgroundColor: 'success.main',
-                          borderRadius: 1.5,
-                          animation: 'speakingWave 1s ease-in-out infinite',
-                          animationDelay: `${index * 0.2}s`,
-                          '@keyframes speakingWave': {
-                            '0%, 100%': { height: 12 },
-                            '50%': { height: 20 },
+                          width: 4,
+                          height: 16,
+                          background: 'linear-gradient(180deg, #4caf50 0%, #66bb6a 50%, #81c784 100%)',
+                          borderRadius: 2,
+                          animation: 'soundWave 1s infinite ease-in-out',
+                          animationDelay: `${index * 0.1}s`,
+                          boxShadow: '0 2px 6px rgba(76, 175, 80, 0.4)',
+                          '@keyframes soundWave': {
+                            '0%, 100%': { 
+                              transform: 'scaleY(0.2)',
+                              opacity: 0.6
+                            },
+                            '50%': { 
+                              transform: 'scaleY(1)',
+                              opacity: 1
+                            },
                           },
                         }}
                       />
@@ -2090,19 +2097,26 @@ export default function UnifiedChatPage({ isDarkMode }: UnifiedChatPageProps) {
             <Typography variant="body2" color="success.main" sx={{ mb: 1 }}>
             </Typography>
             <Box sx={{ display: 'flex', justifyContent: 'center', gap: 1 }}>
-              {[...Array(5)].map((_, index) => (
+              {[...Array(9)].map((_, index) => (
                 <Box
                   key={index}
                   sx={{
                     width: 4,
-                    height: 20,
-                    backgroundColor: 'success.main',
+                    height: 22,
+                    background: 'linear-gradient(180deg, #4caf50 0%, #66bb6a 50%, #81c784 100%)',
                     borderRadius: 2,
-                    animation: 'speakingWave 1s ease-in-out infinite',
-                    animationDelay: `${index * 0.1}s`,
-                    '@keyframes speakingWave': {
-                      '0%, 100%': { height: 20 },
-                      '50%': { height: 40 },
+                    animation: 'soundWave2 1.2s infinite ease-in-out',
+                    animationDelay: `${index * 0.08}s`,
+                    boxShadow: '0 3px 8px rgba(76, 175, 80, 0.5)',
+                    '@keyframes soundWave2': {
+                      '0%, 100%': { 
+                        transform: 'scaleY(0.3)',
+                        opacity: 0.5
+                      },
+                      '50%': { 
+                        transform: 'scaleY(1)',
+                        opacity: 1
+                      },
                     },
                   }}
                 />
