@@ -18,7 +18,7 @@ WHISPERX_SMALL_MODEL = "small"
 DIARIZE_MODEL = "pyannote/speaker-diarization-3.1"
 
 # Пути для других модулей
-MODEL_PATH = str(PROJECT_ROOT / "models")  # Путь к папке с моделями LLM
+MODEL_PATH = str(PROJECT_ROOT / "models")  # Путь к конкретной модели LLM
 MEMORY_PATH = str(PROJECT_ROOT / "memory")  # Путь к папке с памятью диалогов
 
 # Проверяем существование папок

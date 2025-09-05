@@ -37,6 +37,7 @@ logger.info("Логирование настроено")
 try:
     logger.info("Попытка импорта agent...")
     from backend.agent import ask_agent, model_settings, update_model_settings, reload_model_by_path, get_model_info, initialize_model
+    from backend.context_prompts import context_prompt_manager
     logger.info("agent импортирован успешно")
     if ask_agent:
         logger.info("ask_agent функция доступна")
@@ -543,6 +544,7 @@ async def chat_message(sid, data):
                 logger.info("Socket.IO: doc_processor не доступен, используем исходное сообщение")
             
             # Генерация ответа
+            current_model_path = get_current_model_path()
             if streaming:
                 # Потоковая генерация в отдельном потоке
                 import concurrent.futures
@@ -554,7 +556,9 @@ async def chat_message(sid, data):
                         history,
                         None,  # max_tokens
                         True,  # streaming
-                        sync_stream_callback
+                        sync_stream_callback,
+                        current_model_path,  # model_path
+                        None   # custom_prompt_id
                     )
                 logger.info(f"Socket.IO: получен потоковый ответ, длина: {len(response)} символов")
                 
@@ -573,7 +577,9 @@ async def chat_message(sid, data):
                         history,
                         None,  # max_tokens
                         False,  # streaming
-                        None   # stream_callback
+                        None,   # stream_callback
+                        current_model_path,  # model_path
+                        None    # custom_prompt_id
                     )
                 logger.info(f"Socket.IO: получен ответ, длина: {len(response)} символов")
             
@@ -724,19 +730,23 @@ async def chat_with_ai(message: ChatMessage):
             else:
                 logger.info("Список документов пуст, используем обычный AI agent")
                 # Отправляем запрос к модели без контекста документов
+                current_model_path = get_current_model_path()
                 response = ask_agent(
                     message.message,
                     history=history,
-                    streaming=False  # Для REST API используем обычный режим
+                    streaming=False,  # Для REST API используем обычный режим
+                    model_path=current_model_path
                 )
                 logger.info(f"Получен ответ от AI agent, длина: {len(response)} символов")
         else:
             logger.info("doc_processor не доступен, используем обычный AI agent")
             # Отправляем запрос к модели без контекста документов
+            current_model_path = get_current_model_path()
             response = ask_agent(
                 message.message,
                 history=history,
-                streaming=False  # Для REST API используем обычный режим
+                streaming=False,  # Для REST API используем обычный режим
+                model_path=current_model_path
             )
             logger.info(f"Получен ответ от AI agent, длина: {len(response)} символов")
         
@@ -826,18 +836,21 @@ async def websocket_chat(websocket: WebSocket):
                             
                             logger.info("WebSocket: отправляем промпт с контекстом в AI agent")
                             
+                            current_model_path = get_current_model_path()
                             if streaming:
                                 response = ask_agent(
                                     enhanced_prompt,
                                     history=history,
                                     streaming=True,
-                                    stream_callback=stream_callback
+                                    stream_callback=stream_callback,
+                                    model_path=current_model_path
                                 )
                             else:
                                 response = ask_agent(
                                     enhanced_prompt,
                                     history=history,
-                                    streaming=False
+                                    streaming=False,
+                                    model_path=current_model_path
                                 )
                             
                             logger.info(f"WebSocket: получен ответ от AI agent с контекстом документов, длина: {len(response)} символов")
@@ -845,29 +858,34 @@ async def websocket_chat(websocket: WebSocket):
                         except Exception as e:
                             logger.error(f"WebSocket: ошибка при получении контекста документов: {e}")
                             # Fallback к обычному AI agent
+                            current_model_path = get_current_model_path()
                             if streaming:
                                 response = ask_agent(
                                     user_message,
                                     history=history,
                                     streaming=True,
-                                    stream_callback=stream_callback
+                                    stream_callback=stream_callback,
+                                    model_path=current_model_path
                                 )
                             else:
                                 response = ask_agent(
                                     user_message,
                                     history=history,
-                                    streaming=False
+                                    streaming=False,
+                                    model_path=current_model_path
                                 )
                             logger.info(f"WebSocket: использован fallback к обычному AI agent")
                     else:
                         logger.info("WebSocket: список документов пуст, используем обычный AI agent")
+                        current_model_path = get_current_model_path()
                         if streaming:
                             # Потоковая генерация
                             response = ask_agent(
                                 user_message,
                                 history=history,
                                 streaming=True,
-                                stream_callback=stream_callback
+                                stream_callback=stream_callback,
+                                model_path=current_model_path
                             )
                             logger.info(f"WebSocket: получен потоковый ответ от AI agent, длина: {len(response)} символов")
                         else:
@@ -875,18 +893,21 @@ async def websocket_chat(websocket: WebSocket):
                             response = ask_agent(
                                 user_message,
                                 history=history,
-                                streaming=False
+                                streaming=False,
+                                model_path=current_model_path
                             )
                             logger.info(f"WebSocket: получен потоковый ответ от AI agent, длина: {len(response)} символов")
                 else:
                     logger.info("WebSocket: doc_processor не доступен, используем обычный AI agent")
+                    current_model_path = get_current_model_path()
                     if streaming:
                         # Потоковая генерация
                         response = ask_agent(
                             user_message,
                             history=history,
                             streaming=True,
-                            stream_callback=stream_callback
+                            stream_callback=stream_callback,
+                            model_path=current_model_path
                         )
                         logger.info(f"WebSocket: получен потоковый ответ от AI agent, длина: {len(response)} символов")
                     else:
@@ -894,16 +915,13 @@ async def websocket_chat(websocket: WebSocket):
                         response = ask_agent(
                             user_message,
                             history=history,
-                            streaming=False
+                            streaming=False,
+                            model_path=current_model_path
                         )
                         logger.info(f"WebSocket: получен ответ от AI agent, длина: {len(response)} символов")
                 
                 # Сохраняем ответ
                 save_dialog_entry("assistant", response)
-                
-                # Очищаем флаг остановки после завершения генерации
-                if sid in stop_generation_flags:
-                    stop_generation_flags[sid] = False
                 
                 # Отправляем финальное сообщение
                 await websocket.send_text(json.dumps({
@@ -990,7 +1008,8 @@ async def process_audio_data(websocket: WebSocket, data: bytes):
             logger.info(f"ОТПРАВЛЯЮ В LLM: текст='{recognized_text}', история={len(history)} записей")
             
             try:
-                ai_response = ask_agent(recognized_text, history=history, streaming=False)
+                current_model_path = get_current_model_path()
+                ai_response = ask_agent(recognized_text, history=history, streaming=False, model_path=current_model_path)
                 logger.info(f"ОТВЕТ ОТ LLM: '{ai_response[:100]}{'...' if len(ai_response) > 100 else ''}')")
             except Exception as ai_error:
                 logger.error(f"Ошибка обращения к AI: {ai_error}")
@@ -1470,6 +1489,36 @@ async def update_model_settings_api(settings: ModelSettings):
         else:
             raise HTTPException(status_code=400, detail="Не удалось обновить настройки")
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/models/settings/reset")
+async def reset_model_settings():
+    """Сбросить настройки модели к рекомендуемым значениям по умолчанию"""
+    if not model_settings:
+        raise HTTPException(status_code=503, detail="AI agent не доступен")
+    try:
+        model_settings.reset_to_defaults()
+        return {
+            "message": "Настройки сброшены к рекомендуемым значениям", 
+            "success": True,
+            "settings": model_settings.get_all()
+        }
+    except Exception as e:
+        logger.error(f"Ошибка сброса настроек модели: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/models/settings/recommended")
+async def get_recommended_settings():
+    """Получить рекомендуемые настройки модели"""
+    if not model_settings:
+        raise HTTPException(status_code=503, detail="AI agent не доступен")
+    try:
+        return {
+            "recommended": model_settings.get_recommended_settings(),
+            "max_values": model_settings.get_max_values()
+        }
+    except Exception as e:
+        logger.error(f"Ошибка получения рекомендуемых настроек: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # ================================
@@ -2138,6 +2187,190 @@ async def get_system_status():
         },
         "timestamp": datetime.now().isoformat()
     }
+
+# ================================
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ================================
+
+def get_current_model_path():
+    """Получить путь к текущей загруженной модели"""
+    try:
+        # Пытаемся получить от AI модуля
+        if get_model_info:
+            result = get_model_info()
+            if result and 'path' in result:
+                return result['path']
+        
+        # Fallback к сохраненным настройкам
+        settings = load_app_settings()
+        return settings.get('current_model_path')
+    except Exception as e:
+        logger.error(f"Ошибка получения пути модели: {e}")
+        return None
+
+# ================================
+# КОНТЕКСТНЫЕ ПРОМПТЫ API
+# ================================
+
+@app.get("/api/context-prompts/global")
+async def get_global_prompt():
+    """Получить глобальный контекстный промпт"""
+    try:
+        prompt = context_prompt_manager.get_global_prompt()
+        return {
+            "prompt": prompt,
+            "success": True,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Ошибка при получении глобального промпта: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/context-prompts/global")
+async def update_global_prompt(request: Dict[str, str]):
+    """Обновить глобальный контекстный промпт"""
+    try:
+        prompt = request.get("prompt", "")
+        
+        success = context_prompt_manager.set_global_prompt(prompt)
+        if success:
+            return {
+                "message": "Глобальный промпт обновлен",
+                "success": True,
+                "timestamp": datetime.now().isoformat()
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Ошибка при сохранении промпта")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Ошибка при обновлении глобального промпта: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/context-prompts/models")
+async def get_models_with_prompts():
+    """Получить список всех моделей с их контекстными промптами"""
+    try:
+        models = context_prompt_manager.get_models_list()
+        return {
+            "models": models,
+            "success": True,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Ошибка при получении списка моделей: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/context-prompts/model/{model_path:path}")
+async def get_model_prompt(model_path: str):
+    """Получить контекстный промпт для конкретной модели"""
+    try:
+        prompt = context_prompt_manager.get_model_prompt(model_path)
+        return {
+            "model_path": model_path,
+            "prompt": prompt,
+            "success": True,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Ошибка при получении промпта модели: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/context-prompts/model/{model_path:path}")
+async def update_model_prompt(model_path: str, request: Dict[str, str]):
+    """Обновить контекстный промпт для конкретной модели"""
+    try:
+        prompt = request.get("prompt", "")
+        
+        success = context_prompt_manager.set_model_prompt(model_path, prompt)
+        if success:
+            return {
+                "message": f"Промпт для модели {model_path} обновлен",
+                "success": True,
+                "timestamp": datetime.now().isoformat()
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Ошибка при сохранении промпта")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Ошибка при обновлении промпта модели: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/context-prompts/custom")
+async def get_custom_prompts():
+    """Получить все пользовательские промпты"""
+    try:
+        prompts = context_prompt_manager.get_all_custom_prompts()
+        return {
+            "prompts": prompts,
+            "success": True,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Ошибка при получении пользовательских промптов: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/context-prompts/custom")
+async def create_custom_prompt(request: Dict[str, str]):
+    """Создать новый пользовательский промпт"""
+    try:
+        prompt_id = request.get("id", "")
+        prompt = request.get("prompt", "")
+        description = request.get("description", "")
+        
+        if not prompt_id.strip() or not prompt.strip():
+            raise HTTPException(status_code=400, detail="ID и промпт обязательны")
+        
+        success = context_prompt_manager.set_custom_prompt(prompt_id, prompt, description)
+        if success:
+            return {
+                "message": f"Пользовательский промпт '{prompt_id}' создан",
+                "success": True,
+                "timestamp": datetime.now().isoformat()
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Ошибка при создании промпта")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Ошибка при создании пользовательского промпта: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/context-prompts/custom/{prompt_id}")
+async def delete_custom_prompt(prompt_id: str):
+    """Удалить пользовательский промпт"""
+    try:
+        success = context_prompt_manager.delete_custom_prompt(prompt_id)
+        if success:
+            return {
+                "message": f"Пользовательский промпт '{prompt_id}' удален",
+                "success": True,
+                "timestamp": datetime.now().isoformat()
+            }
+        else:
+            raise HTTPException(status_code=404, detail="Промпт не найден")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Ошибка при удалении пользовательского промпта: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/context-prompts/effective/{model_path:path}")
+async def get_effective_prompt(model_path: str, custom_prompt_id: Optional[str] = None):
+    """Получить эффективный промпт для модели с учетом приоритетов"""
+    try:
+        prompt = context_prompt_manager.get_effective_prompt(model_path, custom_prompt_id)
+        return {
+            "model_path": model_path,
+            "custom_prompt_id": custom_prompt_id,
+            "prompt": prompt,
+            "success": True,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Ошибка при получении эффективного промпта: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ================================
 # СТАТИЧЕСКИЕ ФАЙЛЫ И ФРОНТЕНД

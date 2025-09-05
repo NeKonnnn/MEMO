@@ -31,6 +31,22 @@ except ImportError:
 import gc
 import logging
 import traceback
+import warnings
+
+# Настройка предупреждений и совместимости
+warnings.filterwarnings("ignore", category=UserWarning, module="pytorch_lightning")
+warnings.filterwarnings("ignore", category=UserWarning, module="pyannote")
+warnings.filterwarnings("ignore", category=UserWarning, module="torch")
+
+# Попытка исправить проблему с cudnn
+try:
+    if torch.cuda.is_available():
+        # Включаем TF32 для совместимости
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        print("TF32 включен для совместимости с новыми версиями torch")
+except Exception as e:
+    print(f"Предупреждение при настройке TF32: {e}")
 
 # Локальный пайплайн диаризации
 LOCAL_DIARIZATION_AVAILABLE = True
@@ -112,9 +128,41 @@ class WhisperXTranscriber:
         
         # Определяем устройство и тип вычислений
         if torch.cuda.is_available():
-            self.device = "cuda"
-            self.compute_type = "float16"
-            self.logger.info("CUDA доступна, используем GPU")
+            try:
+                # Проверяем доступность CUDA и cudnn
+                torch.cuda.empty_cache()
+                test_tensor = torch.randn(1, 1).cuda()
+                
+                # Тестируем операции, которые могут вызвать ошибку cudnn
+                try:
+                    # Пробуем операцию, которая использует cudnn
+                    result = torch.nn.functional.conv2d(test_tensor.unsqueeze(0).unsqueeze(0), 
+                                                      torch.randn(1, 1, 3, 3).cuda())
+                    del result
+                except Exception as cudnn_error:
+                    if "cudnn_ops_infer64_8.dll" in str(cudnn_error):
+                        self.logger.warning(f"Ошибка cudnn: {cudnn_error}")
+                        self.logger.warning("Переключаемся на CPU из-за проблем с cudnn")
+                        del test_tensor
+                        torch.cuda.empty_cache()
+                        self.device = "cpu"
+                        self.compute_type = "float32"
+                        self.logger.info("Используем CPU из-за проблем с cudnn")
+                        return
+                    else:
+                        raise cudnn_error
+                
+                del test_tensor
+                torch.cuda.empty_cache()
+                
+                self.device = "cuda"
+                self.compute_type = "float16"
+                self.logger.info("CUDA доступна, используем GPU")
+            except Exception as cuda_error:
+                self.logger.warning(f"CUDA недоступна из-за ошибки: {cuda_error}")
+                self.device = "cpu"
+                self.compute_type = "float32"
+                self.logger.info("Переключились на CPU из-за проблем с CUDA")
         else:
             self.device = "cpu"
             self.compute_type = "float32"
@@ -209,6 +257,23 @@ class WhisperXTranscriber:
             
             self._update_progress(10)
             
+            # Настройка совместимости версий
+            print("Настройка совместимости версий...")
+            try:
+                # Включаем TF32 для совместимости с новыми версиями torch
+                if torch.cuda.is_available():
+                    torch.backends.cuda.matmul.allow_tf32 = True
+                    torch.backends.cudnn.allow_tf32 = True
+                    print("TF32 включен для совместимости")
+                
+                # Отключаем предупреждения о совместимости версий
+                import warnings
+                warnings.filterwarnings("ignore", category=UserWarning, module="pytorch_lightning")
+                warnings.filterwarnings("ignore", category=UserWarning, module="pyannote")
+                print("Предупреждения о совместимости отключены")
+            except Exception as compat_error:
+                print(f"Предупреждение при настройке совместимости: {compat_error}")
+            
             # Загружаем модель WhisperX
             print("Загрузка модели WhisperX...")
             model = whisperx.load_model(
@@ -231,47 +296,72 @@ class WhisperXTranscriber:
             except Exception as transcribe_error:
                 print(f"Стандартная транскрибация не удалась: {transcribe_error}")
                 
-                # Пробуем через torchaudio как fallback
-                try:
-                    print("Пробуем через torchaudio...")
-                    import torchaudio
+                # Проверяем, не связана ли ошибка с cudnn
+                if "cudnn_ops_infer64_8.dll" in str(transcribe_error):
+                    print("Обнаружена ошибка cudnn, переключаемся на CPU...")
+                    # Переключаемся на CPU
+                    self.device = "cpu"
+                    self.compute_type = "float32"
                     
-                    # Загружаем аудио как тензор
-                    waveform, sample_rate = torchaudio.load(audio_path)
-                    print(f"Аудио загружено: форма {waveform.shape}, частота {sample_rate}")
+                    # Перезагружаем модель на CPU
+                    print("Перезагружаем модель на CPU...")
+                    model = whisperx.load_model(
+                        self.model_size, 
+                        "cpu", 
+                        compute_type="float32",
+                        language=self.language,
+                        download_root=self.whisper_model_path
+                    )
                     
-                    # Конвертируем в моно если нужно
-                    if waveform.shape[0] > 1:
-                        waveform = torch.mean(waveform, dim=0, keepdim=True)
-                        print("Аудио конвертировано в моно")
-                    
-                    # Проверяем, что тензор не пустой
-                    if waveform.numel() == 0:
-                        raise Exception("Аудио файл пустой или поврежден")
-                    
-                    # Нормализуем (с проверкой на пустой тензор)
-                    max_val = torch.max(torch.abs(waveform))
-                    if max_val > 0:
-                        waveform = waveform / max_val
-                        print("Аудио нормализовано")
-                    
-                    print(f"Тензор готов для транскрибации: форма {waveform.shape}")
-                    
-                    # Транскрибируем тензор
-                    print("Начинаем транскрипцию через тензор...")
-                    if waveform.dim() == 1:
-                        waveform = waveform.unsqueeze(0)
-                    elif waveform.dim() == 2 and waveform.shape[0] == 1:
-                        pass
-                    else:
-                        raise Exception(f"Неподдерживаемая форма тензора: {waveform.shape}")
-                    
-                    result = model.transcribe(waveform, sample_rate)
-                    print("Транскрибация через тензор успешна")
-                    
-                except Exception as tensor_error:
-                    print(f"Транскрибация через torchaudio не удалась: {tensor_error}")
-                    raise Exception(f"Не удалось транскрибировать аудио: {transcribe_error}")
+                    # Пробуем транскрибацию на CPU
+                    try:
+                        result = model.transcribe(audio_path)
+                        print("Транскрибация на CPU успешна")
+                    except Exception as cpu_error:
+                        print(f"Транскрибация на CPU не удалась: {cpu_error}")
+                        raise Exception(f"Не удалось транскрибировать аудио: {cpu_error}")
+                else:
+                    # Пробуем через torchaudio как fallback
+                    try:
+                        print("Пробуем через torchaudio...")
+                        import torchaudio
+                        
+                        # Загружаем аудио как тензор
+                        waveform, sample_rate = torchaudio.load(audio_path)
+                        print(f"Аудио загружено: форма {waveform.shape}, частота {sample_rate}")
+                        
+                        # Конвертируем в моно если нужно
+                        if waveform.shape[0] > 1:
+                            waveform = torch.mean(waveform, dim=0, keepdim=True)
+                            print("Аудио конвертировано в моно")
+                        
+                        # Проверяем, что тензор не пустой
+                        if waveform.numel() == 0:
+                            raise Exception("Аудио файл пустой или поврежден")
+                        
+                        # Нормализуем (с проверкой на пустой тензор)
+                        max_val = torch.max(torch.abs(waveform))
+                        if max_val > 0:
+                            waveform = waveform / max_val
+                            print("Аудио нормализовано")
+                        
+                        print(f"Тензор готов для транскрибации: форма {waveform.shape}")
+                        
+                        # Транскрибируем тензор
+                        print("Начинаем транскрипцию через тензор...")
+                        if waveform.dim() == 1:
+                            waveform = waveform.unsqueeze(0)
+                        elif waveform.dim() == 2 and waveform.shape[0] == 1:
+                            pass
+                        else:
+                            raise Exception(f"Неподдерживаемая форма тензора: {waveform.shape}")
+                        
+                        result = model.transcribe(waveform, sample_rate)
+                        print("Транскрибация через тензор успешна")
+                        
+                    except Exception as tensor_error:
+                        print(f"Транскрибация через torchaudio не удалась: {tensor_error}")
+                        raise Exception(f"Не удалось транскрибировать аудио: {transcribe_error}")
             
             self._update_progress(70)
             
@@ -291,14 +381,20 @@ class WhisperXTranscriber:
                     else:
                         # Загружаем локальный пайплайн
                         print("Загружаем локальный пайплайн диаризации...")
-                        diarize_model = self._load_local_diarization_pipeline()
-                        
-                        if diarize_model:
-                            print("Локальный пайплайн диаризации загружен")
-                            # Кэшируем модель для следующего использования
-                            self._cached_diarize_model = diarize_model
-                        else:
-                            print("Не удалось загрузить локальный пайплайн диаризации")
+                        try:
+                            diarize_model = self._load_local_diarization_pipeline()
+                            
+                            if diarize_model:
+                                print("Локальный пайплайн диаризации загружен")
+                                # Кэшируем модель для следующего использования
+                                self._cached_diarize_model = diarize_model
+                            else:
+                                print("Не удалось загрузить локальный пайплайн диаризации")
+                                print("Используем простую транскрипцию без диаризации")
+                                transcript = self._format_simple_transcript(result)
+                                return True, transcript
+                        except Exception as diarize_load_error:
+                            print(f"Ошибка загрузки диаризации: {diarize_load_error}")
                             print("Используем простую транскрипцию без диаризации")
                             transcript = self._format_simple_transcript(result)
                             return True, transcript

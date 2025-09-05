@@ -35,7 +35,6 @@ import {
   ExpandLess as ExpandLessIcon,
   Upload as UploadIcon,
   Computer as ComputerIcon,
-  VolumeUp as VolumeUpIcon,
   Memory as MemoryIcon,
 } from '@mui/icons-material';
 import { useAppActions } from '../contexts/AppContext';
@@ -61,11 +60,16 @@ export default function SettingsPage() {
     streaming_speed: 50, // Скорость потоковой генерации в миллисекундах
   });
 
-  const [voiceSettings, setVoiceSettings] = useState({
-    voice_id: "ru",
-    speech_rate: 1.0,
-    voice_speaker: "baya", // Добавляем выбор конкретного голоса
+  const [maxValues, setMaxValues] = useState({
+    context_size: 32768,
+    output_tokens: 8192,
+    batch_size: 2048,
+    n_threads: 24,
+    temperature: 2.0,
+    top_p: 1.0,
+    repeat_penalty: 2.0
   });
+
 
   const [transcriptionSettings, setTranscriptionSettings] = useState({
     engine: "whisperx" as "whisperx" | "vosk",
@@ -79,6 +83,28 @@ export default function SettingsPage() {
     clear_on_restart: false,
   });
 
+  // Состояния для контекстных промптов
+  const [contextPrompts, setContextPrompts] = useState({
+    globalPrompt: '',
+    modelPrompts: {} as Record<string, string>,
+    customPrompts: {} as Record<string, { prompt: string; description: string; created_at: string }>,
+  });
+
+  const [modelsWithPrompts, setModelsWithPrompts] = useState<Array<{
+    name: string;
+    path: string;
+    size: number;
+    size_mb: number;
+    context_prompt: string;
+    has_custom_prompt: boolean;
+  }>>([]);
+
+  const [selectedModelForPrompt, setSelectedModelForPrompt] = useState<string>('');
+  const [promptDialogOpen, setPromptDialogOpen] = useState(false);
+  const [promptDialogType, setPromptDialogType] = useState<'global' | 'model'>('global');
+  const [promptDialogData, setPromptDialogData] = useState({ prompt: '', description: '', id: '' });
+  const [showModelPromptDialog, setShowModelPromptDialog] = useState(false);
+
   const [availableModels, setAvailableModels] = useState<Array<{
     name: string;
     path: string;
@@ -91,10 +117,6 @@ export default function SettingsPage() {
   const [isLoadingModel, setIsLoadingModel] = useState(false);
   const [showModelDialog, setShowModelDialog] = useState(false);
   
-  // Состояние для тестирования голоса
-  const [isTestingVoice, setIsTestingVoice] = useState(false);
-  const [showVoiceTestDialog, setShowVoiceTestDialog] = useState(false);
-  const [selectedVoiceForTest, setSelectedVoiceForTest] = useState("baya");
 
   const { showNotification } = useAppActions();
 
@@ -103,6 +125,7 @@ export default function SettingsPage() {
     loadSettings();
     loadModels();
     loadCurrentModel();
+    loadContextPrompts();
   }, []);
 
   // Функция для разворачивания/сворачивания секций
@@ -115,76 +138,177 @@ export default function SettingsPage() {
     setIsVisible(!isVisible);
   };
 
-  // Функция тестирования голоса
-  const testVoice = async (voiceName: string) => {
-    setIsTestingVoice(true);
-    let audioUrl: string | null = null;
-    
-    try {
-      console.log('Тестирую голос:', voiceName);
-      
-      const response = await fetch(`${API_BASE_URL}/api/voice/synthesize`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          text: `Привет, я Газик И И ${voiceName}.`,
-          voice_id: voiceSettings.voice_id,
-          voice_speaker: voiceName,
-        }),
-      });
 
-      if (response.ok) {
-        const audioBlob = await response.blob();
-        audioUrl = URL.createObjectURL(audioBlob);
-        const audio = new Audio(audioUrl);
+  // Функции для работы с контекстными промптами
+  const loadContextPrompts = async () => {
+    try {
+      // Загружаем глобальный промпт
+      const globalResponse = await fetch(`${API_BASE_URL}/api/context-prompts/global`);
+      if (globalResponse.ok) {
+        const globalData = await globalResponse.json();
+        setContextPrompts(prev => ({ ...prev, globalPrompt: globalData.prompt }));
+      }
+
+      // Загружаем модели с промптами
+      const modelsResponse = await fetch(`${API_BASE_URL}/api/context-prompts/models`);
+      if (modelsResponse.ok) {
+        const modelsData = await modelsResponse.json();
+        setModelsWithPrompts(modelsData.models || []);
         
-        console.log('Воспроизведение тестового аудио...');
-        
-        audio.onended = () => {
-          console.log('Тестирование голоса завершено');
-          if (audioUrl) {
-            URL.revokeObjectURL(audioUrl);
-            audioUrl = null;
+        // Обновляем промпты моделей
+        const modelPrompts: Record<string, string> = {};
+        modelsData.models?.forEach((model: any) => {
+          if (model.has_custom_prompt) {
+            modelPrompts[model.path] = model.context_prompt;
           }
-          setIsTestingVoice(false);
-        };
-        
-        audio.onerror = () => {
-          console.error('Ошибка воспроизведения тестового голоса');
-          showNotification('error', 'Ошибка воспроизведения тестового голоса');
-          if (audioUrl) {
-            URL.revokeObjectURL(audioUrl);
-            audioUrl = null;
-          }
-          setIsTestingVoice(false);
-        };
-        
-        await audio.play();
-        showNotification('success', `Тестирую голос ${voiceName}...`);
-      } else {
-        const errorText = await response.text();
-        console.error('Ошибка тестирования голоса:', response.status, errorText);
-        throw new Error(`HTTP ${response.status}: ${errorText}`);
+        });
+        setContextPrompts(prev => ({ ...prev, modelPrompts }));
+      }
+
+      // Загружаем пользовательские промпты
+      const customResponse = await fetch(`${API_BASE_URL}/api/context-prompts/custom`);
+      if (customResponse.ok) {
+        const customData = await customResponse.json();
+        setContextPrompts(prev => ({ ...prev, customPrompts: customData.prompts || {} }));
       }
     } catch (error) {
-      console.error('Ошибка тестирования голоса:', error);
-      showNotification('error', `Ошибка тестирования голоса: ${error instanceof Error ? error.message : 'Неизвестная ошибка'}`);
-      
-      // Очищаем ресурсы в случае ошибки
-      if (audioUrl) {
-        URL.revokeObjectURL(audioUrl);
-        audioUrl = null;
-      }
-      setIsTestingVoice(false);
+      console.error('Ошибка загрузки контекстных промптов:', error);
+      showNotification('error', 'Ошибка загрузки контекстных промптов');
     }
   };
 
-  // Функция открытия диалога тестирования голоса
-  const openVoiceTestDialog = () => {
-    setSelectedVoiceForTest(voiceSettings.voice_speaker);
-    setShowVoiceTestDialog(true);
+  const saveGlobalPrompt = async (prompt: string) => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/context-prompts/global`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt })
+      });
+      
+      if (response.ok) {
+        setContextPrompts(prev => ({ ...prev, globalPrompt: prompt }));
+        showNotification('success', 'Глобальный промпт сохранен');
+        return true;
+      } else {
+        throw new Error('Ошибка сохранения глобального промпта');
+      }
+    } catch (error) {
+      console.error('Ошибка сохранения глобального промпта:', error);
+      showNotification('error', 'Ошибка сохранения глобального промпта');
+      return false;
+    }
+  };
+
+  const saveModelPrompt = async (modelPath: string, prompt: string) => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/context-prompts/model/${encodeURIComponent(modelPath)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt })
+      });
+      
+      if (response.ok) {
+        setContextPrompts(prev => ({
+          ...prev,
+          modelPrompts: { ...prev.modelPrompts, [modelPath]: prompt }
+        }));
+        showNotification('success', 'Промпт модели сохранен');
+        return true;
+      } else {
+        throw new Error('Ошибка сохранения промпта модели');
+      }
+    } catch (error) {
+      console.error('Ошибка сохранения промпта модели:', error);
+      showNotification('error', 'Ошибка сохранения промпта модели');
+      return false;
+    }
+  };
+
+  const saveCustomPrompt = async (id: string, prompt: string, description: string) => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/context-prompts/custom`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, prompt, description })
+      });
+      
+      if (response.ok) {
+        setContextPrompts(prev => ({
+          ...prev,
+          customPrompts: {
+            ...prev.customPrompts,
+            [id]: { prompt, description, created_at: new Date().toISOString() }
+          }
+        }));
+        showNotification('success', 'Пользовательский промпт сохранен');
+        return true;
+      } else {
+        throw new Error('Ошибка сохранения пользовательского промпта');
+      }
+    } catch (error) {
+      console.error('Ошибка сохранения пользовательского промпта:', error);
+      showNotification('error', 'Ошибка сохранения пользовательского промпта');
+      return false;
+    }
+  };
+
+  const deleteModelPrompt = async (modelPath: string) => {
+    try {
+      // Удаляем промпт модели, устанавливая пустую строку
+      const response = await fetch(`${API_BASE_URL}/api/context-prompts/model/${encodeURIComponent(modelPath)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: '' })
+      });
+      
+      if (response.ok) {
+        setContextPrompts(prev => {
+          const newModelPrompts = { ...prev.modelPrompts };
+          delete newModelPrompts[modelPath];
+          return { ...prev, modelPrompts: newModelPrompts };
+        });
+        showNotification('success', 'Промпт модели удален');
+        await loadContextPrompts(); // Перезагружаем данные
+        return true;
+      } else {
+        throw new Error('Ошибка удаления промпта модели');
+      }
+    } catch (error) {
+      console.error('Ошибка удаления промпта модели:', error);
+      showNotification('error', 'Ошибка удаления промпта модели');
+      return false;
+    }
+  };
+
+  const openPromptDialog = (type: 'global' | 'model', data?: any) => {
+    setPromptDialogType(type);
+    if (type === 'global') {
+      setPromptDialogData({ prompt: contextPrompts.globalPrompt, description: '', id: '' });
+    } else if (type === 'model' && data) {
+      setPromptDialogData({ 
+        prompt: contextPrompts.modelPrompts[data.path] || contextPrompts.globalPrompt, 
+        description: '', 
+        id: data.path 
+      });
+      setSelectedModelForPrompt(data.path);
+    } else {
+      setPromptDialogData({ prompt: '', description: '', id: '' });
+    }
+    setPromptDialogOpen(true);
+  };
+
+  const handlePromptDialogSave = async () => {
+    let success = false;
+    if (promptDialogType === 'global') {
+      success = await saveGlobalPrompt(promptDialogData.prompt);
+    } else if (promptDialogType === 'model') {
+      success = await saveModelPrompt(selectedModelForPrompt, promptDialogData.prompt);
+    }
+
+    if (success) {
+      setPromptDialogOpen(false);
+      await loadContextPrompts(); // Перезагружаем данные
+    }
   };
 
   const loadSettings = async () => {
@@ -197,12 +321,15 @@ export default function SettingsPage() {
         setModelSettings(prev => ({ ...prev, ...modelData }));
       }
       
-      // Загружаем настройки голоса
-      const voiceResponse = await fetch(`${API_BASE_URL}/api/voice/settings`);
-      if (voiceResponse.ok) {
-        const voiceData = await voiceResponse.json();
-        setVoiceSettings(prev => ({ ...prev, ...voiceData }));
+      // Загружаем максимальные значения
+      const maxResponse = await fetch(`${API_BASE_URL}/api/models/settings/recommended`);
+      if (maxResponse.ok) {
+        const maxData = await maxResponse.json();
+        if (maxData.max_values) {
+          setMaxValues(maxData.max_values);
+        }
       }
+      
       
              // Загружаем настройки транскрибации
        const transcriptionResponse = await fetch(`${API_BASE_URL}/api/transcription/settings`);
@@ -272,16 +399,6 @@ export default function SettingsPage() {
         throw new Error(`Ошибка сохранения настроек модели: ${modelResponse.status}`);
       }
       
-      // Сохраняем настройки голоса
-      const voiceResponse = await fetch(`${API_BASE_URL}/api/voice/settings`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(voiceSettings),
-      });
-      
-      if (!voiceResponse.ok) {
-        throw new Error(`Ошибка сохранения настроек голоса: ${voiceResponse.status}`);
-      }
       
              // Сохраняем настройки транскрибации
        const transcriptionResponse = await fetch(`${API_BASE_URL}/api/transcription/settings`, {
@@ -315,6 +432,88 @@ export default function SettingsPage() {
       console.error('Ошибка сохранения настроек:', error);
       setError(`Ошибка сохранения: ${error}`);
       showNotification('error', 'Ошибка сохранения настроек');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Функции для работы с настройками модели
+  const loadModelSettings = async () => {
+    setIsLoading(true);
+    try {
+      // Загружаем настройки модели
+      const settingsResponse = await fetch(`${API_BASE_URL}/api/models/settings`);
+      if (settingsResponse.ok) {
+        const settingsData = await settingsResponse.json();
+        setModelSettings(prev => ({ ...prev, ...settingsData }));
+      }
+      
+      // Загружаем максимальные значения
+      const maxResponse = await fetch(`${API_BASE_URL}/api/models/settings/recommended`);
+      if (maxResponse.ok) {
+        const maxData = await maxResponse.json();
+        if (maxData.max_values) {
+          setMaxValues(maxData.max_values);
+        }
+      }
+      
+      setSuccess('Настройки модели загружены');
+    } catch (error) {
+      console.error('Ошибка загрузки настроек модели:', error);
+      setError(`Ошибка загрузки настроек модели: ${error}`);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const saveModelSettings = async () => {
+    setIsLoading(true);
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/models/settings`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(modelSettings),
+      });
+      
+      if (response.ok) {
+        setSuccess('Настройки модели сохранены');
+        showNotification('success', 'Настройки модели сохранены');
+      } else {
+        throw new Error(`Ошибка сохранения настроек модели: ${response.status}`);
+      }
+    } catch (error) {
+      console.error('Ошибка сохранения настроек модели:', error);
+      setError(`Ошибка сохранения настроек модели: ${error}`);
+      showNotification('error', 'Ошибка сохранения настроек модели');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const resetModelSettings = async () => {
+    setIsLoading(true);
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/models/settings/reset`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      
+      if (response.ok) {
+        const data = await response.json();
+        if (data.success) {
+          setModelSettings(prev => ({ ...prev, ...data.settings }));
+          setSuccess('Настройки модели сброшены к рекомендуемым значениям');
+          showNotification('success', 'Настройки сброшены к рекомендуемым');
+        } else {
+          throw new Error('Не удалось сбросить настройки');
+        }
+      } else {
+        throw new Error(`Ошибка сброса настроек: ${response.status}`);
+      }
+    } catch (error) {
+      console.error('Ошибка сброса настроек модели:', error);
+      setError(`Ошибка сброса настроек модели: ${error}`);
+      showNotification('error', 'Ошибка сброса настроек модели');
     } finally {
       setIsLoading(false);
     }
@@ -476,7 +675,7 @@ export default function SettingsPage() {
                   ...prev, 
                   context_size: parseInt(e.target.value) || 2048 
                 }))}
-                inputProps={{ min: 512, max: 32768, step: 512 }}
+                inputProps={{ min: 512, max: maxValues.context_size, step: 512 }}
                 fullWidth
               />
               
@@ -488,7 +687,7 @@ export default function SettingsPage() {
                   ...prev, 
                   output_tokens: parseInt(e.target.value) || 512 
                 }))}
-                inputProps={{ min: 64, max: 2048, step: 64 }}
+                inputProps={{ min: 64, max: maxValues.output_tokens, step: 64 }}
                 fullWidth
               />
               
@@ -500,7 +699,7 @@ export default function SettingsPage() {
                   ...prev, 
                   temperature: parseFloat(e.target.value) || 0.7 
                 }))}
-                inputProps={{ min: 0.1, max: 2.0, step: 0.1 }}
+                inputProps={{ min: 0.1, max: maxValues.temperature, step: 0.1 }}
                 fullWidth
               />
               
@@ -512,7 +711,7 @@ export default function SettingsPage() {
                   ...prev, 
                   top_p: parseFloat(e.target.value) || 0.95 
                 }))}
-                inputProps={{ min: 0.1, max: 1.0, step: 0.05 }}
+                inputProps={{ min: 0.1, max: maxValues.top_p, step: 0.05 }}
                 fullWidth
               />
               
@@ -524,7 +723,7 @@ export default function SettingsPage() {
                   ...prev, 
                   repeat_penalty: parseFloat(e.target.value) || 1.05 
                 }))}
-                inputProps={{ min: 1.0, max: 2.0, step: 0.05 }}
+                inputProps={{ min: 1.0, max: maxValues.repeat_penalty, step: 0.05 }}
                 fullWidth
               />
             </Box>
@@ -591,6 +790,38 @@ export default function SettingsPage() {
                 </Box>
               )}
             </Box>
+            
+            {/* Кнопки управления настройками модели */}
+            <Box sx={{ mt: 3, display: 'flex', gap: 2, flexWrap: 'wrap' }}>
+              <Button
+                variant="contained"
+                startIcon={<SaveIcon />}
+                onClick={saveModelSettings}
+                disabled={isLoading}
+                color="primary"
+              >
+                Сохранить настройки модели
+              </Button>
+              
+              <Button
+                variant="outlined"
+                startIcon={<RefreshIcon />}
+                onClick={resetModelSettings}
+                disabled={isLoading}
+                color="secondary"
+              >
+                Сбросить к рекомендуемым
+              </Button>
+              
+              <Button
+                variant="outlined"
+                startIcon={<RefreshIcon />}
+                onClick={loadModelSettings}
+                disabled={isLoading}
+              >
+                Обновить данные
+              </Button>
+            </Box>
           </CardContent>
         </Card>
 
@@ -639,77 +870,129 @@ export default function SettingsPage() {
           </CardContent>
         </Card>
 
-        {/* Настройки голоса */}
+        {/* Контекстные промпты */}
         <Card sx={{ mb: 3 }}>
           <CardContent>
             <Typography variant="h6" gutterBottom>
-              Настройки голоса
+              Контекстные промпты
             </Typography>
-            
-            <Box display="grid" gridTemplateColumns="repeat(auto-fit, minmax(250px, 1fr))" gap={2}>
-              <FormControl fullWidth>
-                <InputLabel>Язык голоса</InputLabel>
-                <Select
-                  value={voiceSettings.voice_id}
-                  label="Язык голоса"
-                  onChange={(e) => setVoiceSettings(prev => ({ 
-                    ...prev, 
-                    voice_id: e.target.value 
-                  }))}
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
+              Настройте системные промпты для моделей. Глобальный промпт применяется ко всем моделям по умолчанию, 
+              но вы можете создать индивидуальные промпты для конкретных моделей.
+            </Typography>
+
+            {/* Глобальный промпт */}
+            <Box sx={{ mb: 3 }}>
+              <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 2 }}>
+                <Typography variant="subtitle1" fontWeight="600">
+                  Глобальный промпт
+                </Typography>
+                <Button
+                  variant="outlined"
+                  size="small"
+                  onClick={() => openPromptDialog('global')}
                 >
-                  <MenuItem value="ru">Русский</MenuItem>
-                  <MenuItem value="en">English</MenuItem>
-                </Select>
-              </FormControl>
-              
-              <FormControl fullWidth>
-                <InputLabel>Голос для синтеза</InputLabel>
-                <Select
-                  value={voiceSettings.voice_speaker}
-                  label="Голос для синтеза"
-                  onChange={(e) => setVoiceSettings(prev => ({ 
-                    ...prev, 
-                    voice_speaker: e.target.value 
-                  }))}
-                >
-                  <MenuItem value="baya">Baya (женский)</MenuItem>
-                  <MenuItem value="xenia">Xenia (женский)</MenuItem>
-                  <MenuItem value="kseniya">Kseniya (женский)</MenuItem>
-                  <MenuItem value="aidar">Aidar (мужской)</MenuItem>
-                  <MenuItem value="eugene">Eugene (мужской)</MenuItem>
-                </Select>
-              </FormControl>
-              
-              <TextField
-                label="Скорость речи"
-                type="number"
-                value={voiceSettings.speech_rate}
-                onChange={(e) => setVoiceSettings(prev => ({ 
-                  ...prev, 
-                  speech_rate: parseFloat(e.target.value) || 1.0 
-                }))}
-                inputProps={{ min: 0.5, max: 2.0, step: 0.1 }}
-                fullWidth
-              />
+                  Редактировать
+                </Button>
+              </Box>
+              <Box sx={{ 
+                p: 2, 
+                bgcolor: 'background.default', 
+                borderRadius: 1, 
+                maxHeight: 150,
+                overflow: 'auto'
+              }}>
+                <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', color: 'text.secondary' }}>
+                  {contextPrompts.globalPrompt || 'Глобальный промпт не установлен'}
+                </Typography>
+              </Box>
             </Box>
-            
-            {/* Кнопка тестирования голоса */}
-            <Box sx={{ mt: 2, display: 'flex', gap: 2, alignItems: 'center' }}>
-              <Button
-                variant="outlined"
-                onClick={openVoiceTestDialog}
-                disabled={isTestingVoice}
-                startIcon={<VolumeUpIcon />}
-              >
-                {isTestingVoice ? 'Тестирую...' : 'Тестировать голос'}
-              </Button>
-              
-              {isTestingVoice && (
-                <CircularProgress size={20} />
+
+            {/* Промпты для моделей */}
+            <Box sx={{ mb: 2 }}>
+              <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 2 }}>
+                <Typography variant="subtitle1" fontWeight="600">
+                  Промпты для моделей
+                </Typography>
+                <Button
+                  variant="contained"
+                  size="small"
+                  startIcon={<span>+</span>}
+                  onClick={() => setShowModelPromptDialog(true)}
+                >
+                  Добавить промпт
+                </Button>
+              </Box>
+              {modelsWithPrompts.filter(model => model.has_custom_prompt).length > 0 ? (
+                <List>
+                  {modelsWithPrompts.filter(model => model.has_custom_prompt).map((model) => (
+                    <ListItem key={model.path} sx={{ 
+                      border: '1px solid', 
+                      borderColor: 'grey.400', 
+                      borderRadius: 1, 
+                      mb: 1,
+                      bgcolor: 'background.default'
+                    }}>
+                      <ListItemText
+                        primary={
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                            <Typography variant="subtitle2" color="text.primary">
+                              {model.name}
+                            </Typography>
+                            <Chip label="Кастомный" size="small" color="primary" />
+                          </Box>
+                        }
+                        secondary={
+                          <Box>
+                            <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                              {model.path}
+                            </Typography>
+                            <Box sx={{ 
+                              p: 1, 
+                              bgcolor: 'background.default', 
+                              borderRadius: 1,
+                              maxHeight: 60,
+                              overflow: 'hidden'
+                            }}>
+                              <Typography variant="body2" sx={{ 
+                                whiteSpace: 'pre-wrap',
+                                color: 'text.secondary'
+                              }}>
+                                {model.context_prompt}
+                              </Typography>
+                            </Box>
+                          </Box>
+                        }
+                      />
+                      <Box sx={{ display: 'flex', gap: 1 }}>
+                        <Button
+                          variant="outlined"
+                          size="small"
+                          onClick={() => openPromptDialog('model', model)}
+                        >
+                          Изменить
+                        </Button>
+                        <Button
+                          variant="outlined"
+                          size="small"
+                          color="error"
+                          onClick={() => deleteModelPrompt(model.path)}
+                        >
+                          Удалить
+                        </Button>
+                      </Box>
+                    </ListItem>
+                  ))}
+                </List>
+              ) : (
+                <Typography variant="body2" color="text.secondary">
+                  Индивидуальные промпты для моделей не созданы
+                </Typography>
               )}
             </Box>
           </CardContent>
         </Card>
+
 
         {/* Настройки транскрибации */}
         <Card sx={{ mb: 3 }}>
@@ -1003,6 +1286,108 @@ export default function SettingsPage() {
         </Collapse>
       </Container>
 
+      {/* Диалог редактирования промптов */}
+      <Dialog
+        open={promptDialogOpen}
+        onClose={() => setPromptDialogOpen(false)}
+        maxWidth="md"
+        fullWidth
+      >
+        <DialogTitle>
+          {promptDialogType === 'global' && 'Редактирование глобального промпта'}
+          {promptDialogType === 'model' && 'Редактирование промпта модели'}
+        </DialogTitle>
+        <DialogContent>
+          <TextField
+            label="Промпт"
+            value={promptDialogData.prompt}
+            onChange={(e) => setPromptDialogData(prev => ({ ...prev, prompt: e.target.value }))}
+            fullWidth
+            multiline
+            rows={8}
+            placeholder="Введите системный промпт для модели..."
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setPromptDialogOpen(false)}>
+            Отмена
+          </Button>
+          <Button onClick={handlePromptDialogSave} variant="contained">
+            Сохранить
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Диалог выбора модели для промпта */}
+      <Dialog
+        open={showModelPromptDialog}
+        onClose={() => setShowModelPromptDialog(false)}
+        maxWidth="md"
+        fullWidth
+      >
+        <DialogTitle>Выберите модель для создания промпта</DialogTitle>
+        <DialogContent>
+          {modelsWithPrompts.length > 0 ? (
+            <List>
+              {modelsWithPrompts.map((model) => (
+                <ListItem 
+                  key={model.path} 
+                  component="div"
+                  onClick={() => {
+                    setSelectedModelForPrompt(model.path);
+                    openPromptDialog('model', model);
+                    setShowModelPromptDialog(false);
+                  }}
+                  sx={{ 
+                    border: '1px solid', 
+                    borderColor: 'grey.300', 
+                    borderRadius: 1, 
+                    mb: 1,
+                    bgcolor: model.has_custom_prompt ? 'primary.50' : 'background.default',
+                    cursor: 'pointer',
+                    '&:hover': {
+                      bgcolor: model.has_custom_prompt ? 'primary.100' : 'action.hover'
+                    }
+                  }}
+                >
+                  <ListItemText
+                    primary={
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                        <Typography variant="subtitle2">
+                          {model.name}
+                        </Typography>
+                        {model.has_custom_prompt && (
+                          <Chip label="Есть промпт" size="small" color="primary" />
+                        )}
+                      </Box>
+                    }
+                    secondary={
+                      <Box>
+                        <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                          {model.path}
+                        </Typography>
+                        <Typography variant="body2" color="text.secondary">
+                          Размер: {model.size_mb} MB
+                        </Typography>
+                      </Box>
+                    }
+                  />
+                </ListItem>
+              ))}
+            </List>
+          ) : (
+            <Typography variant="body2" color="text.secondary">
+              Модели не найдены
+            </Typography>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setShowModelPromptDialog(false)}>
+            Отмена
+          </Button>
+        </DialogActions>
+      </Dialog>
+
       {/* Диалог выбора модели */}
       <Dialog
         open={showModelDialog}
@@ -1076,59 +1461,6 @@ export default function SettingsPage() {
         </DialogActions>
       </Dialog>
       
-      {/* Диалог тестирования голоса */}
-      <Dialog 
-        open={showVoiceTestDialog} 
-        onClose={() => setShowVoiceTestDialog(false)}
-        maxWidth="sm"
-        fullWidth
-        TransitionComponent={undefined}
-        transitionDuration={0}
-      >
-        <DialogTitle>
-          Тестирование голоса
-        </DialogTitle>
-        <DialogContent>
-          <Typography variant="body1" sx={{ mb: 2 }}>
-            Выберите голос для тестирования и нажмите кнопку воспроизведения
-          </Typography>
-          
-          <FormControl fullWidth sx={{ mb: 2 }}>
-            <InputLabel>Голос для тестирования</InputLabel>
-            <Select
-              value={selectedVoiceForTest}
-              label="Голос для тестирования"
-              onChange={(e) => setSelectedVoiceForTest(e.target.value)}
-            >
-              <MenuItem value="baya">Baya (женский)</MenuItem>
-              <MenuItem value="xenia">Xenia (женский)</MenuItem>
-              <MenuItem value="kseniya">Kseniya (женский)</MenuItem>
-              <MenuItem value="aidar">Aidar (мужской)</MenuItem>
-              <MenuItem value="eugene">Eugene (мужской)</MenuItem>
-            </Select>
-          </FormControl>
-          
-          <Box sx={{ display: 'flex', gap: 2, alignItems: 'center' }}>
-            <Button
-              variant="contained"
-              onClick={() => testVoice(selectedVoiceForTest)}
-              disabled={isTestingVoice}
-              startIcon={<VolumeUpIcon />}
-            >
-              {isTestingVoice ? 'Воспроизвожу...' : 'Воспроизвести'}
-            </Button>
-            
-            {isTestingVoice && (
-              <CircularProgress size={20} />
-            )}
-          </Box>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setShowVoiceTestDialog(false)}>
-            Закрыть
-          </Button>
-        </DialogActions>
-      </Dialog>
     </Box>
   );
 }

@@ -1,5 +1,6 @@
 from llama_cpp import Llama
 from backend.config.config import MODEL_PATH
+from backend.context_prompts import context_prompt_manager
 import os
 import glob
 import json
@@ -8,19 +9,19 @@ import json
 class ModelSettings:
     def __init__(self):
         self.settings_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), "llm_settings.json")
-        # Настройки модели по умолчанию
+        # Настройки модели по умолчанию (оптимизированные)
         self.default_settings = {
-            "context_size": 2048,      # Размер контекста
-            "output_tokens": 512,      # Размер выходного текста
-            "batch_size": 512,         # Размер батча
-            "n_threads": 2,            # Количество потоков
+            "context_size": 8192,      # Размер контекста (увеличен для лучшей производительности)
+            "output_tokens": 1024,     # Размер выходного текста
+            "batch_size": 512,         # Размер батча (оптимальный для GPU)
+            "n_threads": 12,           # Количество потоков (оптимально для 24-ядерного CPU)
             "use_mmap": True,          # Использовать mmap
             "use_mlock": False,        # Блокировать в памяти
-            "verbose": True,           # Подробный вывод
+            "verbose": True,           # Подробный вывод (для диагностики)
             "temperature": 0.7,        # Температура генерации
             "top_p": 0.95,             # Top-p sampling
             "repeat_penalty": 1.05,    # Штраф за повторения
-            "use_gpu": False,          # Использовать GPU
+            "use_gpu": True,           # Использовать GPU
             "streaming": True,         # Использовать потоковую генерацию
             "legacy_api": False        # Режим совместимости для несовместимых архитектур
         }
@@ -60,9 +61,26 @@ class ModelSettings:
         return False
     
     def reset_to_defaults(self):
-        """Сброс настроек к значениям по умолчанию"""
+        """Сброс настроек к рекомендуемым значениям по умолчанию"""
         self.settings = self.default_settings.copy()
         self.save_settings()
+        print("Настройки сброшены к рекомендуемым значениям")
+    
+    def get_recommended_settings(self):
+        """Получение рекомендуемых настроек (без применения)"""
+        return self.default_settings.copy()
+    
+    def get_max_values(self):
+        """Получение максимальных значений для настроек"""
+        return {
+            "context_size": 32768,     # Максимальный контекст для большинства моделей
+            "output_tokens": 8192,     # Максимальный размер ответа
+            "batch_size": 2048,        # Максимальный размер батча
+            "n_threads": 24,           # Максимум потоков (по количеству ядер)
+            "temperature": 2.0,        # Максимальная температура
+            "top_p": 1.0,              # Максимальный top_p
+            "repeat_penalty": 2.0      # Максимальный штраф за повторения
+        }
     
     def get_all(self):
         """Получение всех настроек"""
@@ -207,10 +225,16 @@ def initialize_model():
                 if use_legacy_api:
                     print(f"Используется режим совместимости (legacy_api=True) для загрузки модели")
                 
+                # Дополнительные параметры для оптимизации производительности
+                # Принудительно используем GPU слои если CUDA доступна
+                import torch
+                n_gpu_layers = -1 if (use_gpu and torch.cuda.is_available()) else 0  # Использовать все слои на GPU
+                
                 llm = Llama(
                     model_path=model_to_use,
                     n_ctx=model_settings.get("context_size"),
                     n_batch=model_settings.get("batch_size"),
+                    n_gpu_layers=n_gpu_layers,       # Количество слоев на GPU
                     use_mmap=model_settings.get("use_mmap"),
                     use_mlock=model_settings.get("use_mlock"),
                     verbose=model_settings.get("verbose"),
@@ -229,10 +253,14 @@ def initialize_model():
                 if not use_legacy_api and "unknown model architecture" in str(e):
                     print("Обнаружена несовместимая архитектура. Повторная попытка с режимом совместимости...")
                     try:
+                        # Обновляем n_gpu_layers для повторной попытки
+                        n_gpu_layers = -1 if (use_gpu and torch.cuda.is_available()) else 0
+                        
                         llm = Llama(
                             model_path=model_to_use,
                             n_ctx=model_settings.get("context_size"),
                             n_batch=model_settings.get("batch_size"),
+                            n_gpu_layers=n_gpu_layers,  # Количество слоев на GPU
                             use_mmap=model_settings.get("use_mmap"),
                             use_mlock=model_settings.get("use_mlock"),
                             verbose=model_settings.get("verbose"),
@@ -410,13 +438,21 @@ def get_model_info():
             }
         }
 
-def prepare_prompt(text, system_prompt=None, history=None):
-    """Подготовка промпта в правильном формате с поддержкой истории диалога"""
+def prepare_prompt(text, system_prompt=None, history=None, model_path=None, custom_prompt_id=None):
+    """Подготовка промпта в правильном формате с поддержкой истории диалога и контекстных промптов"""
     if system_prompt is None:
-        system_prompt = "Ты умный и полезный русскоязычный ассистент. Отвечай подробно и по существу на заданный вопрос. Поддерживай контекст диалога и помни предыдущие сообщения."
+        # Используем контекстный промпт для модели, если доступен
+        if model_path:
+            system_prompt = context_prompt_manager.get_effective_prompt(model_path, custom_prompt_id)
+        else:
+            system_prompt = context_prompt_manager.get_global_prompt()
     
     # Базовый шаблон для чата
-    prompt_parts = [f"<|im_start|>system\n{system_prompt}\n<|im_end|>"]
+    prompt_parts = []
+    
+    # Добавляем системный промпт только если он не пустой
+    if system_prompt and system_prompt.strip():
+        prompt_parts.append(f"<|im_start|>system\n{system_prompt}\n<|im_end|>")
     
     # Добавляем историю диалога, если она есть
     if history:
@@ -434,7 +470,7 @@ def prepare_prompt(text, system_prompt=None, history=None):
     
     return "".join(prompt_parts)
 
-def ask_agent(prompt, history=None, max_tokens=None, streaming=False, stream_callback=None):
+def ask_agent(prompt, history=None, max_tokens=None, streaming=False, stream_callback=None, model_path=None, custom_prompt_id=None):
     if llm is None:
         raise ValueError("Модель не загружена. Пожалуйста, убедитесь, что модель инициализирована.")
     
@@ -444,8 +480,8 @@ def ask_agent(prompt, history=None, max_tokens=None, streaming=False, stream_cal
     
     # Формируем вход (можно добавить историю позже)
     try:
-        # Используем правильный формат запроса
-        full_prompt = prepare_prompt(prompt, history=history)
+        # Используем правильный формат запроса с контекстными промптами
+        full_prompt = prepare_prompt(prompt, history=history, model_path=model_path, custom_prompt_id=custom_prompt_id)
         
         # Если включен режим потоковой генерации
         if streaming and stream_callback:
