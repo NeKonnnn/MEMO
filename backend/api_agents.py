@@ -242,6 +242,27 @@ async def update_agent(
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
+def _extract_kb_document_ids(agent) -> list:
+    """kb_document_ids из config агента (config может прийти строкой)."""
+    cfg = getattr(agent, "config", None) or {}
+    if isinstance(cfg, str):
+        import json
+
+        try:
+            cfg = json.loads(cfg)
+        except (TypeError, ValueError):
+            cfg = {}
+    if not isinstance(cfg, dict):
+        return []
+    out = []
+    for raw in cfg.get("kb_document_ids") or []:
+        try:
+            out.append(int(raw))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 @router.delete("/{agent_id}", response_model=dict)
 async def delete_agent(request: Request, agent_id: int, current_user: Annotated[dict, Depends(get_current_user)]):
     """Удаление агента (только автор)"""
@@ -258,6 +279,40 @@ async def delete_agent(request: Request, agent_id: int, current_user: Annotated[
                 status_code=200,
                 extra={"cs1": _name, "cs2": str(agent_id), "cs1Label": "AgentName", "cs2Label": "AgentId"},
             )
+            # Чистим KB-документы агента, на которые больше никто не ссылается.
+            # Считаем ПОСЛЕ удаления агента: его собственные ссылки уже не учитываются.
+            # Ошибки здесь не должны ломать удаление агента — он уже удалён.
+            doc_ids = _extract_kb_document_ids(existing)
+            if doc_ids:
+                try:
+                    orphans = await agent_repo.find_orphan_kb_document_ids(doc_ids)
+                    if orphans:
+                        from backend.settings.rag_client import get_rag_client
+
+                        rag = get_rag_client()
+                        for doc_id in orphans:
+                            try:
+                                await rag.kb_delete_document(int(doc_id))
+                                logger.info(
+                                    "Удалён осиротевший KB-документ %s (агент %s)",
+                                    doc_id,
+                                    agent_id,
+                                )
+                            except Exception:
+                                logger.exception(
+                                    "Не удалось удалить KB-документ %s агента %s",
+                                    doc_id,
+                                    agent_id,
+                                )
+                    kept = [d for d in doc_ids if d not in set(orphans or [])]
+                    if kept:
+                        logger.info(
+                            "KB-документы агента %s оставлены (на них ссылаются другие агенты): %s",
+                            agent_id,
+                            kept,
+                        )
+                except Exception:
+                    logger.exception("Ошибка чистки KB-документов агента %s", agent_id)
             return {"success": True, "message": "Агент успешно удалён"}
         else:
             raise HTTPException(status_code=403, detail="Недостаточно прав для удаления этого агента")

@@ -62,6 +62,7 @@ import {
   Psychology as ThinkingModeIcon,
   Bolt as FastModeIcon,
   AutoAwesome as AutoModeIcon,
+  HistoryEdu as SkillsNavIcon,
 } from '@mui/icons-material';
 import type { SxProps, Theme } from '@mui/material/styles';
 import { useTheme, alpha } from '@mui/material/styles';
@@ -90,6 +91,7 @@ import ImageGenerationPlaceholder from '../components/ImageGenerationPlaceholder
 import { incrementTabNotification } from '../utils/tabNotifications';
 import ChatGearAgentsPanel from '../components/ChatGearAgentsPanel';
 import ChatGearMcpPanel from '../components/ChatGearMcpPanel';
+import ChatGearSkillsPanel from '../components/ChatGearSkillsPanel';
 import VoiceChatDialog from '../components/VoiceChatDialog';
 import AgentConstructorPanel from '../components/AgentConstructorPanel';
 import AgentSelector from '../components/AgentSelector';
@@ -1521,9 +1523,9 @@ export default function UnifiedChatPage({
   const [showDocumentDialog, setShowDocumentDialog] = useState(false);
   const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
   /** Раскрытый подпункт меню «Инструменты» (колонка справа, как в LeChat). */
-  const [gearToolsPanel, setGearToolsPanel] = useState<'main' | 'agents' | 'mcp' | 'model-mode'>('main');
+  const [gearToolsPanel, setGearToolsPanel] = useState<'main' | 'agents' | 'skills' | 'mcp' | 'model-mode'>('main');
   const gearSubPanelOpen =
-    gearToolsPanel === 'agents' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp';
+    gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp';
   const [modelThinkingMode, setModelThinkingMode] = useState<ModelThinkingMode>(() => {
     const saved = (localStorage.getItem(MODEL_THINKING_MODE_STORAGE_KEY) || 'fast') as ModelThinkingMode;
     return saved === 'auto' || saved === 'thinking' || saved === 'fast' ? saved : 'fast';
@@ -4518,10 +4520,10 @@ export default function UnifiedChatPage({
                            onKeyPress={handleKeyPress}
                            onPaste={(e) => handlePaste(e as React.ClipboardEvent<HTMLDivElement>)}
                            placeholder={chatMainPlaceholder}
-                          inputDisabled={socketBlocksChatInput || multiLlmInputBlocked || chatAwaitingTokens || ragSendBlocked}
-                           inputRef={inputRef}
-                           isDarkMode={isDarkMode}
-                           solidWorkZoneBackground={workZoneAnimated}
+                          inputDisabled={socketBlocksChatInput || multiLlmInputBlocked || chatAwaitingTokens}
+                              inputRef={inputRef}
+                              isDarkMode={isDarkMode}
+                              solidWorkZoneBackground={workZoneAnimated}
                            styleVariant={interfaceSettings.chatInputStyle}
                            containerSx={{
                              mt: 0,
@@ -4537,17 +4539,17 @@ export default function UnifiedChatPage({
                            onFileSelect={(files) => { if (files?.length) handleMessageAttach(files[0]); }}
                            isUploading={isUploading}
                            uploadingFile={uploadingFile}
-                           attachDisabled={isUploading || multiLlmInputBlocked || chatAwaitingTokens || ragSendBlocked}
-                           inlineFiles={inlineAttachments}
-                           onInlineFileRemove={(idx) => setInlineAttachments(prev => prev.filter((_, i) => i !== idx))}
-                           onSettingsClick={handleMenuOpen}
-                           settingsDisabled={multiLlmInputBlocked || chatAwaitingTokens || ragSendBlocked}
-                           showStopButton={currentChatLoading || hasActiveChatStreaming}
-                           onStopClick={handleStopGeneration}
-                           onSendClick={handleSendMessage}
-                          sendDisabled={(!inputMessage.trim() && inlineAttachments.length === 0) || socketBlocksChatInput || multiLlmInputBlocked || chatAwaitingTokens || ragSendBlocked}
-                           onVoiceClick={() => setShowVoiceDialog(true)}
-                           voiceDisabled={multiLlmInputBlocked || chatAwaitingTokens || ragSendBlocked}
+                           attachDisabled={isUploading || multiLlmInputBlocked || chatAwaitingTokens}
+                              inlineFiles={inlineAttachments}
+                              onInlineFileRemove={(idx) => setInlineAttachments(prev => prev.filter((_, i) => i !== idx))}
+                              onSettingsClick={handleMenuOpen}
+                             settingsDisabled={multiLlmInputBlocked || chatAwaitingTokens}
+                              showStopButton={currentChatLoading || hasActiveChatStreaming}
+                              onStopClick={handleStopGeneration}
+                              onSendClick={handleSendMessage}
+                             sendDisabled={(!inputMessage.trim() && inlineAttachments.length === 0) || socketBlocksChatInput || multiLlmInputBlocked || chatAwaitingTokens || ragSendBlocked}
+                              onVoiceClick={() => setShowVoiceDialog(true)}
+                             voiceDisabled={multiLlmInputBlocked || chatAwaitingTokens}
                            voiceTooltip="Голосовой ввод"
                            libraryBadge={libraryInputBadge}
                            inputSuggestions={mcpInputSuggestions}
@@ -4571,10 +4573,10 @@ export default function UnifiedChatPage({
                onKeyPress={handleKeyPress}
                onPaste={(e) => handlePaste(e as React.ClipboardEvent<HTMLDivElement>)}
                placeholder={chatMainPlaceholder}
-               inputDisabled={socketBlocksChatInput || multiLlmInputBlocked || chatAwaitingTokens || ragSendBlocked}
-               inputRef={inputRef}
-               isDarkMode={isDarkMode}
-               solidWorkZoneBackground={workZoneAnimated}
+                          inputDisabled={socketBlocksChatInput || multiLlmInputBlocked || chatAwaitingTokens}
+                              inputRef={inputRef}
+                              isDarkMode={isDarkMode}
+                              solidWorkZoneBackground={workZoneAnimated}
                styleVariant={interfaceSettings.chatInputStyle}
                containerSx={{
                  mt: 2,
@@ -4590,17 +4592,17 @@ export default function UnifiedChatPage({
                onFileSelect={(files) => { if (files?.length) handleMessageAttach(files[0]); }}
                isUploading={isUploading}
                uploadingFile={uploadingFile}
-               attachDisabled={isUploading || multiLlmInputBlocked || chatAwaitingTokens || ragSendBlocked}
-               inlineFiles={inlineAttachments}
-               onInlineFileRemove={(idx) => setInlineAttachments(prev => prev.filter((_, i) => i !== idx))}
-               onSettingsClick={handleMenuOpen}
-               settingsDisabled={multiLlmInputBlocked || chatAwaitingTokens || ragSendBlocked}
-               showStopButton={currentChatLoading || hasActiveChatStreaming}
-               onStopClick={handleStopGeneration}
-               onSendClick={handleSendMessage}
-               sendDisabled={(!inputMessage.trim() && inlineAttachments.length === 0) || socketBlocksChatInput || multiLlmInputBlocked || chatAwaitingTokens || ragSendBlocked}
-               onVoiceClick={() => setShowVoiceDialog(true)}
-               voiceDisabled={multiLlmInputBlocked || chatAwaitingTokens || ragSendBlocked}
+                           attachDisabled={isUploading || multiLlmInputBlocked || chatAwaitingTokens}
+                              inlineFiles={inlineAttachments}
+                              onInlineFileRemove={(idx) => setInlineAttachments(prev => prev.filter((_, i) => i !== idx))}
+                              onSettingsClick={handleMenuOpen}
+                             settingsDisabled={multiLlmInputBlocked || chatAwaitingTokens}
+                              showStopButton={currentChatLoading || hasActiveChatStreaming}
+                              onStopClick={handleStopGeneration}
+                              onSendClick={handleSendMessage}
+                             sendDisabled={(!inputMessage.trim() && inlineAttachments.length === 0) || socketBlocksChatInput || multiLlmInputBlocked || chatAwaitingTokens || ragSendBlocked}
+                              onVoiceClick={() => setShowVoiceDialog(true)}
+                             voiceDisabled={multiLlmInputBlocked || chatAwaitingTokens}
                voiceTooltip="Голосовой ввод"
                libraryBadge={libraryInputBadge}
                inputSuggestions={mcpInputSuggestions}
@@ -4646,7 +4648,7 @@ export default function UnifiedChatPage({
                        gearToolsPaperHeightPx < CHAT_GEAR_MENU_PAPER_MAX_HEIGHT_PX ? 'auto' : 'hidden',
                    }
                  : { maxHeight: CHAT_GEAR_MENU_PAPER_MAX_HEIGHT, overflowY: 'auto' }),
-              ...((gearToolsPanel === 'agents' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp')
+              ...((gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp')
                 ? CHAT_GEAR_SCROLL_AREA_NO_VISIBLE_SCROLLBAR_SX
                 : {}),
              },
@@ -4658,15 +4660,15 @@ export default function UnifiedChatPage({
              display: 'flex',
              flexDirection: 'row',
              alignItems: 'stretch',
-            gap: gearToolsPanel === 'agents' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' ? `${CHAT_GEAR_MENU_PANELS_GAP_PX}px` : 0,
+            gap: gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' ? `${CHAT_GEAR_MENU_PANELS_GAP_PX}px` : 0,
              width:
-              (gearToolsPanel === 'agents' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp') && gearToolsMenuWidthPx != null
+              (gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp') && gearToolsMenuWidthPx != null
                  ? `${gearToolsMenuWidthPx}px`
-                : gearToolsPanel === 'agents' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp'
+                : gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp'
                    ? CHAT_GEAR_MENU_EXPANDED_WIDTH_PX
                    : CHAT_GEAR_MENU_PANEL_WIDTH_PX,
              maxWidth:
-              (gearToolsPanel === 'agents' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp') && gearToolsMenuWidthPx != null
+              (gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp') && gearToolsMenuWidthPx != null
                  ? `${gearToolsMenuWidthPx}px`
                  : 'min(96vw, 580px)',
              minHeight: gearToolsPaperHeightPx != null ? `${gearToolsPaperHeightPx}px` : undefined,
@@ -4680,7 +4682,7 @@ export default function UnifiedChatPage({
              sx={{
                ...dropdownPanelSx,
                width:
-                gearToolsPanel === 'agents' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp'
+                gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp'
                   ? CHAT_GEAR_MENU_LEFT_RAIL_WIDTH_PX
                   : '100%',
                flexShrink: 0,
@@ -4725,7 +4727,37 @@ export default function UnifiedChatPage({
                  }}
                />
              </Box>
-            <Box
+                        <Box
+              onClick={() => setGearToolsPanel((p) => (p === 'skills' ? 'main' : 'skills'))}
+              sx={{
+                ...dropdownItemSx,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 1,
+                color: isDarkMode ? 'white' : '#333',
+                bgcolor:
+                  gearToolsPanel === 'skills'
+                    ? isDarkMode
+                      ? DROPDOWN_ITEM_HOVER_BG_DARK
+                      : DROPDOWN_ITEM_HOVER_BG_LIGHT
+                    : 'transparent',
+              }}
+            >
+              <SkillsNavIcon
+                sx={{ fontSize: 18, color: isDarkMode ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.6)', flexShrink: 0 }}
+              />
+              <Typography sx={{ flex: 1, minWidth: 0, fontSize: MENU_ACTION_TEXT_SIZE, whiteSpace: 'nowrap' }}>
+                Skills
+              </Typography>
+              <ChevronRightIcon
+                sx={{
+                  ...DROPDOWN_CHEVRON_SX,
+                  flexShrink: 0,
+                  transform: gearToolsPanel === 'skills' ? 'rotate(90deg)' : 'none',
+                }}
+              />
+            </Box>
+<Box
               onClick={() => setGearToolsPanel((p) => (p === 'mcp' ? 'main' : 'mcp'))}
               sx={{
                 ...dropdownItemSx,
@@ -4836,7 +4868,7 @@ export default function UnifiedChatPage({
                </Typography>
              </Box>
            </Box>
-          {gearToolsPanel === 'agents' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' ? (
+          {gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' ? (
              <Box
                sx={{
                  ...dropdownPanelSx,
@@ -4854,6 +4886,8 @@ export default function UnifiedChatPage({
                   isDarkMode={isDarkMode}
                   canUseAgents={Boolean(agentStatus?.is_initialized)}
                 />
+              ) : gearToolsPanel === 'skills' ? (
+                <ChatGearSkillsPanel isDarkMode={isDarkMode} />
               ) : gearToolsPanel === 'mcp' ? (
                 <ChatGearMcpPanel isDarkMode={isDarkMode} chatId={currentChat?.id} />
               ) : (
@@ -5050,6 +5084,18 @@ export default function UnifiedChatPage({
                       sx={getSidebarRailCollapsedListItemButtonSx(isDarkMode)}
                     >
                       <SidebarRailPromptsIcon sx={SIDEBAR_LIST_ICON_SX} />
+                    </ListItemButton>
+                  </Box>
+                </Tooltip>
+              </ListItem>
+              <ListItem disablePadding sx={{ mb: 0.5, display: 'block' }}>
+                <Tooltip title="Skills" placement="left">
+                  <Box component="span" sx={{ display: 'flex', width: '100%', justifyContent: 'center' }}>
+                    <ListItemButton
+                      onClick={() => navigate('/skills')}
+                      sx={getSidebarRailCollapsedListItemButtonSx(isDarkMode)}
+                    >
+                      <SkillsNavIcon sx={SIDEBAR_LIST_ICON_SX} />
                     </ListItemButton>
                   </Box>
                 </Tooltip>
@@ -5329,6 +5375,33 @@ export default function UnifiedChatPage({
                     primaryTypographyProps={{
                       sx: { fontSize: '0.8rem', fontWeight: 400, color: '#ffffff' },
                     }}
+                  />
+                </ListItemButton>
+              </ListItem>
+              <ListItem disablePadding>
+                <ListItemButton
+                  onClick={() => navigate('/skills')}
+                  sx={{
+                    borderRadius: 1,
+                    color: isDarkMode ? 'white' : '#333',
+                    py: 1.25,
+                    '&:hover': {
+                      backgroundColor: isDarkMode ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)',
+                    },
+                  }}
+                >
+                  <ListItemIcon
+                    sx={{
+                      color: isDarkMode ? 'white' : '#333',
+                      minWidth: 'auto',
+                      mr: `${SIDEBAR_LIST_ICON_TO_TEXT_GAP_PX}px`,
+                    }}
+                  >
+                    <SkillsNavIcon />
+                  </ListItemIcon>
+                  <ListItemText
+                    primary="Skills"
+                    primaryTypographyProps={{ fontSize: '0.9rem' }}
                   />
                 </ListItemButton>
               </ListItem>

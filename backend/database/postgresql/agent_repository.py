@@ -590,6 +590,38 @@ WHERE id = ${param_num}
             logger.exception("Ошибка при обновлении агента")
             return False
 
+    async def find_orphan_kb_document_ids(self, document_ids: List[int]) -> List[int]:
+        """Из переданных id вернуть те, на которые НЕ ссылается ни один агент.
+
+        Ссылки живут в agents.config->'kb_document_ids' (JSONB-массив).
+        Вызывать ПОСЛЕ удаления агента — тогда его собственные ссылки уже не учитываются.
+        При любой ошибке возвращаем пустой список: лучше оставить мусор, чем снести чужое.
+        """
+        wanted = sorted({int(d) for d in (document_ids or []) if d is not None})
+        if not wanted:
+            return []
+        try:
+            async with await self.db_connection.acquire() as conn:
+                rows = await conn.fetch(
+                    """
+                    SELECT DISTINCT x.doc_id::int AS doc_id
+                    FROM agents a,
+                         LATERAL jsonb_array_elements_text(
+                             CASE WHEN jsonb_typeof(a.config->'kb_document_ids') = 'array'
+                                  THEN a.config->'kb_document_ids'
+                                  ELSE '[]'::jsonb END
+                         ) AS x(doc_id)
+                    WHERE x.doc_id ~ '^[0-9]+$'
+                      AND x.doc_id::int = ANY($1::int[])
+                    """,
+                    wanted,
+                )
+                still_used = {int(r["doc_id"]) for r in rows}
+                return [d for d in wanted if d not in still_used]
+        except Exception:
+            logger.exception("Не удалось вычислить осиротевшие kb_document_ids")
+            return []
+
     async def delete_agent(self, agent_id: int, author_id: str) -> bool:
         """
         Удаление агента (только автор может удалить)

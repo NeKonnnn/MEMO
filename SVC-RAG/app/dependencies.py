@@ -14,18 +14,13 @@ from app.database.project_rag_repository import (
     ProjectRagVectorRepository,
 )
 from app.database.graph_repository import GraphRepository
-from app.database.repository import DocumentRepository, VectorRepository
 from app.services.kb_service import KbService
 from app.services.memory_rag_service import MemoryRagService
 from app.services.project_rag_service import ProjectRagService
-from app.services.rag_service import RagService
 
 logger = logging.getLogger(__name__)
 
 _pg: Optional[PostgreSQLConnection] = None
-_doc_repo: Optional[DocumentRepository] = None
-_vector_repo: Optional[VectorRepository] = None
-_rag_service: Optional[RagService] = None
 _kb_doc_repo: Optional[KbDocumentRepository] = None
 _kb_vector_repo: Optional[KbVectorRepository] = None
 _rag_client: Optional[RagModelsClient] = None
@@ -40,7 +35,7 @@ _graph_repo: Optional[GraphRepository] = None
 
 async def get_db():
     """Подключение к PostgreSQL (один раз при старте)."""
-    global _pg, _doc_repo, _vector_repo, _kb_doc_repo, _kb_vector_repo
+    global _pg, _kb_doc_repo, _kb_vector_repo
     global _mem_doc_repo, _mem_vector_repo, _proj_doc_repo, _proj_vector_repo
     global _graph_repo
     if _pg is None:
@@ -51,8 +46,6 @@ async def get_db():
         from app.core.config import get_settings
 
         dim = get_settings().postgresql.embedding_dim
-        _doc_repo = DocumentRepository(_pg)
-        _vector_repo = VectorRepository(_pg, embedding_dim=dim)
         _kb_doc_repo = KbDocumentRepository(_pg)
         _kb_vector_repo = KbVectorRepository(_pg, embedding_dim=dim)
         _mem_doc_repo = MemoryRagDocumentRepository(_pg)
@@ -60,8 +53,6 @@ async def get_db():
         _proj_doc_repo = ProjectRagDocumentRepository(_pg)
         _proj_vector_repo = ProjectRagVectorRepository(_pg, embedding_dim=dim)
         _graph_repo = GraphRepository(_pg)
-        await _doc_repo.create_tables()
-        await _vector_repo.create_tables()
         await _kb_doc_repo.create_tables()
         await _kb_vector_repo.create_tables()
         await _mem_doc_repo.create_tables()
@@ -108,14 +99,14 @@ class SplitRagClient:
         self.embed_client = embed_client
         self.rerank_client = rerank_client
 
-    async def embed(self, texts):
-        return await self.embed_client.embed(texts)
+    async def embed(self, texts, model=None, kind=None):
+        return await self.embed_client.embed(texts, model=model, kind=kind)
 
-    async def embed_single(self, text):
-        return await self.embed_client.embed_single(text)
+    async def embed_single(self, text, model=None, kind=None):
+        return await self.embed_client.embed_single(text, model=model, kind=kind)
 
-    async def rerank(self, query, passages, top_k=20):
-        return await self.rerank_client.rerank(query, passages, top_k=top_k)
+    async def rerank(self, query, passages, top_k=20, model=None):
+        return await self.rerank_client.rerank(query, passages, top_k=top_k, model=model)
 
     async def health(self) -> bool:
         # embed-часть первична: без эмбеддингов RAG нежизнеспособен,
@@ -178,16 +169,6 @@ def _make_rag_client():
     )
     return SplitRagClient(_client_for("embedding"), _client_for("reranker"))
 
-async def get_rag_service() -> RagService:
-    """Legacy global RagService (/v1/documents, /v1/search)."""
-    global _rag_service, _rag_client
-    if _rag_service is None:
-        await get_db()
-        if _rag_client is None:
-            _rag_client = _make_rag_client()
-        _rag_service = RagService(_doc_repo, _vector_repo, _rag_client, _graph_repo)
-    return _rag_service
-
 async def get_kb_service() -> KbService:
     """KbService для постоянной Базы Знаний."""
     global _kb_service, _rag_client
@@ -221,27 +202,58 @@ async def get_project_rag_service() -> ProjectRagService:
     return _project_rag_service
 
 async def ensure_embedding_dim(embedding_dim: int) -> dict:
-    """Синхронизировать размерность pgvector и in-memory репозиториев с моделью."""
+    """Гарантировать таблицы векторов для этой размерности. ДОБАВЛЯЮЩАЯ операция.
+
+    Раньше здесь вызывался migrate_vector_tables: он приводил общие таблицы к новой
+    размерности через TRUNCATE, то есть стирал вектора ВСЕХ пользователей из-за смены
+    модели одним. Теперь для новой размерности создаётся своя таблица рядом,
+    существующие данные не трогаются.
+
+    Аварийный возврат к старому поведению: RAG_ALLOW_DESTRUCTIVE_MIGRATION=true.
+    """
+    import os
+
     await get_db()
     from app.core.config import get_settings
-    from app.database.embedding_schema import migrate_vector_tables
+    from app.database.embedding_schema import ensure_vector_table, migrate_vector_tables
 
     dim = int(embedding_dim)
     settings = get_settings()
-    async with await _pg.acquire() as conn:
-        async with conn.transaction():
-            result = await migrate_vector_tables(conn, dim)
+    destructive = (
+        os.getenv("RAG_ALLOW_DESTRUCTIVE_MIGRATION", "").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
+    if destructive:
+        logger.warning(
+            "RAG_ALLOW_DESTRUCTIVE_MIGRATION=true — старое поведение с TRUNCATE (dim=%s)", dim
+        )
+        async with await _pg.acquire() as conn:
+            async with conn.transaction():
+                result = await migrate_vector_tables(conn, dim)
+    else:
+        tables = {}
+        async with await _pg.acquire() as conn:
+            async with conn.transaction():
+                tables["kb_vectors"] = await ensure_vector_table(
+                    conn, "kb_vectors", dim, "kb_documents"
+                )
+                tables["project_rag_vectors"] = await ensure_vector_table(
+                    conn, "project_rag_vectors", dim, "project_rag_documents"
+                )
+                tables["memory_rag_vectors"] = await ensure_vector_table(
+                    conn, "memory_rag_vectors", dim, "memory_rag_documents"
+                )
+        logger.info("embedding_dim=%s: таблицы векторов готовы: %s", dim, tables)
+        result = {
+            "embedding_dim": dim,
+            "tables": tables,
+            "migrated": False,
+            "cleared_rows": 0,
+        }
     settings.postgresql.embedding_dim = dim
-    for repo in (_vector_repo, _kb_vector_repo, _mem_vector_repo, _proj_vector_repo):
+    for repo in (_kb_vector_repo, _mem_vector_repo, _proj_vector_repo):
         if repo is not None:
             repo.embedding_dim = dim
-    if result.get("migrated"):
-        logger.warning(
-            "embedding_dim=%s: миграция schema завершена, cleared_rows=%s tables=%s",
-            dim,
-            result.get("cleared_rows"),
-            result.get("changed_tables"),
-        )
     return result
 
 async def ensure_memory_chunk_consistency() -> None:
@@ -364,7 +376,6 @@ async def set_rag_models_provider(
     _rag_client = new_client
     replaced = 0
     for svc_name in (
-        "_rag_service",
         "_kb_service",
         "_memory_rag_service",
         "_project_rag_service",

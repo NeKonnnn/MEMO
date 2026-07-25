@@ -124,7 +124,14 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
 
   const sanitizeRawContent = useCallback((raw: string): string => {
     if (!raw) return raw;
-    let s = raw
+    // Skill mentions <$slug|Name> → readable chip-like code `$Name`
+    let s = raw.replace(/<\$([^|>]+)\|?([^>]*)>/g, (_m, slug: string, name: string) => {
+      const label = String(name || slug || '')
+        .trim()
+        .replace(/[`*]/g, '');
+      return `\`$${label}\``;
+    });
+    s = s
       .replace(/&lt;\s*em\s*&gt;/gi, '<em>')
       .replace(/&lt;\s*\/\s*em\s*&gt;/gi, '</em>')
       .replace(/<\\\/\s*em\s*>/gi, '</em>')

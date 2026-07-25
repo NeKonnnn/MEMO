@@ -13,6 +13,7 @@ from app.dependencies.rag_models_handler import (
     get_rag_models_handler,
 )
 from app.services.models_catalog import (
+    cluster_default_model_paths,
     config_value_for_path,
     current_model_paths,
     list_models,
@@ -45,6 +46,7 @@ async def get_models(type: Optional[str] = None):
     return {
         "models": models,
         "current": current_model_paths(),
+        "cluster_default": cluster_default_model_paths(),
         "offline": True,  # только локальные веса
         "models_dir": settings.rag_models.models_dir,
     }
@@ -56,6 +58,7 @@ async def get_current_models():
     current = current_model_paths()
     return {
         "current": current,
+        "cluster_default": cluster_default_model_paths(),
         "loaded": handler is not None,
         "offline": True,
         "embedding_dim": (handler or {}).get("embedding_dim"),

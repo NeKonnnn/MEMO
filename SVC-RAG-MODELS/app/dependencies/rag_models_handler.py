@@ -1,14 +1,22 @@
-# Загрузка моделей для RAG: эмбеддинги и реранкер — только локальные веса из models_dir
+# Загрузка моделей для RAG: эмбеддинги и реранкер — только локальные веса из models_dir.
+# МУЛЬТИМОДЕЛЬНЫЙ режим: несколько моделей живут одновременно.
+# Ленивая загрузка при первом обращении + замок на ключ + LRU-вытеснение по лимиту.
+import asyncio
 import gc
 import os
 import logging
-from typing import Optional
+from collections import OrderedDict
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-_rag_models: Optional[dict] = None
+# Кэш: (kind, folder) -> {"model": obj, "dim": Optional[int], "path": str}
+# Порядок в OrderedDict = LRU (свежие в конце).
+_MODEL_CACHE: "OrderedDict[Tuple[str, str], Dict[str, Any]]" = OrderedDict()
+_KEY_LOCKS: Dict[Tuple[str, str], asyncio.Lock] = {}
+_REGISTRY_LOCK = asyncio.Lock()
 _last_rag_models_error: Optional[str] = None
 
 
@@ -21,6 +29,74 @@ def _free_model_memory() -> None:
             torch.cuda.empty_cache()
     except ImportError:
         pass
+
+
+def _rss_mb() -> Optional[int]:
+    """Резидентная память процесса в МБ (для контроля лимита пода)."""
+    try:
+        with open("/proc/self/status", "r", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) // 1024
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+def _loaded_keys() -> List[str]:
+    return [f"{k}:{n}" for (k, n) in _MODEL_CACHE]
+
+def _log_models(action: str, kind: str, folder: str, dim: Any = None) -> None:
+    # print, а не logger: гарантированно виден в docker-логах даже при кривом logging-конфиге
+    print(
+        f"[MODELS] {action} {kind}={folder} dim={dim} rss={_rss_mb()}MB loaded={_loaded_keys()}",
+        flush=True,
+    )
+
+def _folder_of(name_or_path: Optional[str]) -> str:
+    """'local/FRIDA' | 'FRIDA' | '/abs/path/FRIDA' -> 'FRIDA'."""
+    raw = (name_or_path or "").strip().rstrip("/")
+    if not raw:
+        return ""
+    low = raw.lower()
+    for prefix in ("local/", "native/"):
+        if low.startswith(prefix):
+            raw = raw[len(prefix) :]
+            break
+    if os.path.isabs(raw):
+        return os.path.basename(raw)
+    return raw.split("/")[-1]
+
+def _default_folder(kind: str) -> str:
+    rm = settings.rag_models
+    if kind == "embedding":
+        return _folder_of(rm.embedding_model or rm.embedding_model_default)
+    return _folder_of(rm.reranker_model or rm.reranker_model_default)
+
+def configured_folders(kind: str) -> List[str]:
+    """Разрешённые модели: config.yml + ENV RAG_*_MODEL2..20 + дефолт. Первая — кластерная."""
+    rm = settings.rag_models
+    if kind == "embedding":
+        raw: List[Any] = [rm.embedding_model, rm.embedding_model2]
+        raw += list(rm.embedding_models or [])
+        env_prefix = "RAG_EMBEDDING_MODEL"
+        default = rm.embedding_model_default
+    else:
+        raw = [rm.reranker_model, rm.reranker_model2]
+        raw += list(rm.reranker_models or [])
+        env_prefix = "RAG_RERANKER_MODEL"
+        default = rm.reranker_model_default
+    for i in range(2, 21):
+        raw.append(os.environ.get(f"{env_prefix}{i}", ""))
+    raw.append(default)
+
+    out: List[str] = []
+    seen = set()
+    for item in raw:
+        folder = _folder_of(item if isinstance(item, str) else None)
+        if folder and folder.lower() not in seen:
+            seen.add(folder.lower())
+            out.append(folder)
+    return out
 
 
 def _is_giga_embed_path(model_path: str) -> bool:
@@ -41,11 +117,7 @@ def _is_giga_embed_path(model_path: str) -> bool:
 
 
 def _register_giga_remote_code(model_path: str) -> None:
-    """Импорт modeling_gigarembed.py — регистрирует LatentAttentionConfig в AutoModel.
-
-    Без этого GigarEmbedModel.__init__ падает:
-    Unrecognized configuration class LatentAttentionConfig for AutoModel.
-    """
+    """Импорт modeling_gigarembed.py — регистрирует LatentAttentionConfig в AutoModel."""
     try:
         from transformers import AutoModel
         from transformers.dynamic_module_utils import get_class_from_dynamic_module
@@ -70,10 +142,9 @@ def _register_giga_remote_code(model_path: str) -> None:
             model_path,
             trust_remote_code=True,
         )
-        # Явная регистрация (на случай если в локальной копии modeling нет register)
         for cfg, mdl in (
             (latent_cfg, latent_model),
-            (gigar_cfg, gigar_model),
+            (gigar_cfg, gigar_model)
         ):
             try:
                 AutoModel.register(cfg, mdl, exist_ok=True)
@@ -104,8 +175,6 @@ def _load_sentence_transformer(model_path: str, device: str):
     else:
         model_kwargs["torch_dtype"] = torch.float32
 
-    # Официальный способ для Giga-Embeddings-instruct (README):
-    # trust_remote_code и в model_kwargs, и в config_kwargs.
     return SentenceTransformer(
         model_path,
         device=device,
@@ -123,7 +192,6 @@ def _resolve_model_path(
     if not name_or_path:
         name_or_path = default_local
     name_or_path = name_or_path.strip()
-    # org/model → последняя компонента (на случай старых значений)
     if "/" in name_or_path and not os.path.isabs(name_or_path):
         name_or_path = name_or_path.split("/")[-1]
     if os.path.isabs(name_or_path) and os.path.isdir(name_or_path):
@@ -131,7 +199,6 @@ def _resolve_model_path(
     full = os.path.join(models_dir, name_or_path)
     if os.path.isdir(full):
         return full
-    # Поиск по началу имени: ms-marco... или paraphrase-multilingual...
     try:
         for entry in os.listdir(models_dir):
             if not os.path.isdir(os.path.join(models_dir, entry)):
@@ -152,7 +219,6 @@ def _resolve_model_path(
                     return os.path.join(models_dir, entry)
     except OSError:
         pass
-    # Локальный snapshot-layout: models--org--name/snapshots/<hash>/
     folder = name_or_path
     try:
         for entry in os.listdir(models_dir):
@@ -177,156 +243,212 @@ def _resolve_model_path(
     return full
 
 
-async def get_rag_models_handler() -> Optional[dict]:
-    # Поднимаем эмбеддинг-модель и реранкер. Кэш/локальные пути - в models_dir.
-    # offline=True чтобы вообще не лезть в интернет.
-    global _rag_models, _last_rag_models_error
-    _last_rag_models_error = None
+def _prepare_env_once() -> str:
+    """models_dir + кэш transformers + offline. Возвращает абсолютный models_dir."""
+    models_dir = os.path.abspath(settings.rag_models.models_dir)
+    try:
+        os.makedirs(models_dir, exist_ok=True)
+    except OSError:
+        pass  # часто смонтирован :ro — веса уже на месте
 
+    cache_root = (
+        os.environ.get("TRANSFORMERS_CACHE")
+        or os.environ.get("HF_HOME")
+        or "/tmp/rag-models-cache"
+    )
+    cache_paths = {
+        "HF_HOME": cache_root,
+        "HF_HUB_CACHE": os.path.join(cache_root, "hub"),
+        "TRANSFORMERS_CACHE": os.path.join(cache_root, "transformers"),
+        "SENTENCE_TRANSFORMERS_HOME": os.path.join(cache_root, "sentence-transformers"),
+    }
+    try:
+        for cache_path in cache_paths.values():
+            os.makedirs(cache_path, exist_ok=True)
+    except OSError as cache_err:
+        logger.warning(
+            "Кэш transformers '%s' недоступен на запись (%s) - оставляю models_dir.",
+            cache_root,
+            cache_err,
+        )
+        cache_paths = {
+            "HF_HOME": models_dir,
+            "HF_HUB_CACHE": models_dir,
+            "TRANSFORMERS_CACHE": models_dir,
+        }
+    os.environ.update(cache_paths)
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    return models_dir
+
+def _resolve_device() -> str:
+    device = settings.rag_models.device
+    if device == "auto":
+        try:
+            import torch
+
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        except ImportError:
+            device = "cpu"
+    return device
+
+def _max_loaded(kind: str) -> int:
+    rm = settings.rag_models
+    cap = rm.max_loaded_embedding if kind == "embedding" else rm.max_loaded_reranker
+    try:
+        return max(1, int(cap))
+    except (TypeError, ValueError):
+        return 1
+
+def _evict_lru(kind: str) -> None:
+    """Вытеснить самые старые модели этого типа сверх лимита."""
+    cap = _max_loaded(kind)
+    while True:
+        keys = [k for k in _MODEL_CACHE if k[0] == kind]
+        if len(keys) <= cap:
+            break
+        oldest = keys[0]
+        _MODEL_CACHE.pop(oldest, None)
+        _log_models("evict", oldest[0], oldest[1])
+        _free_model_memory()
+
+def _load_one(kind: str, folder: str, models_dir: str, device: str) -> Dict[str, Any]:
+    """Синхронная загрузка одной модели. Вызывается под замком ключа."""
+    rm = settings.rag_models
+    default_local = (
+        rm.embedding_model_default if kind == "embedding" else rm.reranker_model_default
+    )
+    path = _resolve_model_path(models_dir, folder, default_local)
+
+    if rm.offline and not os.path.isdir(path):
+        raise FileNotFoundError(
+            f"Модель '{folder}' не найдена по пути: {path}. "
+            f"Проверьте, что в {models_dir} есть такая папка."
+        )
+
+    if kind == "embedding":
+        logger.info("Гружу эмбеддинг-модель: %s", path)
+        obj = _load_sentence_transformer(path, device)
+        try:
+            dim = int(obj.get_sentence_embedding_dimension())
+        except Exception:
+            dim = int(rm.embedding_dim or 384)
+        logger.info("Эмбеддинг-модель '%s' загружена, размерность: %s", folder, dim)
+        return {"model": obj, "dim": dim, "path": path}
+
+    from app.services.llm_reranker import is_llm_reranker_path, load_llm_reranker
+
+    logger.info("Гружу реранкер: %s", path)
+    if is_llm_reranker_path(path):
+        obj = load_llm_reranker(path, device=device)
+    else:
+        from sentence_transformers import CrossEncoder
+
+        try:
+            obj = CrossEncoder(
+                path,
+                device=device,
+                trust_remote_code=True,
+                automodel_args={"local_files_only": True},
+                tokenizer_args={"local_files_only": True},
+            )
+        except TypeError:
+            obj = CrossEncoder(
+                path,
+                device=device,
+                trust_remote_code=True,
+                model_kwargs={"local_files_only": True, "trust_remote_code": True},
+                tokenizer_kwargs={"local_files_only": True, "trust_remote_code": True},
+            )
+    logger.info("Реранкер '%s' загружен", folder)
+    return {"model": obj, "dim": None, "path": path}
+
+async def _get_model_entry(kind: str, name: Optional[str]) -> Dict[str, Any]:
+    """Достать модель из кэша или загрузить. Ленивая загрузка + замок на ключ + LRU."""
+    global _last_rag_models_error
+
+    if not settings.rag_models.enabled:
+        raise RuntimeError("RAG-модели выключены в конфиге")
+
+    folder = _folder_of(name) or _default_folder(kind)
+    if not folder:
+        raise RuntimeError(f"Не задана модель типа {kind}")
+
+    allowed = {f.lower() for f in configured_folders(kind)}
+    if folder.lower() not in allowed:
+        raise ValueError(
+            f"Модель '{folder}' не разрешена для {kind}. "
+            f"Доступные: {sorted(allowed)}. Добавьте её в config.yml или ENV RAG_*_MODEL2..20."
+        )
+
+    key = (kind, folder)
+    entry = _MODEL_CACHE.get(key)
+    if entry is not None:
+        _MODEL_CACHE.move_to_end(key)
+        return entry
+
+    async with _REGISTRY_LOCK:
+        lock = _KEY_LOCKS.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _KEY_LOCKS[key] = lock
+
+    async with lock:
+        entry = _MODEL_CACHE.get(key)
+        if entry is not None:  # успели загрузить, пока ждали замок
+            _MODEL_CACHE.move_to_end(key)
+            return entry
+        models_dir = _prepare_env_once()
+        device = _resolve_device()
+        try:
+            entry = await asyncio.to_thread(_load_one, kind, folder, models_dir, device)
+        except Exception as e:
+            _last_rag_models_error = f"{kind}/{folder}: {e}"
+            logger.error("Не удалось загрузить %s '%s': %s", kind, folder, e, exc_info=True)
+            _free_model_memory()
+            raise
+        entry["device"] = device
+        _MODEL_CACHE[key] = entry
+        _MODEL_CACHE.move_to_end(key)
+        _log_models("loaded", kind, folder, entry.get("dim"))
+        _evict_lru(kind)
+        # Кластерный дефолт держим в settings для health/legacy-эндпоинтов
+        if kind == "embedding" and folder.lower() == _default_folder("embedding").lower():
+            if entry.get("dim"):
+                settings.rag_models.embedding_dim = int(entry["dim"])
+        _last_rag_models_error = None
+        return entry
+
+async def get_embedding_model(name: Optional[str] = None) -> Dict[str, Any]:
+    """{'model', 'dim', 'path', 'device'} для эмбеддера (по имени или кластерный дефолт)."""
+    return await _get_model_entry("embedding", name)
+
+async def get_reranker_model(name: Optional[str] = None) -> Dict[str, Any]:
+    """{'model', 'dim', 'path', 'device'} для реранкера (по имени или кластерный дефолт)."""
+    return await _get_model_entry("reranker", name)
+
+async def get_rag_models_handler() -> Optional[dict]:
+    """СОВМЕСТИМОСТЬ со старым кодом: дефолтный эмбеддер + дефолтный реранкер.
+
+    Возвращает тот же словарь, что и раньше, чтобы health/models-эндпоинты не сломались.
+    """
+    global _last_rag_models_error
     if not settings.rag_models.enabled:
         logger.info("RAG-модели выключены в конфиге")
         return None
-
-    if _rag_models is not None:
-        return _rag_models
-
     try:
-        models_dir = os.path.abspath(settings.rag_models.models_dir)
-        try:
-            os.makedirs(models_dir, exist_ok=True)
-        except OSError:
-            # models_dir часто смонтирован :ro — веса уже на месте, кэш пишем отдельно
-            pass
-
-        # Веса читаем из models_dir (может быть read-only).
-        # Рабочий кэш transformers (modules для trust_remote_code) — в writable path.
-        # Имена HF_* — это переменные библиотеки transformers, не провайдер моделей.
-        cache_root = (
-            os.environ.get("TRANSFORMERS_CACHE")
-            or os.environ.get("HF_HOME")
-            or "/tmp/rag-models-cache"
-        )
-        cache_paths = {
-            "HF_HOME": cache_root,
-            "HF_HUB_CACHE": os.path.join(cache_root, "hub"),
-            "TRANSFORMERS_CACHE": os.path.join(cache_root, "transformers"),
-            "SENTENCE_TRANSFORMERS_HOME": os.path.join(
-                cache_root, "sentence-transformers"
-            ),
+        emb = await get_embedding_model(None)
+        rer = await get_reranker_model(None)
+        return {
+            "embedding_model": emb["model"],
+            "reranker_model": rer["model"],
+            "device": emb.get("device") or _resolve_device(),
+            "embedding_dim": emb.get("dim"),
         }
-        try:
-            for cache_path in cache_paths.values():
-                os.makedirs(cache_path, exist_ok=True)
-        except OSError as cache_err:
-            logger.warning(
-                "Кэш transformers '%s' недоступен на запись (%s) - оставляю models_dir. "
-                "Для MiniCPM/Giga (trust_remote_code) нужен writable /tmp.",
-                cache_root,
-                cache_err,
-            )
-            cache_paths = {
-                "HF_HOME": models_dir,
-                "HF_HUB_CACHE": models_dir,
-                "TRANSFORMERS_CACHE": models_dir,
-            }
-        os.environ.update(cache_paths)
-        # Всегда без сетевых загрузок — только локальные веса
-        os.environ["HF_HUB_OFFLINE"] = "1"
-        os.environ["TRANSFORMERS_OFFLINE"] = "1"
-        logger.info("Кэш transformers: %s (offline)", os.environ["HF_HOME"])
-
-        device = settings.rag_models.device
-        if device == "auto":
-            try:
-                import torch
-
-                device = "cuda" if torch.cuda.is_available() else "cpu"
-            except ImportError:
-                device = "cpu"
-        logger.info(f"RAG models устройство: {device}")
-
-        # Путь к модели: подпапка внутри models_dir
-        embedding_model = _resolve_model_path(
-            models_dir,
-            settings.rag_models.embedding_model,
-            settings.rag_models.embedding_model_default,
-        )
-        reranker_model = _resolve_model_path(
-            models_dir,
-            settings.rag_models.reranker_model,
-            settings.rag_models.reranker_model_default,
-        )
-
-        # В офлайне реранкер обязан грузиться с диска
-        if settings.rag_models.offline and not os.path.isdir(reranker_model):
-            raise FileNotFoundError(
-                f"Реранкер в офлайне не найден по пути: {reranker_model}. "
-                f"Проверьте, что в {models_dir} есть папка {settings.rag_models.reranker_model} "
-                "(например bge-reranker-v2-minicpm-layerwise или ms-marco-...)."
-            )
-
-        # Грузим эмбеддинги (sentence-transformers)
-        logger.info(f"Гружу эмбеддинг-модель: {embedding_model}")
-        embedding_model_obj = _load_sentence_transformer(embedding_model, device)
-        logger.info("Эмбеддинг-модель загружена")
-        # Реальная размерность модели (не конфиг по умолчанию 384)
-        try:
-            detected_dim = int(embedding_model_obj.get_sentence_embedding_dimension())
-        except Exception:
-            detected_dim = int(settings.rag_models.embedding_dim or 384)
-        if detected_dim > 0:
-            settings.rag_models.embedding_dim = detected_dim
-        logger.info("Размерность эмбеддингов: %s", detected_dim)
-
-        # LLM-реранкеры (MiniCPM layerwise / Gemma) ≠ CrossEncoder
-        from app.services.llm_reranker import is_llm_reranker_path, load_llm_reranker
-
-        logger.info(f"Гружу реранкер: {reranker_model}")
-        if is_llm_reranker_path(reranker_model):
-            reranker_model_obj = load_llm_reranker(reranker_model, device=device)
-        else:
-            from sentence_transformers import CrossEncoder
-
-            # ST 5.x: local_files_only — top-level; в model_kwargs даёт
-            # TypeError/KeyError («multiple values» / 'local_files_only').
-            try:
-                reranker_model_obj = CrossEncoder(
-                    reranker_model,
-                    device=device,
-                    trust_remote_code=True,
-                    local_files_only=True,
-                )
-            except TypeError:
-                # Старые ST: automodel_args / tokenizer_args
-                try:
-                    reranker_model_obj = CrossEncoder(
-                        reranker_model,
-                        device=device,
-                        trust_remote_code=True,
-                        automodel_args={"local_files_only": True},
-                        tokenizer_args={"local_files_only": True},
-                    )
-                except TypeError:
-                    reranker_model_obj = CrossEncoder(
-                        reranker_model,
-                        device=device,
-                        trust_remote_code=True,
-                        model_kwargs={"trust_remote_code": True},
-                        tokenizer_kwargs={"trust_remote_code": True},
-                    )
-        logger.info("Реранкер загружен")
-
-        _rag_models = {
-            "embedding_model": embedding_model_obj,
-            "reranker_model": reranker_model_obj,
-            "device": device,
-            "embedding_dim": detected_dim,
-        }
-        return _rag_models
+        
     except Exception as e:
         _last_rag_models_error = str(e)
-        logger.error(f"Не удалось загрузить RAG-модели: {e}", exc_info=True)
-        _free_model_memory()
+        logger.error(f"Не удалось загрузить RAG-модели: %s", e, exc_info=True)
         return None
 
 
@@ -335,9 +457,22 @@ def get_last_rag_models_error() -> Optional[str]:
     return _last_rag_models_error
 
 
+def loaded_models_info() -> Dict[str, Any]:
+    """Что сейчас в памяти + RSS — для диагностики и /models/current."""
+    return {
+        "loaded": [
+            {"kind": k, "name": n, "dim": v.get("dim")} for (k, n), v in _MODEL_CACHE.items()
+        ],
+        "rss_mb": _rss_mb(),
+        "max_loaded_embedding": _max_loaded("embedding"),
+        "max_loaded_reranker": _max_loaded("reranker"),
+    }
+
+
 async def cleanup_rag_models_handler() -> None:
-    global _rag_models
-    if _rag_models is not None:
-        logger.info("Выгружаю RAG-модели")
-        _rag_models = None
+    """Выгрузить всё (используется при shutdown и при админском /models/select)."""
+    if _MODEL_CACHE:
+        logger.info("Выгружаю RAG-модели: %s", _loaded_keys())
+    _MODEL_CACHE.clear()
     _free_model_memory()
+    _log_models("cleanup", "all", "-")

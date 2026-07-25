@@ -4,11 +4,9 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-from app.core.config import get_settings
 from app.database.models import DocumentVector
 
 logger = logging.getLogger(__name__)
-
 
 class DocumentSummarizer:
     """
@@ -42,8 +40,14 @@ class DocumentSummarizer:
         """Временно переопределить размер чанка для одной индексации."""
         if chunk_size is None and chunk_overlap is None:
             return None
-        cs = max(200, int(chunk_size)) if chunk_size is not None else self.max_chunk_size
-        co = max(0, int(chunk_overlap)) if chunk_overlap is not None else self.chunk_overlap
+        cs = (
+            max(200, int(chunk_size)) if chunk_size is not None else self.max_chunk_size
+        )
+        co = (
+            max(0, int(chunk_overlap))
+            if chunk_overlap is not None
+            else self.chunk_overlap
+        )
         if co >= cs:
             co = max(0, cs // 4)
         backup = (self.max_chunk_size, self.chunk_overlap, self.text_splitter)
@@ -73,7 +77,8 @@ class DocumentSummarizer:
             chunks = [text] if text else [f"[Документ: {doc_name}]"]
 
         level_0_chunks = [
-            {"content": chunk, "chunk_index": i, "level": 0, "doc_name": doc_name} for i, chunk in enumerate(chunks)
+            {"content": chunk, "chunk_index": i, "level": 0, "doc_name": doc_name}
+            for i, chunk in enumerate(chunks)
         ]
 
         level_1_summaries = []
@@ -134,12 +139,19 @@ class DocumentSummarizer:
                 else:
                     level_2_summary = ""
                 if not (level_2_summary and level_2_summary.strip()):
-                    level_2_summary = f"[КРАТКОЕ СОДЕРЖАНИЕ '{doc_name}']\n\n" + text[:2000] + "..."
+                    level_2_summary = (
+                        f"[КРАТКОЕ СОДЕРЖАНИЕ '{doc_name}']\n\n" + text[:2000] + "..."
+                    )
             except Exception as e:
                 logger.warning("Ошибка LLM суммаризации: %s", e)
-                level_2_summary = f"[КРАТКОЕ СОДЕРЖАНИЕ '{doc_name}']\n\n" + text[:2000] + "..."
+                level_2_summary = (
+                    f"[КРАТКОЕ СОДЕРЖАНИЕ '{doc_name}']\n\n" + text[:2000] + "..."
+                )
         else:
-            level_2_summary = f"[ДОКУМЕНТ '{doc_name}' - {len(text)} символов, {len(chunks)} чанков]\n\n" + text[:2000]
+            level_2_summary = (
+                f"[ДОКУМЕНТ '{doc_name}' - {len(text)} символов, {len(chunks)} чанков]\n\n"
+                + text[:2000]
+            )
 
         return {
             "full_text": text,
@@ -154,15 +166,17 @@ class DocumentSummarizer:
             },
         }
 
-
 class OptimizedDocumentIndex:
     """
     Индекс с иерархией: индексация Level 2/1/0 и умный поиск (summary / detailed).
     """
 
-    def __init__(self, rag_client: Any, vector_repo: Any):
+    def __init__(self, rag_client: Any, vector_repo: Any, model: Optional[str] = None):
         self.rag_client = rag_client
         self.vector_repo = vector_repo
+        # Имя модели этого пользователя: клиент уже выбран роутером,
+        # но native-клиенту модель едет в теле запроса.
+        self.model = model
 
     async def index_document_hierarchical_async(
         self,
@@ -180,7 +194,12 @@ class OptimizedDocumentIndex:
                 {
                     "content": level_2_summary,
                     "chunk_index": -1,
-                    "metadata": {"level": 2, "doc_name": doc_name, "type": "full_summary", "source": doc_name},
+                    "metadata": {
+                        "level": 2,
+                        "doc_name": doc_name,
+                        "type": "full_summary",
+                        "source": doc_name,
+                    },
                 }
             )
 
@@ -206,12 +225,22 @@ class OptimizedDocumentIndex:
                     {
                         "content": chunk["content"],
                         "chunk_index": chunk["chunk_index"],
-                        "metadata": {"level": 0, "doc_name": doc_name, "type": "detail_chunk", "source": doc_name},
+                        "metadata": {
+                            "level": 0,
+                            "doc_name": doc_name,
+                            "type": "detail_chunk",
+                            "source": doc_name,
+                        },
                     }
                 )
 
-            texts = [v["content"] if len(v["content"]) <= 10000 else v["content"][:10000] for v in vectors_to_save]
-            embeddings = await self.rag_client.embed(texts)
+            texts = [
+                v["content"] if len(v["content"]) <= 10000 else v["content"][:10000]
+                for v in vectors_to_save
+            ]
+            embeddings = await self.rag_client.embed(
+                texts, model=self.model, kind="document"
+            )
             if len(embeddings) != len(vectors_to_save):
                 logger.error("Число эмбеддингов не совпадает с числом записей")
                 return False
@@ -227,7 +256,9 @@ class OptimizedDocumentIndex:
                 for i in range(len(vectors_to_save))
             ]
             saved = await self.vector_repo.create_vectors_batch(document_vectors)
-            logger.info("Иерархия: сохранено %s векторов для документа '%s'", saved, doc_name)
+            logger.info(
+                "Иерархия: сохранено %s векторов для документа '%s'", saved, doc_name
+            )
             return saved > 0
         except Exception as e:
             logger.error("Ошибка иерархической индексации '%s': %s", doc_name, e)
@@ -261,11 +292,15 @@ class OptimizedDocumentIndex:
             else:
                 search_strategy = "detailed"
 
-        query_embedding = await self.rag_client.embed_single(query)
+        query_embedding = await self.rag_client.embed_single(
+            query, model=self.model, kind="query"
+        )
         limit = k * 3
 
         if search_strategy == "summary":
-            pairs = await self.vector_repo.similarity_search(query_embedding, limit=limit)
+            pairs = await self.vector_repo.similarity_search(
+                query_embedding, limit=limit
+            )
             results_l2 = []
             results_l1 = []
             for v, sim in pairs:
@@ -282,8 +317,15 @@ class OptimizedDocumentIndex:
                 all_results = pairs
         else:
             # Детальный поиск: только level-0 чанки, без summary-обёрток
-            pairs = await self.vector_repo.similarity_search(query_embedding, limit=limit)
-            detail_only = [(v, s) for v, s in pairs if v.metadata.get("type", "") == "detail_chunk"]
+            pairs = await self.vector_repo.similarity_search(
+                query_embedding, limit=limit
+            )
+            detail_only = [
+                (v, s) for v, s in pairs if v.metadata.get("type", "") == "detail_chunk"
+            ]
             all_results = detail_only if detail_only else pairs
 
-        return [(v.content, float(score), v.document_id, v.chunk_index) for v, score in all_results[:k]]
+        return [
+            (v.content, float(score), v.document_id, v.chunk_index)
+            for v, score in all_results[:k]
+        ]

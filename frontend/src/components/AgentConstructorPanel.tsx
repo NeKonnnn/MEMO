@@ -254,6 +254,11 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
   const [isLoadingKb, setIsLoadingKb] = useState(false);
   const [isUploadingKb, setIsUploadingKb] = useState(false);
 
+  // Skills attached to agent (config.skill_ids — slugs)
+  const [availableSkills, setAvailableSkills] = useState<Array<{ id: number; slug: string; name: string; description?: string }>>([]);
+  const [skillIds, setSkillIds] = useState<string[]>([]);
+  const [skillsEnabled, setSkillsEnabled] = useState(false);
+
   // Support contacts
   const [supportName, setSupportName] = useState('');
   const [supportEmail, setSupportEmail] = useState('');
@@ -366,8 +371,28 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
       loadAgents();
       loadModels();
       loadKbDocuments();
+      void (async () => {
+        try {
+          const headers: HeadersInit = token ? { Authorization: `Bearer ${token}` } : {};
+          const resp = await fetch(`${getApiUrl(API_ENDPOINTS.SKILLS)}/list?limit=100`, { headers });
+          if (!resp.ok) return;
+          const data = await resp.json();
+          setAvailableSkills(
+            (data.items || [])
+              .filter((s: { is_active?: boolean }) => s.is_active !== false)
+              .map((s: { id: number; slug: string; name: string; description?: string }) => ({
+                id: s.id,
+                slug: s.slug,
+                name: s.name,
+                description: s.description,
+              })),
+          );
+        } catch {
+          /* silent */
+        }
+      })();
     }
-  }, [isOpen, loadAgents, loadModels, loadKbDocuments]);
+  }, [isOpen, loadAgents, loadModels, loadKbDocuments, token]);
 
   // ─── Load selected agent into form ──────────────────────────────────────────
 
@@ -401,6 +426,18 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
         ? cfg.kb_document_ids.map((x: unknown) => Number(x)).filter((x: number) => Number.isFinite(x))
         : []
     );
+    setSkillIds(
+      Array.isArray(cfg.skill_ids)
+        ? cfg.skill_ids.map((x: unknown) => String(x).trim()).filter(Boolean)
+        : Array.isArray(cfg.skills)
+          ? cfg.skills.map((x: unknown) => String(x).trim()).filter(Boolean)
+          : []
+    );
+    setSkillsEnabled(
+      typeof cfg.skills_enabled === 'boolean'
+        ? cfg.skills_enabled
+        : Array.isArray(cfg.skill_ids) && cfg.skill_ids.length > 0
+    );
     setSupportName(cfg.support_name || '');
     setSupportEmail(cfg.support_email || '');
   }, [selectedAgentId, agents]);
@@ -420,6 +457,8 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
     setUserPromptMode(false);
     setFileSearchEnabled(false);
     setKbDocumentIds([]);
+    setSkillIds([]);
+    setSkillsEnabled(false);
     setSupportName('');
     setSupportEmail('');
   }
@@ -528,6 +567,8 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
         user_prompt_mode: userPromptMode,
         file_search_enabled: fileSearchEnabled,
         kb_document_ids: kbDocumentIds,
+        skill_ids: skillIds,
+        skills_enabled: skillsEnabled,
         support_name: supportName,
         support_email: supportEmail,
       },
@@ -1107,6 +1148,70 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
               </Box>
             ))}
           </Box>
+        </Box>
+
+        {/* ── Skills ───────────────────────────────────────────────────────── */}
+        <Box sx={{ minWidth: 0 }}>
+          <SectionHeader>Skills</SectionHeader>
+          <FormControlLabel
+            control={
+              <Checkbox
+                size="small"
+                checked={skillsEnabled}
+                onChange={(e) => setSkillsEnabled(e.target.checked)}
+                sx={{ color: 'rgba(255,255,255,0.4)', '&.Mui-checked': { color: '#2196f3' }, p: 0.5 }}
+              />
+            }
+            label={
+              <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.75)', fontSize: '0.78rem' }}>
+                Включить skills для агента
+              </Typography>
+            }
+            sx={{ m: 0, mb: 1 }}
+          />
+          <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.45)', display: 'block', mb: 1 }}>
+            Allowlist: пустой список = все доступные. Manual `$` и always-apply работают независимо.
+          </Typography>
+          {!skillsEnabled ? (
+            <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.35)' }}>
+              Skills выключены для этого агента
+            </Typography>
+          ) : availableSkills.length === 0 ? (
+            <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.35)' }}>
+              Нет доступных skills
+            </Typography>
+          ) : (
+            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.25, maxHeight: 160, overflow: 'auto' }}>
+              {availableSkills.map((sk) => (
+                <FormControlLabel
+                  key={sk.id}
+                  control={
+                    <Checkbox
+                      size="small"
+                      checked={skillIds.includes(sk.slug)}
+                      onChange={(e) => {
+                        setSkillIds((prev) =>
+                          e.target.checked
+                            ? [...prev.filter((x) => x !== sk.slug), sk.slug]
+                            : prev.filter((x) => x !== sk.slug),
+                        );
+                      }}
+                      sx={{ color: 'rgba(255,255,255,0.4)', '&.Mui-checked': { color: '#2196f3' }, p: 0.5 }}
+                    />
+                  }
+                  label={
+                    <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.75)', fontSize: '0.78rem' }}>
+                      {sk.name}{' '}
+                      <Box component="span" sx={{ opacity: 0.5 }}>
+                        (${sk.slug})
+                      </Box>
+                    </Typography>
+                  }
+                  sx={{ m: 0 }}
+                />
+              ))}
+            </Box>
+          )}
         </Box>
 
         {/* ── File Search (KB) ─────────────────────────────────────────────── */}

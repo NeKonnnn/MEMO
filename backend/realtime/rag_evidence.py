@@ -228,6 +228,9 @@ def rag_guard_env() -> Tuple[float, bool]:
 
         min_sim = float(runtime_rag_similarity_threshold())
     except Exception:
+        logger.exception("RAG similarity threshold runtime read")
+        min_sim = None
+    if min_sim is None:
         try:
             import backend.app_state as state
 

@@ -1067,9 +1067,20 @@ export default function PromptGalleryPage() {
         <Box sx={{ py: 2 }}>
           <Container maxWidth="xl">
             <Box sx={{ textAlign: 'center' }}>
-              <Typography variant="h4" fontWeight="bold" gutterBottom>
-                Галерея промптов
-              </Typography>
+              <Stack
+                direction="row"
+                alignItems="center"
+                justifyContent="center"
+                spacing={1.5}
+                sx={{ mb: 0.5 }}
+              >
+                <Typography variant="h4" fontWeight="bold">
+                  Галерея промптов
+                </Typography>
+                <Button size="small" onClick={() => navigate('/')}>
+                  К чату
+                </Button>
+              </Stack>
               <Typography variant="body2" color="text.secondary">
                 Делитесь лучшими промптами с командой
               </Typography>

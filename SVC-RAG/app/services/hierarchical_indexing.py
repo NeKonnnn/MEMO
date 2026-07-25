@@ -16,7 +16,6 @@ from app.services.hierarchical import DocumentSummarizer, OptimizedDocumentIndex
 
 logger = get_logger(__name__)
 
-
 async def _summarize_via_backend(prompt: str) -> str:
     """LLM-суммаризация через backend. При сбое — пустая строка (fallback внутри summarizer)."""
     from app.services import llm_chat
@@ -32,7 +31,6 @@ async def _summarize_via_backend(prompt: str) -> str:
         logger.warning("[hierarchical] LLM summary не удалась: %s", e)
         return ""
 
-
 async def index_document_hierarchically(
     text: str,
     doc_id: int,
@@ -42,6 +40,7 @@ async def index_document_hierarchically(
     rag_client: Any,
     chunk_size: Optional[int] = None,
     chunk_overlap: Optional[int] = None,
+    model: Optional[str] = None,
 ) -> int:
     """
     Иерархически проиндексировать УЖЕ СОЗДАННЫЙ документ (doc_id) в вектора стора.
@@ -51,7 +50,11 @@ async def index_document_hierarchically(
     """
     cfg = get_settings().rag
     cs = max(200, int(chunk_size)) if chunk_size else cfg.hierarchical_chunk_size
-    co = max(0, int(chunk_overlap)) if chunk_overlap is not None else cfg.hierarchical_chunk_overlap
+    co = (
+        max(0, int(chunk_overlap))
+        if chunk_overlap is not None
+        else cfg.hierarchical_chunk_overlap
+    )
     if co >= cs:
         co = max(0, cs // 4)
     summarizer = DocumentSummarizer(
@@ -65,7 +68,7 @@ async def index_document_hierarchically(
         filename,
         create_full_summary=bool(cfg.create_full_summary_via_llm),
     )
-    optimized = OptimizedDocumentIndex(rag_client, vector_repo)
+    optimized = OptimizedDocumentIndex(rag_client, vector_repo, model=model)
     ok = await optimized.index_document_hierarchical_async(hierarchical_doc, doc_id)
     if not ok:
         raise RuntimeError("иерархическая индексация не сохранила вектора")

@@ -24,7 +24,7 @@ class TestAutoStrategy(unittest.TestCase):
         self.assertEqual(self._resolve("Найди код ZXQ-917"), "lexical")
 
     def test_selects_lexical_for_quoted_phrase(self):
-        self.assertEqual(self._resolve('Найди точную фразу «аварийный режим»'), "lexical")
+        self.assertEqual(self._resolve("Найди точную фразу «аварийный режим»"), "lexical")
 
     def test_selects_vector_for_semantic_question(self):
         self.assertEqual(

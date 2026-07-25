@@ -1,4 +1,5 @@
 # RAG по документам из настроек «библиотека памяти»: MinIO (оригинал) + memory_rag_* в Postgres
+import json
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -24,6 +25,26 @@ from app.services.hierarchical_indexing import index_document_hierarchically
 logger = get_logger(__name__)
 
 _memory_reindex_generation = 0
+
+
+def _doc_actors(doc):
+    """(owner, uploader, filename) из документа. Принимает и объект, и dict."""
+    if isinstance(doc, dict):
+        meta = doc.get("metadata")
+        name = doc.get("filename") or doc.get("name") or "?"
+    else:
+        meta = getattr(doc, "metadata", None)
+        name = getattr(doc, "filename", None) or "?"
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta or "{}")
+        except (TypeError, ValueError):
+            meta = {}
+    meta = meta or {}
+    owner = str(meta.get("owner_user_id") or "-").strip() or "-"
+    uploader = str(meta.get("uploaded_by") or "-").strip() or "-"
+    return owner, uploader, name
+
 
 def bump_memory_reindex_generation() -> int:
     global _memory_reindex_generation
@@ -306,8 +327,19 @@ class MemoryRagService:
     ) -> Dict[str, int]:
         """Переиндексировать все документы Библиотеки. Возвращает {documents, chunks}."""
         docs = await self.doc_repo.get_all_documents()
+        _cs_env, _co_env, _strat_env = _memory_chunk_params()
+        _eff_size, _eff_overlap = resolve_chunk_params(_cs_env, _co_env)
+        logger.info(
+            "[REINDEX memory] старт: документов=%s strategy=%s size=%s overlap=%s embed=%s",
+            len(docs),
+            normalize_chunking_strategy(_strat_env),
+            _eff_size,
+            _eff_overlap,
+            describe_embed_client(self.rag_client),
+        )
         n_docs = 0
         n_chunks = 0
+        n_errors = 0
         for doc in docs:
             if generation is not None and generation != _memory_reindex_generation:
                 logger.info(
@@ -325,13 +357,31 @@ class MemoryRagService:
                 )
                 n_docs += 1
                 n_chunks += c
-                logger.info("[REINDEX memory] doc=%s чанков=%s", doc.id, c)
+                _own, _up, _name = _doc_actors(doc)
+                logger.info(
+                    "[REINDEX memory] '%s' (id=%s, owner=%s, uploader=%s) чанков=%s",
+                    _name,
+                    doc.id,
+                    _own,
+                    _up,
+                    c,
+                )
             except Exception as e:
+                n_errors += 1
+                _own, _up, _name = _doc_actors(doc)
                 logger.error(
-                    "[REINDEX memory] doc=%s ошибка: %s", getattr(doc, "id", "?"), e
+                    "[REINDEX memory] '%s' (id=%s, owner=%s, uploader=%s) ошибка: %s",
+                    _name,
+                    getattr(doc, "id", "?"),
+                    _own,
+                    _up,
+                    e,
                 )
         logger.info(
-            "[REINDEX memory] готово: документов=%s чанков=%s", n_docs, n_chunks
+            "[REINDEX memory] готово: документов=%s чанков=%s ошибок=%s", 
+            n_docs, 
+            n_chunks, 
+            n_errors
         )
         return {"documents": n_docs, "chunks": n_chunks}    
 

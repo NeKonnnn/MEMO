@@ -35,7 +35,7 @@ import {
   Refresh as RefreshIcon,
   Article as ArticleIcon,
 } from '@mui/icons-material';
-import { getApiUrl, API_ENDPOINTS } from '../config/api';
+import { getApiUrl, API_ENDPOINTS, getAuthFetchHeaders } from '../config/api';
 import { useAppActions } from '../contexts/AppContext';
 
 interface KbDocument {
@@ -153,7 +153,11 @@ export default function KnowledgeBasePage({ isDarkMode }: KnowledgeBasePageProps
         const formData = new FormData();
         formData.append('file', file);
         const url = getApiUrl(API_ENDPOINTS.KB_DOCUMENTS_UPLOAD);
-        const resp = await fetch(url, { method: 'POST', body: formData });
+        const resp = await fetch(url, {
+          method: 'POST',
+          headers: getAuthFetchHeaders(),
+          body: formData,
+        });
         if (!resp.ok) {
           const err = await resp.json().catch(() => ({ detail: resp.statusText }));
           throw new Error(err.detail || resp.statusText);

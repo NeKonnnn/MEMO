@@ -1,7 +1,9 @@
-# Сервис постоянной Базы Знаний (Knowledge Base)
+# Сервис постоянной базы знаний (Knowledge Base)
 # Логика аналогична RagService, но работает с таблицами kb_documents/kb_vectors
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, Union
+import json
+
 from app.services.hierarchical_indexing import index_document_hierarchically
 from app.clients.rag_models_client import RagModelsClient
 from app.core.config import get_settings
@@ -24,8 +26,26 @@ logger = get_logger(__name__)
 
 _kb_reindex_generation = 0
 
+def _doc_actors(doc):
+    """(owner, uploader, filename) из документа. Принимает и объект, и dict."""
+    if isinstance(doc, dict):
+        meta = doc.get("metadata")
+        name = doc.get("filename") or doc.get("name") or "?"
+    else:
+        meta = getattr(doc, "metadata", None)
+        name = getattr(doc, "filename", None) or "?"
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta or "{}")
+        except (TypeError, ValueError):
+            meta = {}
+    meta = meta or {}
+    owner = str(meta.get("owner_user_id") or "-").strip() or "-"
+    uploader = str(meta.get("uploaded_by") or "-").strip() or "-"
+    return owner, uploader, name
+
 def bump_kb_reindex_generation() -> int:
-    """Объявить новое поколение реиндекса KB (сигнал текущему — прерваться)."""
+    """Увеличивает номер поколения реиндекса KB (сигнал текущим — прерваться)."""
     global _kb_reindex_generation
     _kb_reindex_generation += 1
     return _kb_reindex_generation
@@ -34,7 +54,6 @@ def current_kb_reindex_generation() -> int:
     return _kb_reindex_generation
 
 MAX_KB_CONTEXT_CHARS = 12000
-
 
 class KbService:
     def __init__(
@@ -49,6 +68,30 @@ class KbService:
         self.rag_client = rag_models_client
         self.graph_repo = graph_repo
         self._bm25 = InMemoryBm25Index(self.vector_repo.get_all_contents_for_bm25)
+        # BM25 строится по ВСЕЙ таблице векторов, а таблиц теперь несколько
+        # (по одной на размерность) — держим индекс на каждую.
+        self._bm25_by_dim = {int(self.vector_repo.embedding_dim or 0): self._bm25}
+
+    async def _route(self, model=None, provider=None):
+        """Профиль эмбеддинга (клиент + имя модели + dim) и репозиторий нужной таблицы.
+
+        Без model/provider вернутся ровно то, что было до фазы B3.
+        """
+        from app.services.embed_routing import resolve_for
+
+        return await resolve_for(self.rag_client, self.vector_repo, provider, model)
+
+    def _bm25_for(self, repo) -> InMemoryBm25Index:
+        dim = int(getattr(repo, "embedding_dim", 0) or 0)
+        idx = self._bm25_by_dim.get(dim)
+        if idx is None:
+            idx = InMemoryBm25Index(repo.get_all_contents_for_bm25)
+            self._bm25_by_dim[dim] = idx
+        return idx
+
+    def _mark_bm25_dirty(self) -> None:
+        for idx in self._bm25_by_dim.values():
+            idx.mark_dirty()
 
     async def _rebuild_graph_for_document(self, document_id: int) -> None:
         if not self.graph_repo:
@@ -62,9 +105,11 @@ class KbService:
                     chunks=[(v.chunk_index, v.content) for v in chunks],
                 )
         except Exception as e:
-            logger.warning("KB graph индекс не пересобран для документа %s: %s", document_id, e)
+            logger.warning(
+                "KB graph индекс не пересобран для документа %s: %s", document_id, e
+            )
 
-    # ─── Индексация ─────────────────────────────────────────────────────────────
+    # ─── Индексация ───────────────────────────────────────────────────────────
 
     async def index_document(
         self,
@@ -76,6 +121,11 @@ class KbService:
         chunking_strategy: Optional[str] = None,
         minio_object: Optional[str] = None,
         minio_bucket: Optional[str] = None,
+        owner_user_id: Optional[str] = None,
+        agent_id: Optional[int] = None,
+        uploaded_by: Optional[str] = None,
+        model: Optional[str] = None,
+        provider: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Парсим файл, режем на чанки, получаем эмбеддинги и сохраняем в kb_documents/kb_vectors."""
         parsed = await parse_document(file_data, filename)
@@ -90,15 +140,42 @@ class KbService:
         if not text.strip():
             return {"ok": False, "error": "Документ пустой", "document_id": None}
 
+        # Модель выбираем ДО создания документа: иначе при ошибке сохранения
+        # в БД останется документ без единого вектора.
+        try:
+            prof, repo = await self._route(model, provider)
+        except Exception as e:
+            logger.error(
+                "[INDEX kb] не удалось выбрать модель (provider=%s model=%s): %s",
+                provider,
+                model,
+                e,
+            )
+            return {
+                "ok": False,
+                "error": f"Модель эмбеддинга: {e}",
+                "document_id": None,
+            }
+
         meta: Dict[str, Any] = {
             "file_type": parsed.get("file_type", ""),
             "pages": parsed.get("pages", 0),
             "size": len(file_data),
+            "source": "agent",
         }
         if minio_object:
             meta["minio_object"] = minio_object
         if minio_bucket:
             meta["minio_bucket"] = minio_bucket
+        if owner_user_id:
+            meta["owner_user_id"] = str(owner_user_id).strip().lower()
+        if uploaded_by:
+            meta["uploaded_by"] = str(uploaded_by).strip().lower()
+        if agent_id is not None:
+            try:
+                meta["agent_id"] = int(agent_id)
+            except (TypeError, ValueError):
+                pass
 
         doc = Document(
             filename=filename,
@@ -109,7 +186,11 @@ class KbService:
         )
         doc_id = await self.doc_repo.create_document(doc)
         if doc_id is None:
-            return {"ok": False, "error": "Ошибка сохранения документа в БД", "document_id": None}
+            return {
+                "ok": False,
+                "error": "Ошибка сохранения документа в БД",
+                "document_id": None,
+            }
 
         if (chunking_strategy or "").strip().lower() == "hierarchical":
             try:
@@ -117,10 +198,11 @@ class KbService:
                     text,
                     doc_id,
                     filename=filename,
-                    vector_repo=self.vector_repo,
-                    rag_client=self.rag_client,
+                    vector_repo=repo,
+                    rag_client=prof.client,
                     chunk_size=chunk_size,
                     chunk_overlap=chunk_overlap,
+                    model=prof.model,
                 )
             except Exception as e:
                 logger.error("KB иерархическая индексация не удалась: %s", e)
@@ -130,19 +212,21 @@ class KbService:
                     "error": f"Иерархическая индексация: {e}",
                     "document_id": None,
                 }
-            self._bm25.mark_dirty()
+            self._mark_bm25_dirty()
             await self._rebuild_graph_for_document(doc_id)
             eff_size, eff_overlap = resolve_chunk_params(chunk_size, chunk_overlap)
             logger.info(
-                "[INDEX kb] '%s' (id=%s): strategy=hierarchical size=%s overlap=%s "
+                "[INDEX kb] '%s' (id=%s, owner=%s, uploader=%s): strategy=hierarchical size=%s overlap=%s "
                 "символов=%s чанков=%s embed=%s",
                 filename,
                 doc_id,
+                owner_user_id or "-",
+                uploaded_by or "-",
                 eff_size,
                 eff_overlap,
                 len(text),
                 count,
-                describe_embed_client(self.rag_client),
+                prof.label,
             )
             return {
                 "ok": True,
@@ -158,18 +242,28 @@ class KbService:
             chunking_strategy=chunking_strategy or "universal",
         )
         if not chunks_with_meta:
-            return {"ok": False, "error": "Не удалось нарезать чанки", "document_id": doc_id}
+            return {
+                "ok": False,
+                "error": "Не удалось нарезать чанки",
+                "document_id": doc_id,
+            }
         chunks = [c for c, _m in chunks_with_meta]
 
         try:
-            embeddings = await self.rag_client.embed(chunks)
+            embeddings = await prof.embed(chunks, kind="document")
         except Exception as e:
             logger.error("Ошибка получения эмбеддингов для KB: %s", e)
             await self.doc_repo.delete_document(doc_id)
-            return {"ok": False, "error": f"Ошибка эмбеддингов: {e}", "document_id": None}
+            return {
+                "ok": False,
+                "error": f"Ошибка эмбеддингов: {e}",
+                "document_id": None,
+            }
 
         vectors = []
-        for idx, ((chunk, cmeta), embedding) in enumerate(zip(chunks_with_meta, embeddings)):
+        for idx, ((chunk, cmeta), embedding) in enumerate(
+            zip(chunks_with_meta, embeddings)
+        ):
             meta = {"start": idx}
             meta.update(cmeta)
             vectors.append(
@@ -182,8 +276,8 @@ class KbService:
                 )
             )
 
-        created = await self.vector_repo.create_vectors_batch(vectors)
-        self._bm25.mark_dirty()
+        created = await repo.create_vectors_batch(vectors)
+        self._mark_bm25_dirty()
         if self.graph_repo:
             try:
                 await self.graph_repo.rebuild_document_graph(
@@ -192,19 +286,23 @@ class KbService:
                     chunks=[(v.chunk_index, v.content) for v in vectors],
                 )
             except Exception as e:
-                logger.warning("KB graph индекс не собран для документа %s: %s", doc_id, e)
+                logger.warning(
+                    "KB graph индекс не собран для документа %s: %s", doc_id, e
+                )
         eff_size, eff_overlap = resolve_chunk_params(chunk_size, chunk_overlap)
         logger.info(
-            "[INDEX kb] '%s' (id=%s): strategy=%s size=%s overlap=%s "
+            "[INDEX kb] '%s' (id=%s, owner=%s, uploader=%s): strategy=%s size=%s overlap=%s "
             "символов=%s чанков=%s embed=%s",
             filename,
             doc_id,
+            owner_user_id or "-",
+            uploaded_by or "-",
             normalize_chunking_strategy(chunking_strategy),
             eff_size,
             eff_overlap,
-            len(text), 
-            created, 
-            describe_embed_client(self.rag_client),
+            len(text),
+            created,
+            prof.label,
         )
         return {
             "ok": True,
@@ -220,15 +318,25 @@ class KbService:
         chunk_size: Optional[int] = None,
         chunk_overlap: Optional[int] = None,
         chunking_strategy: Optional[str] = None,
+        model: Optional[str] = None,
+        provider: Optional[str] = None,
+        route=None,
     ) -> int:
-        """Заново нарезать один документ KB из сохранённого текста и заменить его вектора."""
+        """Заново нарезать один документ KB из сохранённого текста и заменить его вектора.
+
+        route — уже разрешённая пара (профиль, репозиторий): reindex_all передаёт её,
+        чтобы не резолвить модель на каждый документ.
+        """
         doc = await self.doc_repo.get_document(document_id)
         if doc is None:
             return 0
         text = doc.content or ""
         if not text.strip():
             return 0
-        await self.vector_repo.delete_vectors_by_document(document_id)
+        prof, repo = route if route else await self._route(model, provider)
+        # Удаление обходит ВСЕ таблицы (B2b) — при смене модели старые вектора
+        # лежат в таблице прежней размерности и должны уйти.
+        await repo.delete_vectors_by_document(document_id)
         strategy = (chunking_strategy or "universal").strip().lower()
         if strategy == "hierarchical":
             from app.services.hierarchical_indexing import index_document_hierarchically
@@ -237,12 +345,13 @@ class KbService:
                 text,
                 document_id,
                 filename=doc.filename,
-                vector_repo=self.vector_repo,
-                rag_client=self.rag_client,
+                vector_repo=repo,
+                rag_client=prof.client,
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap,
+                model=prof.model,
             )
-            self._bm25.mark_dirty()
+            self._mark_bm25_dirty()
             await self._rebuild_graph_for_document(document_id)
             return count
         chunks_with_meta = split_into_chunks_with_meta(
@@ -254,9 +363,11 @@ class KbService:
         chunks = [c for c, _m in chunks_with_meta]
         if not chunks:
             return 0
-        embeddings = await self.rag_client.embed(chunks)
+        embeddings = await prof.embed(chunks, kind="document")
         vectors = []
-        for idx, ((chunk, cmeta), embedding) in enumerate(zip(chunks_with_meta, embeddings)):
+        for idx, ((chunk, cmeta), embedding) in enumerate(
+            zip(chunks_with_meta, embeddings)
+        ):
             meta = {"start": idx}
             meta.update(cmeta)
             vectors.append(
@@ -268,8 +379,8 @@ class KbService:
                     metadata=meta,
                 )
             )
-        created = await self.vector_repo.create_vectors_batch(vectors)
-        self._bm25.mark_dirty()
+        created = await repo.create_vectors_batch(vectors)
+        self._mark_bm25_dirty()
         if self.graph_repo:
             try:
                 await self.graph_repo.rebuild_document_graph(
@@ -278,7 +389,9 @@ class KbService:
                     chunks=[(v.chunk_index, v.content) for v in vectors],
                 )
             except Exception as e:
-                logger.warning("KB graph индекс не собран для документа %s: %s", document_id, e)
+                logger.warning(
+                    "KB graph индекс не собран для документа %s: %s", document_id, e
+                )
         return created
 
     async def reindex_all(
@@ -288,11 +401,44 @@ class KbService:
         chunk_overlap: Optional[int] = None,
         chunking_strategy: Optional[str] = None,
         generation: Optional[int] = None,
+        owner_user_id: Optional[str] = None,
+        document_ids: Optional[List[int]] = None,
+        model: Optional[str] = None,
+        provider: Optional[str] = None,
     ) -> Dict[str, int]:
-        """Перечанкировать все документы KB. Возвращает {documents, chunks}."""
-        docs = await self.doc_repo.get_all_documents()
+        """Переиндексировать документы KB.
+
+        Если передан owner_user_id — документы владельца (+ опционально document_ids
+        из config агентов без metadata — для legacy).
+        """
+        by_id: Dict[int, Any] = {}
+        if owner_user_id:
+            for doc in await self.doc_repo.get_documents_by_owner(owner_user_id):
+                if doc.id is not None:
+                    by_id[int(doc.id)] = doc
+        if document_ids:
+            for doc in await self.doc_repo.get_documents_by_ids(list(document_ids)):
+                if doc.id is not None:
+                    by_id[int(doc.id)] = doc
+        if owner_user_id or document_ids:
+            docs = list(by_id.values())
+        else:
+            docs = await self.doc_repo.get_all_documents()
+        # Модель резолвим один раз на весь проход — иначе проба на каждый документ.
+        prof, repo = await self._route(model, provider)
+        eff_size, eff_overlap = resolve_chunk_params(chunk_size, chunk_overlap)
+        logger.info(
+            "[REINDEX kb] старт: owner=%s документов=%s strategy=%s size=%s overlap=%s embed=%s",
+            owner_user_id or "*",
+            len(docs),
+            normalize_chunking_strategy(chunking_strategy),
+            eff_size,
+            eff_overlap,
+            prof.label,
+        )
         n_docs = 0
         n_chunks = 0
+        n_errors = 0
         for doc in docs:
             if generation is not None and generation != _kb_reindex_generation:
                 logger.info(
@@ -307,22 +453,48 @@ class KbService:
                     chunk_size=chunk_size,
                     chunk_overlap=chunk_overlap,
                     chunking_strategy=chunking_strategy,
+                    route=(prof, repo),
                 )
                 n_docs += 1
                 n_chunks += c
-                logger.info("[REINDEX kb] doc=%s чанков=%s", doc.id, c)
+                _own, _up, _name = _doc_actors(doc)
+                logger.info(
+                    "[REINDEX kb] '%s' (id=%s, owner=%s, uploader=%s) чанков=%s",
+                    _name,
+                    doc.id,
+                    _own,
+                    _up,
+                    c,
+                )
             except Exception as e:
-                logger.error("[REINDEX kb] doc=%s ошибка: %s", getattr(doc, "id", "?"), e)
-        logger.info("[REINDEX kb] готово: документов=%s чанков=%s", n_docs, n_chunks)
+                n_errors += 1
+                _own, _up, _name = _doc_actors(doc)
+                logger.error(
+                    "[REINDEX kb] '%s' (id=%s, owner=%s, uploader=%s) ошибка: %s",
+                    _name,
+                    getattr(doc, "id", "?"),
+                    _own,
+                    _up,
+                    e,
+                )
+        logger.info(
+            "[REINDEX kb] итого: owner=%s docs_filter=%s документов=%s чанков=%s ошибок=%s",
+            owner_user_id or "*",
+            len(document_ids or []),
+            n_docs,
+            n_chunks,
+            n_errors,
+        )
         return {"documents": n_docs, "chunks": n_chunks}
 
-    # ─── Поиск ──────────────────────────────────────────────────────────────────
+    # ─── Поиск ────────────────────────────────────────────────────────────────
 
     async def search(
         self,
         query: str,
         k: int = 8,
         document_id: Optional[int] = None,
+        document_ids: Optional[List[int]] = None,
         use_reranking: Optional[bool] = None,
         strategy: Optional[str] = None,
         vector_query: Optional[str] = None,
@@ -331,6 +503,10 @@ class KbService:
         eval_gold_chunks: Optional[List[Tuple[int, int]]] = None,
         eval_llm_judge: bool = False,
         return_trace: bool = False,
+        model: Optional[str] = None,
+        provider: Optional[str] = None,
+        reranker_model: Optional[str] = None,
+        reranker_provider: Optional[str] = None,
     ) -> Union[
         List[Tuple[str, float, Optional[int], Optional[int]]],
         Tuple[List[Tuple[str, float, Optional[int], Optional[int]]], RetrievalTrace],
@@ -338,31 +514,43 @@ class KbService:
         """Векторный поиск по базе знаний.
 
         Возвращает список (content, score, document_id, chunk_index).
-        При ``return_trace=True`` — кортеж (hits, RetrievalTrace).
+        При ```return_trace=True``` — кортеж (hits, RetrievalTrace).
         """
         cfg = get_settings().rag
+        # Запрос считаем моделью пользователя и ищем в таблице ЕЁ размерности.
+        prof, repo = await self._route(model, provider)
+        # Реранкер выбирается независимо от эмбеддера: хранилища у него нет.
+        from app.services.embed_routing import rerank_client_for
 
+        rr_client = rerank_client_for(self.rag_client, reranker_provider, reranker_model)
         async def _vectors(emb, lim):
-            return await self.vector_repo.similarity_search(
+            return await repo.similarity_search(
                 query_embedding=emb,
                 limit=lim,
                 document_id=document_id,
+                document_ids=document_ids,
                 filters=filters,
             )
 
         async def _keywords(text, lim):
-            return await self.vector_repo.keyword_search(
+            return await repo.keyword_search(
                 text,
                 limit=lim,
                 document_id=document_id,
+                document_ids=document_ids,
                 filters=filters,
             )
 
         async def _substring(tokens, lim):
-            return await self.vector_repo.substring_search(tokens, limit=lim, document_id=document_id)
+            return await repo.substring_search(
+                tokens, 
+                limit=lim, 
+                document_id=document_id,
+                document_ids=document_ids,
+            )
 
         async def _fetch_doc(doc_id: int):
-            return await self.vector_repo.get_vectors_by_document(doc_id)
+            return await repo.get_vectors_by_document(doc_id)
 
         async def _find_docs_by_filename(name: str):
             return await self.doc_repo.find_document_ids_by_filename(name)
@@ -376,7 +564,10 @@ class KbService:
             use_reranking=use_reranking,
             strategy=strategy,
             filters=filters,
-            rag_client=self.rag_client,
+            rag_client=prof.client,
+            embed_model=prof.model,
+            rerank_client=rr_client,
+            rerank_model=reranker_model,
             graph_repo=self.graph_repo,
             cfg=cfg,
             search_vectors=_vectors,
@@ -384,8 +575,8 @@ class KbService:
             substring_search=_substring,
             fetch_document_chunks=_fetch_doc,
             find_docs_by_filename=_find_docs_by_filename,
-            vector_repo_for_window=self.vector_repo,
-            bm25_index=self._bm25,
+            vector_repo_for_window=repo,
+            bm25_index=self._bm25_for(repo),
             eval_gold_document_ids=eval_gold_document_ids,
             eval_gold_chunks=eval_gold_chunks,
             eval_llm_judge=eval_llm_judge,
@@ -393,7 +584,7 @@ class KbService:
         )
         return (hits, trace) if return_trace else hits
 
-    # ─── Управление документами ─────────────────────────────────────────────────
+    # ─── Управление документами ───────────────────────────────────────────────
 
     async def list_documents(self) -> List[Dict[str, Any]]:
         docs = await self.doc_repo.get_all_documents()
@@ -421,7 +612,7 @@ class KbService:
                 pass
         await self.vector_repo.delete_vectors_by_document(document_id)
         await self.doc_repo.delete_document(document_id)
-        self._bm25.mark_dirty()
+        self._mark_bm25_dirty()
         logger.info("KB: удалён документ id=%s ('%s')", document_id, doc.filename)
         return {
             "ok": True,

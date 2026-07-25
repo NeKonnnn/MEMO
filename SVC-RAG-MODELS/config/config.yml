@@ -42,8 +42,24 @@ logging:
 rag_models:
   enabled: true
   models_dir: "/app/models/rag"
-  embedding_model: "paraphrase-multilingual-MiniLM-L12-v2"
+  # Дефолт должен совпадать с RAG_EMBEDDING_DIM=1536 в docker-compose (FRIDA).
+  # MiniLM (384) оставляем как вторую — для экспериментов / лёгкого режима.
+  embedding_model: "FRIDA"
+  embedding_model2: "paraphrase-multilingual-MiniLM-L12-v2"
+  # Остальные папки из models/rag/, которые UI показывает в каталоге
+  embedding_models:
+    - "Giga-Embeddings-instruct"
+    - "Qwen3-Embedding-4B"
+  # Реранкеры: основной + второй, между ними можно свапаться по имени в запросе
   reranker_model: "ms-marco-MiniLM-L-6-v2"
+  reranker_model2: "bge-reranker-v2-minicpm-layerwise"
+  reranker_models: []
+  # Сколько держать в памяти разом (LRU вытесняет лишние)
+  max_loaded_embedding: 2
+  max_loaded_reranker: 2
+  # Префиксы для асимметричных моделей (FRIDA); на Giga/MiniLM не влияют
+  query_prompt_name: "search_query"
+  document_prompt_name: "search_document"
   offline: true
   device: "cpu"
   # На CPU большие батчи → OOM и долгий encode; при GPU увеличьте до 32–64

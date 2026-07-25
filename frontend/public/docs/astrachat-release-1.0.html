@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AstraChat 1.0 — подробности релиза</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #ffffff;
+      --fg: #111111;
+      --muted: #777777;
+      --border: rgba(0, 0, 0, 0.12);
+      --link: #1976d2;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #121212;
+        --fg: #f2f2f2;
+        --muted: #9a9a9a;
+        --border: rgba(255, 255, 255, 0.14);
+        --link: #90caf9;
+      }
+    }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", Arial, sans-serif;
+      background: var(--bg);
+      color: var(--fg);
+      line-height: 1.55;
+    }
+    main {
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 40px 24px 64px;
+    }
+    h1 {
+      font-size: 1.75rem;
+      margin: 0 0 8px;
+    }
+    .date {
+      color: var(--muted);
+      font-size: 0.9rem;
+      margin-bottom: 24px;
+    }
+    h2 {
+      font-size: 1.1rem;
+      margin: 24px 0 8px;
+    }
+    ul {
+      margin: 0;
+      padding-left: 1.25rem;
+    }
+    li { margin: 4px 0; }
+    a { color: var(--link); }
+    .back {
+      display: inline-block;
+      margin-bottom: 24px;
+      text-decoration: none;
+    }
+    .back:hover { text-decoration: underline; }
+    hr {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 28px 0;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back" href="/">← Вернуться в AstraChat</a>
+    <h1>🎉 Релиз версии 1.0 AstraChat</h1>
+    <div class="date">23 июня, 2026</div>
+
+    <p>
+      Первый полноценный релиз корпоративного ассистента AstraChat: единый чат с моделями,
+      агентами, проектами, RAG и безопасной авторизацией в контуре банка.
+    </p>
+
+    <hr />
+
+    <h2>Авторизация</h2>
+    <ul>
+      <li>Добавлена авторизация по LDAP</li>
+      <li>Добавлена авторизация по SSO (Keycloak)</li>
+      <li>Поддержка ролей и политик доступа к агентам</li>
+    </ul>
+
+    <h2>Чат</h2>
+    <ul>
+      <li>Настроена интеграция с LLM-моделями домена CORSUR</li>
+      <li>Настроена интеграция с LLM-моделями домена PHOENIX</li>
+      <li>Режимы обычного и проектного чата, ветвление диалогов</li>
+      <li>Экспорт ответов в PDF и Word с сохранением разметки и таблиц</li>
+    </ul>
+
+    <h2>Файлы</h2>
+    <ul>
+      <li>
+        Прикрепление текстовых файлов (pdf, doc, docx, xlsx, txt) через кнопку «+»
+        в окне ввода сообщения
+      </li>
+      <li>Отдельный экспорт markdown-таблиц в Excel из ответа модели</li>
+    </ul>
+
+    <h2>База знаний (RAG)</h2>
+    <ul>
+      <li>Поиск по документам памяти, проектов и агентов</li>
+      <li>Настройки стратегии поиска и моделей эмбеддинга / reranker</li>
+    </ul>
+
+    <hr />
+    <p style="color: var(--muted); font-size: 0.9rem;">
+      AstraChat · релиз 1.0 · страница подробностей обновления
+    </p>
+  </main>
+</body>
+</html>

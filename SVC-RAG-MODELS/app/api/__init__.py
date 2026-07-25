@@ -1,6 +1,6 @@
 # Роуты API: эмбеддинги, реранкер, хелсчек
 from fastapi import APIRouter
-from .endpoints import embed, rerank, health,models
+from .endpoints import embed, rerank, health, models
 
 router = APIRouter()
 router.include_router(embed.router, tags=["Эмбеддинги"])

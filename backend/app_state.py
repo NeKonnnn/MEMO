@@ -219,17 +219,25 @@ try:
 except ValueError:
     _rst = 0.0
 rag_similarity_threshold: float = max(0.0, min(_rst, 1.0))
-rag_reranking_enabled: bool = _env_rag_pipeline_bool("RAG_USE_RERANKING", False)
+# Reranker включён по умолчанию: SVC-RAG (config.yml use_reranking=true) умеет
+# cross-encoder, но backend раньше слал use_reranking=False и ГАСИЛ его — из-за
+# чего первый релевантный чанк часто оказывался не на 1-2 месте (низкий MRR,
+# "случайные" ответы). Дефолт True приводит поведение backend в соответствие
+# с конфигом SVC-RAG. Отключается через RAG_USE_RERANKING=0.
+rag_reranking_enabled: bool = _env_rag_pipeline_bool("RAG_USE_RERANKING", True)
+# Сколько чанков оставить ПОСЛЕ реранка. Дефолт синхронизирован с RAG_CHAT_TOP_K
+# (12), а не 5: раньше при выключенном реранке усечения не было, а включение
+# реранка с top_n=5 внезапно резало контекст с 12 до 5 чанков и порождало
+# ложные "Не знаю"/неполные ответы. Реранкер должен ПЕРЕУПОРЯДОЧИВАТЬ, а не
+# выбрасывать половину найденного. Уменьшайте осознанно через RAG_RERANK_TOP_N.
 try:
-    _rtn = int(os.getenv("RAG_RERANK_TOP_N", "5"))
+    _rtn = int(os.getenv("RAG_RERANK_TOP_N", "12"))
 except ValueError:
-    _rtn = 5
+    _rtn = 12
 rag_rerank_top_n: int = max(1, min(_rtn, 64))
 rag_embedding_model_path: str = ""
 rag_reranker_model_path: str = ""
-rag_system_prompt: str = (
-    'Используй только предоставленный контекст. Если ответа нет в тексте, скажи «Не знаю». Не придумывай факты.'
-)
+rag_system_prompt: str = "Используй только предоставленный контекст. Если ответа нет в тексте, скажи «Не знаю». Не придумывай факты."
 try:
     _rk = int(os.getenv("RAG_CHAT_TOP_K", "12"))
 except ValueError:
@@ -240,23 +248,10 @@ _model_comparison_models_lock = threading.Lock()
 
 
 def get_library_chunk_index_params() -> dict:
-    """Чанкинг для Библиотеки (KB + memory-rag): всегда universal, без UI-стратегии.
+    """Чанкинг Memory/Библиотеки: только env RAG_MEMORY_* (не UI)."""
+    from backend.services.memory_rag_env import get_memory_chunk_index_params
 
-    Size/overlap — из настроек размера (не из strategy dropdown).
-    """
-    try:
-        size = int(rag_chunk_size)
-    except (TypeError, ValueError):
-        size = 1000
-    try:
-        overlap = int(rag_chunk_overlap)
-    except (TypeError, ValueError):
-        overlap = 200
-    return {
-        "chunk_size": max(200, min(size, 8000)),
-        "chunk_overlap": max(0, min(overlap, 2000)),
-        "chunking_strategy": "universal",
-    }
+    return get_memory_chunk_index_params()
 
 
 def get_rag_chunk_index_params() -> dict:
@@ -283,10 +278,6 @@ def get_rag_chat_top_k() -> int:
     """Сколько чанков запрашивать у SVC-RAG (чат, агент, API с документами).
 
     При активном user-контексте чата берёт персональный rag_chat_top_k из БД.
-    Дефолт 12 (а не 8): на слабых мультиязычных эмбеддингах (MiniLM-L12) top-8
-    слишком часто не захватывает нужный чанк, особенно на именах собственных и
-    коротких факт-запросах. 12–16 — sweet-spot; выше — начинает раздувать
-    контекст и разбавлять внимание LLM.
     """
     try:
         from backend.services.user_rag_settings import runtime_rag_top_k
@@ -445,7 +436,26 @@ def load_app_settings() -> dict:
                 rag_embedding_model_path = str(data.get("rag_embedding_model_path") or "").strip()
             if "rag_reranker_model_path" in data:
                 rag_reranker_model_path = str(data.get("rag_reranker_model_path") or "").strip()
-            logger.info(f"Настройки загружены из {SETTINGS_FILE}")
+            logger.debug(f"Настройки загружены из %s", SETTINGS_FILE)
+            logger.debug(
+                "[RAG-CFG] Эффективные настройки RAG после загрузки: strategy=%s, "
+                "chunking=%s, chunk_size=%s, chunk_overlap=%s, similarity_threshold=%s, "
+                "reranking=%s, rerank_top_n=%s, top_k=%s, fix_typos=%s, multi_query=%s, "
+                "hyde=%s, embedding=%r, reranker=%r",
+                current_rag_strategy,
+                rag_chunking_strategy,
+                rag_chunk_size,
+                rag_chunk_overlap,
+                rag_similarity_threshold,
+                rag_reranking_enabled,
+                rag_rerank_top_n,
+                rag_chat_top_k,
+                rag_query_fix_typos,
+                rag_multi_query_enabled,
+                rag_hyde_enabled,
+                rag_embedding_model_path,
+                rag_reranker_model_path,
+            )
             return data
     except Exception:
         logger.exception("Ошибка загрузки настроек")

@@ -135,6 +135,8 @@ async def _resolve_agent_chat_params(agent_id_raw, user_id=None) -> dict:
         "system_prompt": None,
         "file_search_enabled": False,
         "kb_document_ids": [],
+        "skill_ids": [],
+        "skills_enabled": False,
     }
     if agent_id_raw is None:
         return empty
@@ -193,6 +195,13 @@ async def _resolve_agent_chat_params(agent_id_raw, user_id=None) -> dict:
                 except (TypeError, ValueError):
                     continue
             out["kb_document_ids"] = sorted(set(kb_ids))
+        raw_skill_ids = cfg.get("skill_ids") or cfg.get("skills")
+        if isinstance(raw_skill_ids, list):
+            out["skill_ids"] = [str(v).strip() for v in raw_skill_ids if str(v).strip()]
+        if "skills_enabled" in cfg:
+            out["skills_enabled"] = bool(cfg.get("skills_enabled"))
+        else:
+            out["skills_enabled"] = bool(out["skill_ids"])
         logger.info(
             f"[chat] agent_id={aid} → model_path={out['model_path']}, max_tokens={out['max_tokens']}, temperature={out['temperature']}"
         )

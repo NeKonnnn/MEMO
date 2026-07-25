@@ -154,7 +154,7 @@ export default function SettingsModal({ open, onClose, isDarkMode, onToggleTheme
       case 'mcp':
         return <McpSettings isDarkMode={isDarkMode} />;
       case 'rag':
-        return <RAGSettings />;
+        return <RAGSettings isDarkMode={isDarkMode} />;
       case 'transcription':
         return <TranscriptionSettings />;
       case 'chats':

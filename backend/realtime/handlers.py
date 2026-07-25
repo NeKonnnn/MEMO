@@ -890,7 +890,7 @@ async def _handle_multi_llm(
     if sources.memory and rag_client:
         try:
             mem_id_name = build_rag_id_to_filename(list(await rag_client.memory_rag_list_documents() or []))
-            hits = await rag_client.memory_rag_search(user_message, k=get_rag_chat_top_k(), strategy=rag_strategy)
+            hits = await rag_client.memory_rag_search(user_message, strategy=rag_strategy)
             hits = filter_rag_hits_by_score(list(hits or []), min_sim)
             prefix = "Документы из настроек (библиотека памяти)"
             if hits:
@@ -936,6 +936,34 @@ async def _handle_multi_llm(
     if user_cpm is None:
         user_cpm = context_prompt_manager
 
+    skill_append = ""
+    lazy_skill_ids: list = []
+    try:
+        from backend.services.skills import apply_skills_to_chat, strip_skill_mentions
+
+        skill_append, _stripped, lazy_skill_ids, allowed_tools_extra, _primed = await apply_skills_to_chat(
+            system_prompt="",
+            user_message=user_message,
+            data=data or {},
+            agent_profile=agent_profile if isinstance(agent_profile, dict) else {},
+            current_user=current_user,
+        )
+        final_user_message = strip_skill_mentions(final_user_message)
+        if lazy_skill_ids or allowed_tools_extra:
+            from backend.tools.tool_context import get_tool_context, set_tool_context
+
+            ctx = get_tool_context() or {}
+            if lazy_skill_ids:
+                ctx["__skill_ids__"] = lazy_skill_ids
+            ctx["current_user"] = current_user
+            set_tool_context(ctx)
+        if allowed_tools_extra:
+            existing = list(data.get("tool_ids") or data.get("mcp_tool_ids") or [])
+            merged = list(dict.fromkeys([*existing, *allowed_tools_extra]))
+            data["tool_ids"] = merged
+    except Exception:
+        logger.exception("[multi-llm] skills injection failed")
+
     def _system_prompt_for_model(model_path: Optional[str]) -> Optional[str]:
         prompt = None
         agent_sp = (agent_profile.get("system_prompt") or "") if isinstance(agent_profile, dict) else ""
@@ -952,6 +980,10 @@ async def _handle_multi_llm(
         prompt = merge_feedback_into_system_prompt(prompt, feedback_block)
         if context_added:
             prompt = merge_strict_rag_system_prompt(prompt, rag_override=rag_override)
+        if skill_append:
+            from backend.services.skills import append_to_system_prompt
+
+            prompt = append_to_system_prompt(prompt, skill_append)
         return prompt
 
     canned = await maybe_rag_no_evidence_message(
@@ -1296,11 +1328,35 @@ async def _handle_agent_mode(
         "use_memory_library_rag": sources.memory,
         "active_rag_sources": sources.as_dict(),
     }
+    try:
+        from backend.services.skills import apply_skills_to_chat, strip_skill_mentions
+
+        skill_append, _s, lazy_skill_ids, allowed_tools_extra, _primed = await apply_skills_to_chat(
+            system_prompt="",
+            user_message=user_message,
+            data=data or {},
+            agent_profile=agent_profile if isinstance(agent_profile, dict) else {},
+            current_user=current_user,
+            history=history,
+        )
+        if skill_append:
+            context["agent_system_prompt"] = (
+                f"{(context.get('agent_system_prompt') or '').rstrip()}\n\n{skill_append}".strip()
+            )
+        if lazy_skill_ids:
+            context["__skill_ids__"] = lazy_skill_ids
+        if allowed_tools_extra:
+            existing = list(context.get("tool_ids") or [])
+            context["tool_ids"] = list(dict.fromkeys([*existing, *allowed_tools_extra]))
+            data["tool_ids"] = context["tool_ids"]
+        user_message = strip_skill_mentions(user_message)
+    except Exception:
+        logger.exception("[agent] skills injection failed")
     _get_set_tool_context()(context)
     effective_message = user_message
     if project_instructions and project_instructions.strip():
         effective_message = f"[Инструкции проекта: {project_instructions.strip()}]\n\n{user_message}"
-    _agent_sp_text = (agent_profile.get("system_prompt") or "").strip() if isinstance(agent_profile, dict) else ""
+    _agent_sp_text = (context.get("agent_system_prompt") or "").strip() if isinstance(agent_profile, dict) else ""
     if _agent_sp_text and _agent_sp_text != "Системные инструкции не заданы.":
         effective_message = f"[Инструкции агента: {_agent_sp_text}]\n\n{effective_message}"
     feedback_block = await build_user_feedback_system_block(
@@ -1379,7 +1435,7 @@ async def _handle_agent_mode(
     if not agentic_rag_enabled and sources.memory and rag_client:
         prefix = "Документы из настроек (библиотека памяти)"
         try:
-            hits = await rag_client.memory_rag_search(user_message, k=get_rag_chat_top_k(), strategy=rag_strategy) or []
+            hits = await rag_client.memory_rag_search(user_message, strategy=rag_strategy) or []
             if hits:
                 mem_map: dict = {}
                 with logged_suppress(logger):
@@ -1621,7 +1677,7 @@ async def _handle_direct(
         if sources.memory:
             try:
                 mem_hits = list(
-                    await rag_client.memory_rag_search(user_message, k=get_rag_chat_top_k(), strategy=rag_strategy)
+                    await rag_client.memory_rag_search(user_message, strategy=rag_strategy)
                     or []
                 )
             except RagReindexInProgress:
@@ -1742,6 +1798,31 @@ async def _handle_direct(
         eff_system_prompt = merge_strict_rag_system_prompt(
             eff_system_prompt, rag_override=runtime_rag_system_prompt() or None
         )
+    try:
+        from backend.services.skills import apply_skills_to_chat, strip_skill_mentions
+
+        eff_system_prompt, _s, lazy_skill_ids, allowed_tools_extra, _primed = await apply_skills_to_chat(
+            system_prompt=eff_system_prompt,
+            user_message=user_message,
+            data=data or {},
+            agent_profile=agent_profile if isinstance(agent_profile, dict) else {},
+            current_user=current_user,
+            history=history,
+        )
+        final_message = strip_skill_mentions(final_message)
+        if lazy_skill_ids or allowed_tools_extra:
+            from backend.tools.tool_context import get_tool_context, set_tool_context
+
+            ctx = get_tool_context() or {}
+            if lazy_skill_ids:
+                ctx["__skill_ids__"] = lazy_skill_ids
+            ctx["current_user"] = current_user
+            set_tool_context(ctx)
+        if allowed_tools_extra:
+            existing = list(data.get("tool_ids") or data.get("mcp_tool_ids") or [])
+            data["tool_ids"] = list(dict.fromkeys([*existing, *allowed_tools_extra]))
+    except Exception:
+        logger.exception("[direct] skills injection failed")
     canned = await maybe_rag_no_evidence_message(
         rag_client,
         block_when_no_evidence=rag_block,

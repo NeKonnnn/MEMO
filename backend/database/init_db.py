@@ -52,6 +52,7 @@ try:
     from .postgresql.prompt_repository import PromptRepository, TagRepository
     from .postgresql.agent_repository import AgentRepository
     from .postgresql.user_settings_repository import UserSettingsRepository
+    from .postgresql.skill_repository import SkillRepository
     postgresql_available = True
     logger.debug("PostgreSQL модули импортированы успешно")
 except ImportError as e:
@@ -64,6 +65,7 @@ except ImportError as e:
     TagRepository = None
     AgentRepository = None
     UserSettingsRepository = None
+    SkillRepository = None
 
 # Попытка импорта MinIO модулей
 try:
@@ -85,6 +87,7 @@ vector_repo: Optional[VectorRepository] = None
 prompt_repo: Optional[PromptRepository] = None
 tag_repo: Optional[TagRepository] = None
 agent_repo: Optional[AgentRepository] = None
+skill_repo: Optional["SkillRepository"] = None
 user_settings_repo: Optional["UserSettingsRepository"] = None
 
 
@@ -166,7 +169,7 @@ async def init_mongodb() -> bool:
 
 async def init_postgresql() -> bool:
     """Инициализация подключения к PostgreSQL"""
-    global postgresql_connection, document_repo, vector_repo, prompt_repo, tag_repo, agent_repo, user_settings_repo
+    global postgresql_connection, document_repo, vector_repo, prompt_repo, tag_repo, agent_repo, skill_repo, user_settings_repo
 
     if not postgresql_available:
         logger.warning("PostgreSQL модули недоступны. Пропускаем инициализацию.")
@@ -196,6 +199,7 @@ async def init_postgresql() -> bool:
             prompt_repo = PromptRepository(postgresql_connection)
             tag_repo = TagRepository(postgresql_connection)
             agent_repo = AgentRepository(postgresql_connection)
+            skill_repo = SkillRepository(postgresql_connection)
             user_settings_repo = UserSettingsRepository(postgresql_connection)
 
             # Создаем таблицы
@@ -203,6 +207,7 @@ async def init_postgresql() -> bool:
             await vector_repo.create_tables()
             await prompt_repo.create_tables()
             await agent_repo.create_tables()
+            await skill_repo.create_tables()
             await user_settings_repo.create_tables()
 
             logger.info("PostgreSQL успешно инициализирован")
@@ -358,6 +363,15 @@ def get_agent_repository():
     if agent_repo is None:
         raise RuntimeError("PostgreSQL не инициализирован. Вызовите init_postgresql() сначала.")
     return agent_repo
+
+
+def get_skill_repository():
+    """Получение репозитория skills"""
+    if not postgresql_available:
+        raise RuntimeError("PostgreSQL модули недоступны. Установите psycopg2.")
+    if skill_repo is None:
+        raise RuntimeError("PostgreSQL не инициализирован. Вызовите init_postgresql() сначала.")
+    return skill_repo
 
 
 def get_user_settings_repository():

@@ -245,8 +245,40 @@ def config_value_for_path(model_path: str) -> str:
     return _folder_name(model_id) or model_id
 
 
-def current_model_paths() -> Dict[str, Dict[str, str]]:
+# Снимок ConfigMap/env на старте процесса. UI-выбор не должен подменять
+# «кластерный дефолт» для других пользователей (settings.rag_models.* мутабельны).
+_BOOT_EMBEDDING_MODEL = (
+    settings.rag_models.embedding_model
+    or settings.rag_models.embedding_model_default
+)
+_BOOT_RERANKER_MODEL = (
+    settings.rag_models.reranker_model or settings.rag_models.reranker_model_default
+)
+
+
+def _model_path_row(value: str, kind: ModelKind) -> Dict[str, str]:
     models_dir = os.path.abspath(settings.rag_models.models_dir)
+    folder = _folder_name(value) or value
+    local_path = os.path.join(models_dir, folder)
+    return {
+        "path": f"local/{folder}",
+        "name": folder,
+        "display_name": folder,
+        "source": "local",
+        "kind": kind,
+        "available": _is_model_dir(local_path),
+    }
+
+
+def cluster_default_model_paths() -> Dict[str, Dict[str, str]]:
+    """Модели из ConfigMap/env на старте пода (не runtime после /models/select)."""
+    return {
+        "embedding": _model_path_row(_BOOT_EMBEDDING_MODEL, "embedding"),
+        "reranker": _model_path_row(_BOOT_RERANKER_MODEL, "reranker"),
+    }
+
+
+def current_model_paths() -> Dict[str, Dict[str, str]]:
     emb_cfg = (
         settings.rag_models.embedding_model
         or settings.rag_models.embedding_model_default
@@ -254,21 +286,7 @@ def current_model_paths() -> Dict[str, Dict[str, str]]:
     rer_cfg = (
         settings.rag_models.reranker_model or settings.rag_models.reranker_model_default
     )
-
-    def row(value: str, kind: ModelKind) -> Dict[str, str]:
-        folder = _folder_name(value) or value
-        local_path = os.path.join(models_dir, folder)
-        available = _is_model_dir(local_path)
-        return {
-            "path": f"local/{folder}",
-            "name": folder,
-            "display_name": folder,
-            "source": "local",
-            "kind": kind,
-            "available": available,
-        }
-
     return {
-        "embedding": row(emb_cfg, "embedding"),
-        "reranker": row(rer_cfg, "reranker"),
+        "embedding": _model_path_row(emb_cfg, "embedding"),
+        "reranker": _model_path_row(rer_cfg, "reranker"),
     }

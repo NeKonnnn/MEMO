@@ -3,7 +3,7 @@
 
 Используется двумя LLM-функциями RAG:
   • LLM-as-a-Judge      (app/services/llm_rag_judge.py)
-  • иерархическая суммаризация (app/services/rag_service.py -> _llm_summarize)
+  • иерархическая суммаризация (app/services/hierarchical_indexing.py)
 
 Поведение запроса 1:1 с прежним (model/temperature/max_tokens/stream=false, без
 авторизации) - добавлена только подробная трассировка (см. app.core.logging.llm_trace),

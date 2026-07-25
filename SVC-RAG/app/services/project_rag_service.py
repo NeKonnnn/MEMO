@@ -2,6 +2,7 @@
 # Каждый документ привязан к project_id; при удалении проекта всё чистится через delete_by_project.
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, Union
+import json
 
 from app.clients.rag_models_client import RagModelsClient
 from app.core.config import get_settings
@@ -15,7 +16,6 @@ from app.database.models import Document, DocumentVector
 from app.database.graph_repository import GraphRepository
 from app.services.bm25_index import InMemoryBm25Index
 from app.services.chunker import (
-    describe_embed_client,
     normalize_chunking_strategy,
     resolve_chunk_params,
     split_into_chunks_with_meta,
@@ -27,6 +27,26 @@ from app.services.hierarchical_indexing import index_document_hierarchically
 logger = get_logger(__name__)
 
 _project_reindex_generation = 0
+
+
+def _doc_actors(doc):
+    """(owner, uploader, filename) из документа. Принимает и объект, и dict."""
+    if isinstance(doc, dict):
+        meta = doc.get("metadata")
+        name = doc.get("filename") or doc.get("name") or "?"
+    else:
+        meta = getattr(doc, "metadata", None)
+        name = getattr(doc, "filename", None) or "?"
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta or "{}")
+        except (TypeError, ValueError):
+            meta = {}
+    meta = meta or {}
+    owner = str(meta.get("owner_user_id") or "-").strip() or "-"
+    uploader = str(meta.get("uploaded_by") or "-").strip() or "-"
+    return owner, uploader, name
+
 
 def bump_project_reindex_generation() -> int:
     global _project_reindex_generation
@@ -49,14 +69,25 @@ class ProjectRagService:
         self.vector_repo = vector_repo
         self.rag_client = rag_models_client
         self.graph_repo = graph_repo
-        # BM25 индексы по project_id (чтобы lexical/hybrid не тянули чужие проекты).
-        self._bm25_by_project: Dict[str, InMemoryBm25Index] = {}
+        # BM25 индексы по (project_id, dim): lexical/hybrid не тянут чужие проекты
+        # и не смешивают таблицы разных размерностей.
+        self._bm25_by_key: Dict[Tuple[str, int], InMemoryBm25Index] = {}
 
-    async def _rebuild_graph_for_document(self, document_id: int) -> None:
+    async def _route(self, model=None, provider=None):
+        """Профиль эмбеддинга (клиент + имя модели + dim) и репозиторий нужной таблицы.
+
+        Без model/provider вернутся ровно то, что было до фазы B3.
+        """
+        from app.services.embed_routing import resolve_for
+
+        return await resolve_for(self.rag_client, self.vector_repo, provider, model)
+
+    async def _rebuild_graph_for_document(self, document_id: int, vector_repo=None) -> None:
+        repo = vector_repo or self.vector_repo
         if not self.graph_repo:
             return
         try:
-            chunks = await self.vector_repo.get_vectors_by_document(document_id)
+            chunks = await repo.get_vectors_by_document(document_id)
             if chunks:
                 await self.graph_repo.rebuild_document_graph(
                     store_type="project",
@@ -66,22 +97,27 @@ class ProjectRagService:
         except Exception as e:
             logger.warning("project graph индекс не пересобран для документа %s: %s", document_id, e)
 
-    def _bm25_for_project(self, project_id: str) -> InMemoryBm25Index:
-        idx = self._bm25_by_project.get(project_id)
+    def _bm25_for_project(self, project_id: str, repo=None) -> InMemoryBm25Index:
+        repo = repo or self.vector_repo
+        dim = int(getattr(repo, "embedding_dim", 0) or 0)
+        key = (project_id, dim)
+        idx = self._bm25_by_key.get(key)
         if idx is None:
 
             async def _fetch():
-                return await self.vector_repo.get_all_contents_for_bm25(project_id=project_id)
+                return await repo.get_all_contents_for_bm25(project_id=project_id)
 
             idx = InMemoryBm25Index(_fetch)
-            self._bm25_by_project[project_id] = idx
+            self._bm25_by_key[key] = idx
         return idx
 
     def _mark_bm25_dirty(self, project_id: Optional[str] = None) -> None:
-        if project_id and project_id in self._bm25_by_project:
-            self._bm25_by_project[project_id].mark_dirty()
+        if project_id:
+            for (pid, _dim), idx in self._bm25_by_key.items():
+                if pid == project_id:
+                    idx.mark_dirty()
             return
-        for idx in self._bm25_by_project.values():
+        for idx in self._bm25_by_key.values():
             idx.mark_dirty()
 
     async def index_document(
@@ -95,6 +131,10 @@ class ProjectRagService:
         chunk_size: Optional[int] = None,
         chunk_overlap: Optional[int] = None,
         chunking_strategy: Optional[str] = None,
+        owner_user_id: Optional[str] = None,
+        uploaded_by: Optional[str] = None,
+        model: Optional[str] = None,
+        provider: Optional[str] = None,
     ) -> Dict[str, Any]:
         parsed = await parse_document(file_data, filename)
         if not parsed:
@@ -108,6 +148,23 @@ class ProjectRagService:
         if not text.strip():
             return {"ok": False, "error": "Документ пустой", "document_id": None}
 
+        # Модель выбираем ДО создания документа: иначе при ошибке сохранения
+        # в БД останется документ без единого вектора.
+        try:
+            prof, repo = await self._route(model, provider)
+        except Exception as e:
+            logger.error(
+                "[INDEX project] не удалось выбрать модель (provider=%s model=%s): %s",
+                provider,
+                model,
+                e,
+            )
+            return {
+                "ok": False,
+                "error": f"Модель эмбеддинга: {e}",
+                "document_id": None,
+            }
+
         meta: Dict[str, Any] = {
             "file_type": parsed.get("file_type", ""),
             "pages": parsed.get("pages", 0),
@@ -119,6 +176,10 @@ class ProjectRagService:
             meta["minio_object"] = minio_object
         if minio_bucket:
             meta["minio_bucket"] = minio_bucket
+        if owner_user_id:
+            meta["owner_user_id"] = str(owner_user_id).strip().lower()
+        if uploaded_by:
+            meta["uploaded_by"] = str(uploaded_by).strip().lower()
 
         doc = Document(
             filename=filename,
@@ -137,10 +198,11 @@ class ProjectRagService:
                     text,
                     doc_id,
                     filename=filename,
-                    vector_repo=self.vector_repo,
-                    rag_client=self.rag_client,
+                    vector_repo=repo,
+                    rag_client=prof.client,
                     chunk_size=chunk_size,
                     chunk_overlap=chunk_overlap,
+                    model=prof.model,
                 )
             except Exception as e:
                 logger.error("project_rag иерархическая индексация не удалась: %s", e)
@@ -151,19 +213,21 @@ class ProjectRagService:
                     "document_id": None,
                 }
             self._mark_bm25_dirty(project_id)
-            await self._rebuild_graph_for_document(doc_id)
+            await self._rebuild_graph_for_document(doc_id, vector_repo=repo)
             eff_size, eff_overlap = resolve_chunk_params(chunk_size, chunk_overlap)
             logger.info(
-                "[INDEX project] '%s' (project=%s, id=%s): strategy=hierarchical size=%s overlap=%s "
+                "[INDEX project] '%s' (project=%s, id=%s, owner=%s, uploader=%s): strategy=hierarchical size=%s overlap=%s "
                 "символов=%s чанков=%s embed=%s",
                 filename,
                 project_id,
                 doc_id,
+                owner_user_id or "-",
+                uploaded_by or "-",
                 eff_size,
                 eff_overlap,
                 len(text),
                 count,
-                describe_embed_client(self.rag_client),
+                prof.label,
             )
             return {
                 "ok": True,
@@ -185,7 +249,7 @@ class ProjectRagService:
         chunks = [c for c, _m in chunks_with_meta]
 
         try:
-            embeddings = await self.rag_client.embed(chunks)
+            embeddings = await prof.embed(chunks, kind="document")
         except Exception as e:
             logger.error("Ошибка эмбеддингов project_rag: %s", e)
             await self.doc_repo.delete_document(doc_id)
@@ -205,7 +269,7 @@ class ProjectRagService:
                 )
             )
 
-        created = await self.vector_repo.create_vectors_batch(vectors)
+        created = await repo.create_vectors_batch(vectors)
         self._mark_bm25_dirty(project_id)
         if self.graph_repo:
             try:
@@ -218,17 +282,19 @@ class ProjectRagService:
                 logger.warning("project graph индекс не собран для документа %s: %s", doc_id, e)
         eff_size, eff_overlap = resolve_chunk_params(chunk_size, chunk_overlap)
         logger.info(
-            "[INDEX project] '%s' (project=%s, id=%s): strategy=%s size=%s overlap=%s "
+            "[INDEX project] '%s' (project=%s, id=%s, owner=%s, uploader=%s): strategy=%s size=%s overlap=%s "
             "символов=%s чанков=%s embed=%s",
             filename,
             project_id,
             doc_id,
+            owner_user_id or "-",
+            uploaded_by or "-",
             normalize_chunking_strategy(chunking_strategy),
             eff_size,
             eff_overlap,
             len(text),
             created,
-            describe_embed_client(self.rag_client),
+            prof.label,
         )
         return {
             "ok": True,
@@ -245,15 +311,25 @@ class ProjectRagService:
         chunk_size: Optional[int] = None,
         chunk_overlap: Optional[int] = None,
         chunking_strategy: Optional[str] = None,
+        model: Optional[str] = None,
+        provider: Optional[str] = None,
+        route=None,
     ) -> int:
-        """Заново нарезать один документ проекта (dict с content) и заменить вектора."""
+        """Заново нарезать один документ проекта (dict с content) и заменить вектора.
+
+        route — уже разрешённая пара (профиль, репозиторий): reindex_all передаёт её,
+        чтобы не резолвить модель на каждый документ.
+        """
         document_id = document["id"]
         project_id = document.get("project_id")
         filename = document.get("filename") or "unknown"
         text = document.get("content") or ""
         if not text.strip():
             return 0
-        await self.vector_repo.delete_vectors_by_document(document_id)
+        prof, repo = route if route else await self._route(model, provider)
+        # Удаление обходит ВСЕ таблицы (B2b) — при смене модели старые вектора
+        # лежат в таблице прежней размерности и должны уйти.
+        await repo.delete_vectors_by_document(document_id)
         strategy = (chunking_strategy or "universal").strip().lower()
         if strategy == "hierarchical":
             from app.services.hierarchical_indexing import index_document_hierarchically
@@ -262,13 +338,14 @@ class ProjectRagService:
                 text,
                 document_id,
                 filename=filename,
-                vector_repo=self.vector_repo,
-                rag_client=self.rag_client,
+                vector_repo=repo,
+                rag_client=prof.client,
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap,
+                model=prof.model,
             )
             self._mark_bm25_dirty(project_id)
-            await self._rebuild_graph_for_document(document_id)
+            await self._rebuild_graph_for_document(document_id, vector_repo=repo)
             return count
         chunks_with_meta = split_into_chunks_with_meta(
             text,
@@ -279,7 +356,7 @@ class ProjectRagService:
         chunks = [c for c, _m in chunks_with_meta]
         if not chunks:
             return 0
-        embeddings = await self.rag_client.embed(chunks)
+        embeddings = await prof.embed(chunks, kind="document")
         vectors = []
         for idx, ((chunk, cmeta), embedding) in enumerate(zip(chunks_with_meta, embeddings)):
             vmeta = {"chunk_index": idx, "document_filename": filename}
@@ -293,7 +370,7 @@ class ProjectRagService:
                     metadata=vmeta,
                 )
             )
-        created = await self.vector_repo.create_vectors_batch(vectors)
+        created = await repo.create_vectors_batch(vectors)
         self._mark_bm25_dirty(project_id)
         if self.graph_repo:
             try:
@@ -314,11 +391,26 @@ class ProjectRagService:
         chunk_overlap: Optional[int] = None,
         chunking_strategy: Optional[str] = None,
         generation: Optional[int] = None,
+        model: Optional[str] = None,
+        provider: Optional[str] = None,
+        route=None,
     ) -> Dict[str, Any]:
         """Перечанкировать все документы одного проекта."""
         docs = await self.doc_repo.get_documents_by_project(project_id)
+        prof, repo = route if route else await self._route(model, provider)
+        _eff_size, _eff_overlap = resolve_chunk_params(chunk_size, chunk_overlap)
+        logger.info(
+            "[REINDEX project=%s] старт: документов=%s strategy=%s size=%s overlap=%s embed=%s",
+            project_id,
+            len(docs),
+            normalize_chunking_strategy(chunking_strategy),
+            _eff_size,
+            _eff_overlap,
+            prof.label,
+        )
         n_docs = 0
         n_chunks = 0
+        n_errors = 0
         for d in docs:
             if generation is not None and generation != _project_reindex_generation:
                 logger.info(
@@ -333,13 +425,38 @@ class ProjectRagService:
                     chunk_size=chunk_size,
                     chunk_overlap=chunk_overlap,
                     chunking_strategy=chunking_strategy,
+                    route=(prof, repo),
                 )
                 n_docs += 1
                 n_chunks += c
-                logger.info("[REINDEX project=%s] doc=%s чанков=%s", project_id, d.get("id"), c)
+                logger.info(
+                    "[REINDEX project=%s] '%s' (id=%s, owner=%s, uploader=%s) чанков=%s",
+                    project_id,
+                    _doc_actors(d)[2],
+                    d.get("id"),
+                    _doc_actors(d)[0],
+                    _doc_actors(d)[1],
+                    c,
+                )
             except Exception as e:
-                logger.error("[REINDEX project=%s] doc=%s ошибка: %s", project_id, d.get("id"), e)
-        return {"project_id": project_id, "documents": n_docs, "chunks": n_chunks}
+                n_errors += 1
+                logger.error(
+                    "[REINDEX project=%s] '%s' (id=%s, owner=%s, uploader=%s) ошибка: %s",
+                    project_id,
+                    _doc_actors(d)[2],
+                    d.get("id"),
+                    _doc_actors(d)[0],
+                    _doc_actors(d)[1],
+                    e,
+                )
+        logger.info(
+            "[REINDEX project=%s] готово: документов=%s чанков=%s ошибок=%s",
+            project_id,
+            n_docs,
+            n_chunks,
+            n_errors,
+        )
+        return {"project_id": project_id, "documents": n_docs, "chunks": n_chunks, "errors": n_errors}
 
     async def reindex_all_projects(
         self,
@@ -348,8 +465,85 @@ class ProjectRagService:
         chunk_overlap: Optional[int] = None,
         chunking_strategy: Optional[str] = None,
         generation: Optional[int] = None,
+        owner_user_id: Optional[str] = None,
+        model: Optional[str] = None,
+        provider: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Перечанкировать все проекты (svc-rag сам перечисляет project_id)."""
+        """Перечанкировать проекты.
+
+        С owner_user_id — только документы этого пользователя (metadata.owner_user_id).
+        Без фильтра — все проекты (админский/кластерный путь после смены dim).
+        """
+        # Модель резолвим один раз на весь проход — иначе проба на каждый документ.
+        prof, repo = await self._route(model, provider)
+        if owner_user_id:
+            docs = await self.doc_repo.get_documents_by_owner(owner_user_id)
+            _eff_size, _eff_overlap = resolve_chunk_params(chunk_size, chunk_overlap)
+            logger.info(
+                "[REINDEX project OWNER] старт: owner=%s документов=%s strategy=%s size=%s overlap=%s embed=%s",
+                owner_user_id,
+                len(docs),
+                normalize_chunking_strategy(chunking_strategy),
+                _eff_size,
+                _eff_overlap,
+                prof.label,
+            )
+            total_docs = 0
+            total_chunks = 0
+            total_errors = 0
+            seen_projects: set = set()
+            for d in docs:
+                if generation is not None and generation != _project_reindex_generation:
+                    logger.info(
+                        "[REINDEX project OWNER] прерван: начат новый реиндекс (gen %s→%s)",
+                        generation,
+                        _project_reindex_generation,
+                    )
+                    break
+                try:
+                    c = await self.reindex_document(
+                        d,
+                        chunk_size=chunk_size,
+                        chunk_overlap=chunk_overlap,
+                        chunking_strategy=chunking_strategy,
+                        route=(prof, repo),
+                    )
+                    total_docs += 1
+                    total_chunks += c
+                    pid = d.get("project_id")
+                    if pid:
+                        seen_projects.add(pid)
+                    logger.info(
+                        "[REINDEX project owner=%s] '%s' doc=%s чанков=%s",
+                        owner_user_id,
+                        _doc_actors(d)[2],
+                        d.get("id"),
+                        c,
+                    )
+                except Exception as e:
+                    total_errors += 1
+                    logger.error(
+                        "[REINDEX project owner=%s] '%s' doc=%s ошибка: %s",
+                        owner_user_id,
+                        _doc_actors(d)[2],
+                        d.get("id"),
+                        e,
+                    )
+            logger.info(
+                "[REINDEX project OWNER] owner=%s проектов=%s документов=%s чанков=%s ошибок=%s",
+                owner_user_id,
+                len(seen_projects),
+                total_docs,
+                total_chunks,
+                total_errors,
+            )
+            return {
+                "projects": len(seen_projects),
+                "documents": total_docs,
+                "chunks": total_chunks,
+                "owner_user_id": owner_user_id,
+            }
+
         project_ids = await self.doc_repo.get_all_project_ids()
         total_docs = 0
         total_chunks = 0
@@ -368,6 +562,7 @@ class ProjectRagService:
                     chunk_overlap=chunk_overlap,
                     chunking_strategy=chunking_strategy,
                     generation=generation,
+                    route=(prof, repo),
                 )
                 total_docs += r["documents"]
                 total_chunks += r["chunks"]
@@ -399,14 +594,23 @@ class ProjectRagService:
         eval_gold_chunks: Optional[List[Tuple[int, int]]] = None,
         eval_llm_judge: bool = False,
         return_trace: bool = False,
+        model: Optional[str] = None,
+        provider: Optional[str] = None,
+        reranker_model: Optional[str] = None,
+        reranker_provider: Optional[str] = None,
     ) -> Union[
         List[Tuple[str, float, Optional[int], Optional[int]]],
         Tuple[List[Tuple[str, float, Optional[int], Optional[int]]], RetrievalTrace],
     ]:
         cfg = get_settings().rag
+        # Запрос считаем моделью пользователя и ищем в таблице ЕЁ размерности.
+        prof, repo = await self._route(model, provider)
+        from app.services.embed_routing import rerank_client_for
+
+        rr_client = rerank_client_for(self.rag_client, reranker_provider, reranker_model)
 
         async def _vectors(emb, lim):
-            return await self.vector_repo.similarity_search(
+            return await repo.similarity_search(
                 query_embedding=emb,
                 limit=lim,
                 project_id=project_id,
@@ -415,7 +619,7 @@ class ProjectRagService:
             )
 
         async def _keywords(text, lim):
-            return await self.vector_repo.keyword_search(
+            return await repo.keyword_search(
                 text,
                 limit=lim,
                 project_id=project_id,
@@ -424,7 +628,7 @@ class ProjectRagService:
             )
 
         async def _substring(tokens, lim):
-            return await self.vector_repo.substring_search(
+            return await repo.substring_search(
                 tokens,
                 limit=lim,
                 project_id=project_id,
@@ -432,7 +636,7 @@ class ProjectRagService:
             )
 
         async def _fetch_doc(doc_id: int):
-            return await self.vector_repo.get_vectors_by_document(doc_id)
+            return await repo.get_vectors_by_document(doc_id)
 
         async def _find_docs_by_filename(name: str):
             # В проектных RAG запросы всегда скоупятся к project_id —
@@ -449,7 +653,10 @@ class ProjectRagService:
             use_reranking=use_reranking,
             strategy=strategy,
             filters=filters,
-            rag_client=self.rag_client,
+            rag_client=prof.client,
+            embed_model=prof.model,
+            rerank_client=rr_client,
+            rerank_model=reranker_model,
             graph_repo=self.graph_repo,
             cfg=cfg,
             search_vectors=_vectors,
@@ -457,8 +664,8 @@ class ProjectRagService:
             substring_search=_substring,
             fetch_document_chunks=_fetch_doc,
             find_docs_by_filename=_find_docs_by_filename,
-            vector_repo_for_window=self.vector_repo,
-            bm25_index=self._bm25_for_project(project_id),
+            vector_repo_for_window=repo,
+            bm25_index=self._bm25_for_project(project_id, repo),
             eval_gold_document_ids=eval_gold_document_ids,
             eval_gold_chunks=eval_gold_chunks,
             eval_llm_judge=eval_llm_judge,
@@ -518,7 +725,9 @@ class ProjectRagService:
             if (d["metadata"] or {}).get("minio_object")
         ]
         deleted_count = await self.doc_repo.delete_documents_by_project(project_id)
-        self._bm25_by_project.pop(project_id, None)
+        self._mark_bm25_dirty(project_id)
+        for key in [k for k in self._bm25_by_key if k[0] == project_id]:
+            self._bm25_by_key.pop(key, None)
         logger.info(
             "project_rag: удалено %s документов для project_id=%s",
             deleted_count,

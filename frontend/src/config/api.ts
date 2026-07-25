@@ -84,6 +84,9 @@ export const API_ENDPOINTS = {
   MCP_SERVER_CREDENTIALS: (id: string) => `/api/mcp/servers/${encodeURIComponent(id)}/credentials`,
   MCP_ATLASSIAN_CONFIG: '/api/mcp/servers/atlassian/config',
   MCP_ATLASSIAN_CREDENTIALS: '/api/mcp/servers/atlassian/credentials',
+
+  // Skills (markdown instructions)
+  SKILLS: '/api/skills',
 };
 
 // Для обратной совместимости (deprecated - используйте getSettings())

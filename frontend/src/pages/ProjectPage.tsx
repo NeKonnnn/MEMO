@@ -79,6 +79,7 @@ import {
   Psychology as ThinkingModeIcon,
   Bolt as FastModeIcon,
   AutoAwesome as AutoModeIcon,
+  HistoryEdu as SkillsNavIcon,
 } from '@mui/icons-material';
 import { useAppContext, useAppActions, chatIsListedInAllChatsSection } from '../contexts/AppContext';
 import { useSocket } from '../contexts/SocketContext';
@@ -87,6 +88,7 @@ import ChatInputBar from '../components/ChatInputBar';
 import ChatInputStatusCluster from '../components/ChatInputStatusCluster';
 import ChatGearAgentsPanel from '../components/ChatGearAgentsPanel';
 import ChatGearMcpPanel from '../components/ChatGearMcpPanel';
+import ChatGearSkillsPanel from '../components/ChatGearSkillsPanel';
 import ChatInputSuggestions from '../components/ChatInputSuggestions';
 import {
   estimateLibraryClusterWidthPx,
@@ -137,6 +139,8 @@ import { getSidebarPanelBackground } from '../constants/sidebarPanelColor';
 import { getWorkZoneBackgroundColor, getWorkZoneCustomImage, isWorkZoneAnimatedMode } from '../constants/workZoneBackground';
 import { useWorkZoneBgMode } from '../hooks/useWorkZoneBgMode';
 import { useMyAgentSelection, useOrchestratorAgentsAnyActive } from '../hooks/useChatInputAgentIndicators';
+import { useRagReindexStatus } from '../hooks/useRagReindexStatus';
+import { RAG_REINDEX_BLOCK_PLACEHOLDER } from '../utils/ragReindexBlock';
 import WorkZoneStarrySky from '../components/WorkZoneStarrySky';
 import WorkZoneSnowfall from '../components/WorkZoneSnowfall';
 import {
@@ -260,9 +264,9 @@ export default function ProjectPage() {
   const [isUploading, setIsUploading] = useState(false);
   const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
   /** Раскрытый подпункт меню «Инструменты» (панель агентов). */
-  const [gearToolsPanel, setGearToolsPanel] = useState<'main' | 'agents' | 'mcp' | 'model-mode'>('main');
+  const [gearToolsPanel, setGearToolsPanel] = useState<'main' | 'agents' | 'skills' | 'mcp' | 'model-mode'>('main');
   const gearSubPanelOpen =
-    gearToolsPanel === 'agents' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp';
+    gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp';
   const [modelThinkingMode, setModelThinkingMode] = useState<ModelThinkingMode>(() => {
     const saved = (localStorage.getItem(MODEL_THINKING_MODE_STORAGE_KEY) || 'fast') as ModelThinkingMode;
     return saved === 'auto' || saved === 'thinking' || saved === 'fast' ? saved : 'fast';
@@ -291,6 +295,10 @@ export default function ProjectPage() {
   }, []);
 
   const myAgentSelection = useMyAgentSelection();
+  const {
+    shouldBlockRagSend: shouldBlockRagSendForChat,
+    blockMessage: ragReindexBlockMessage,
+  } = useRagReindexStatus();
 
   useEffect(() => {
     const onRag = () => setUseKbRag(isKnowledgeRagEnabled());
@@ -368,6 +376,12 @@ export default function ProjectPage() {
   }, []);
 
   const project = projectId ? getProjectById(projectId) : null;
+
+  const ragSendBlocked = useMemo(
+    () => shouldBlockRagSendForChat({ libraryEnabled: useKbRag }),
+    [shouldBlockRagSendForChat, useKbRag],
+  );
+
   const mcpScopeChatId = projectId ? projectMcpChatKey(projectId) : null;
   const activeMcpServers = useChatInputMcpIndicators(mcpScopeChatId);
   const { activeMcpTools } = useMcpStreamingTools();
@@ -829,13 +843,15 @@ export default function ProjectPage() {
           onChange={setInputMessage}
           onKeyPress={handleKeyPress}
           placeholder={
-            !isConnected && !isConnecting
-              ? 'Нет соединения с сервером'
-              : isSending
-                ? 'Отправка сообщения...'
-                : 'Чем я могу помочь вам сегодня?'
+            ragSendBlocked
+              ? ragReindexBlockMessage || RAG_REINDEX_BLOCK_PLACEHOLDER
+              : !isConnected && !isConnecting
+                ? 'Нет соединения с сервером'
+                : isSending
+                  ? 'Отправка сообщения...'
+                  : 'Чем я могу помочь вам сегодня?'
           }
-          inputDisabled={(!isConnected && !isConnecting) || isSending}
+          inputDisabled={(!isConnected && !isConnecting) || isSending || ragSendBlocked}
           inputRef={inputRef}
           isDarkMode={theme.palette.mode === 'dark'}
           solidWorkZoneBackground={workZoneAnimated}
@@ -863,7 +879,7 @@ export default function ProjectPage() {
           onSettingsClick={handleMenuOpen}
           settingsDisabled={isSending}
           onSendClick={handleSendMessage}
-          sendDisabled={!inputMessage.trim() || (!isConnected && !isConnecting) || isSending}
+          sendDisabled={!inputMessage.trim() || (!isConnected && !isConnecting) || isSending || ragSendBlocked}
           isSending={isSending}
           onVoiceClick={() => setTranscriptionModalOpen(true)}
           voiceDisabled={isSending}
@@ -1131,7 +1147,7 @@ export default function ProjectPage() {
                         gearToolsPaperHeightPx < CHAT_GEAR_MENU_PAPER_MAX_HEIGHT_PX ? 'auto' : 'hidden',
                     }
                   : { maxHeight: CHAT_GEAR_MENU_PAPER_MAX_HEIGHT, overflowY: 'auto' }),
-                ...((gearToolsPanel === 'agents' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp')
+                ...((gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp')
                   ? CHAT_GEAR_SCROLL_AREA_NO_VISIBLE_SCROLLBAR_SX
                   : {}),
               },
@@ -1143,15 +1159,15 @@ export default function ProjectPage() {
               display: 'flex',
               flexDirection: 'row',
               alignItems: 'stretch',
-              gap: gearToolsPanel === 'agents' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' ? `${CHAT_GEAR_MENU_PANELS_GAP_PX}px` : 0,
+              gap: gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' ? `${CHAT_GEAR_MENU_PANELS_GAP_PX}px` : 0,
               width:
-                (gearToolsPanel === 'agents' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp') && gearToolsMenuWidthPx != null
+                (gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp') && gearToolsMenuWidthPx != null
                   ? `${gearToolsMenuWidthPx}px`
-                  : gearToolsPanel === 'agents' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp'
+                  : gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp'
                     ? CHAT_GEAR_MENU_EXPANDED_WIDTH_PX
                     : CHAT_GEAR_MENU_PANEL_WIDTH_PX,
               maxWidth:
-                (gearToolsPanel === 'agents' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp') && gearToolsMenuWidthPx != null
+                (gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp') && gearToolsMenuWidthPx != null
                   ? `${gearToolsMenuWidthPx}px`
                   : 'min(96vw, 580px)',
               minHeight: gearToolsPaperHeightPx != null ? `${gearToolsPaperHeightPx}px` : undefined,
@@ -1165,7 +1181,7 @@ export default function ProjectPage() {
               sx={{
                 ...dropdownPanelSx,
                 width:
-                  gearToolsPanel === 'agents' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp'
+                  gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp'
                     ? CHAT_GEAR_MENU_LEFT_RAIL_WIDTH_PX
                     : '100%',
                 flexShrink: 0,
@@ -1210,7 +1226,37 @@ export default function ProjectPage() {
                   }}
                 />
               </Box>
-              <Box
+                          <Box
+              onClick={() => setGearToolsPanel((p) => (p === 'skills' ? 'main' : 'skills'))}
+              sx={{
+                ...dropdownItemSx,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 1,
+                color: isDarkMode ? 'white' : '#333',
+                bgcolor:
+                  gearToolsPanel === 'skills'
+                    ? isDarkMode
+                      ? DROPDOWN_ITEM_HOVER_BG_DARK
+                      : DROPDOWN_ITEM_HOVER_BG_LIGHT
+                    : 'transparent',
+              }}
+            >
+              <SkillsNavIcon
+                sx={{ fontSize: 18, color: isDarkMode ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.6)', flexShrink: 0 }}
+              />
+              <Typography sx={{ flex: 1, minWidth: 0, fontSize: MENU_ACTION_TEXT_SIZE, whiteSpace: 'nowrap' }}>
+                Skills
+              </Typography>
+              <ChevronRightIcon
+                sx={{
+                  ...DROPDOWN_CHEVRON_SX,
+                  flexShrink: 0,
+                  transform: gearToolsPanel === 'skills' ? 'rotate(90deg)' : 'none',
+                }}
+              />
+            </Box>
+<Box
                 onClick={() => setGearToolsPanel((p) => (p === 'mcp' ? 'main' : 'mcp'))}
                 sx={{
                   ...dropdownItemSx,
@@ -1310,7 +1356,7 @@ export default function ProjectPage() {
                 </Typography>
               </Box>
             </Box>
-            {gearToolsPanel === 'agents' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' ? (
+            {gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' ? (
               <Box
                 sx={{
                   ...dropdownPanelSx,
@@ -1328,7 +1374,9 @@ export default function ProjectPage() {
                     isDarkMode={isDarkMode}
                     canUseAgents={Boolean(agentStatus?.is_initialized)}
                   />
-                ) : gearToolsPanel === 'mcp' ? (
+                ) : gearToolsPanel === 'skills' ? (
+                <ChatGearSkillsPanel isDarkMode={isDarkMode} />
+              ) : gearToolsPanel === 'mcp' ? (
                   <ChatGearMcpPanel isDarkMode={isDarkMode} chatId={mcpScopeChatId} />
                 ) : (
                   <Box sx={{ p: 1, display: 'flex', flexDirection: 'column', gap: 0.5, overflowY: 'auto' }}>

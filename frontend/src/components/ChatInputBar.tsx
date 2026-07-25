@@ -29,6 +29,11 @@ import {
 import { formatFileSize } from '../utils/inlineImage';
 import InlineAttachmentsList from './InlineAttachmentsList';
 import InlineDocAttachmentChip, { InlineDocThumb, INLINE_DOC_ICON_SIZE } from './InlineDocAttachmentChip';
+import SkillMentionAutocomplete, { SkillSuggestion } from './chat/SkillMentionAutocomplete';
+import {
+  getSkillDollarQuery,
+  serializeSkillMention,
+} from '../utils/skillMentions';
 
 export interface UploadedFile {
   name: string;
@@ -523,6 +528,41 @@ export default function ChatInputBar({
   const CHARS_FIRST_LINE = 100;   // примерно столько символов влезает в одну строку (шрифт 0.875rem, кнопки по бокам)
   const CHARS_SINGLE_BACK = 100;  // обратно в одну строку только когда короче (гистерезис)
   const [compactMultiline, setCompactMultiline] = useState(false);
+  const [skillMention, setSkillMention] = useState<{ open: boolean; query: string; start: number }>({
+    open: false,
+    query: '',
+    start: 0,
+  });
+  const skillAnchorRef = useRef<HTMLDivElement | null>(null);
+
+  const updateSkillMentionFromInput = (nextValue: string, cursor: number | null) => {
+    if (cursor == null) {
+      setSkillMention((s) => ({ ...s, open: false }));
+      return;
+    }
+    const hit = getSkillDollarQuery(nextValue, cursor);
+    if (hit) {
+      setSkillMention({ open: true, query: hit.query, start: hit.start });
+    } else {
+      setSkillMention((s) => ({ ...s, open: false }));
+    }
+  };
+
+  const handleValueChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+    const next = e.target.value;
+    onChange(next);
+    updateSkillMentionFromInput(next, e.target.selectionStart);
+  };
+
+  const handleSelectSkill = (skill: SkillSuggestion) => {
+    const mention = serializeSkillMention(skill.slug, skill.name);
+    const start = skillMention.start;
+    const cursorEnd = start + 1 + skillMention.query.length;
+    const next = `${value.slice(0, start)}${mention} ${value.slice(cursorEnd)}`;
+    onChange(next);
+    setSkillMention({ open: false, query: '', start: 0 });
+  };
+
   useEffect(() => {
     if (isClassic) return;
     const hasNewline = value.includes('\n');
@@ -934,10 +974,28 @@ export default function ChatInputBar({
   ) : null;
 
   // ─── КЛАССИЧЕСКИЙ стиль ──────────────────────────────────────────────────────
+  const setShellRef = (node: HTMLDivElement | null) => {
+    skillAnchorRef.current = node;
+    if (toolsMenuAnchorRef) {
+      (toolsMenuAnchorRef as React.MutableRefObject<HTMLDivElement | null>).current = node;
+    }
+  };
+
+  const skillAutocomplete = (
+    <SkillMentionAutocomplete
+      open={skillMention.open}
+      query={skillMention.query}
+      anchorEl={skillAnchorRef.current}
+      onSelect={handleSelectSkill}
+      isDarkMode={isDarkMode}
+    />
+  );
+
   if (isClassic) {
     return (
+      <>
       <Box
-        ref={toolsMenuAnchorRef}
+        ref={setShellRef}
         sx={{
           width: '100%',
           maxWidth,
@@ -964,7 +1022,11 @@ export default function ChatInputBar({
               minRows={2}
               maxRows={8}
               value={value}
-              onChange={(e) => onChange(e.target.value)}
+              onChange={handleValueChange}
+              onSelect={(e) => {
+                const t = e.target as HTMLTextAreaElement;
+                updateSkillMentionFromInput(t.value, t.selectionStart);
+              }}
               onKeyPress={onKeyPress}
               onPaste={onPaste}
               placeholder={placeholder}
@@ -1015,6 +1077,8 @@ export default function ChatInputBar({
           </Box>
         </Box>
       </Box>
+      {skillAutocomplete}
+      </>
     );
   }
 
@@ -1038,8 +1102,9 @@ export default function ChatInputBar({
   };
 
   return (
+    <>
     <Box
-      ref={toolsMenuAnchorRef}
+      ref={setShellRef}
       sx={{
         width: '100%',
         maxWidth,
@@ -1078,7 +1143,11 @@ export default function ChatInputBar({
             minRows={1}
             maxRows={8}
             value={value}
-            onChange={(e) => onChange(e.target.value)}
+            onChange={handleValueChange}
+            onSelect={(e) => {
+              const t = e.target as HTMLTextAreaElement;
+              updateSkillMentionFromInput(t.value, t.selectionStart);
+            }}
             onKeyPress={onKeyPress}
             onPaste={onPaste}
             placeholder={placeholder}
@@ -1116,5 +1185,7 @@ export default function ChatInputBar({
         )}
       </Box>
     </Box>
+    {skillAutocomplete}
+    </>
   );
 }

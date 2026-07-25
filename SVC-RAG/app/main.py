@@ -1,4 +1,3 @@
-import logging
 import uuid
 import uvicorn
 from contextlib import asynccontextmanager
@@ -33,7 +32,6 @@ async def lifespan(app: FastAPI):
 
         await get_db()
         logger.info("SVC-RAG: БД подключена, таблицы готовы")
-        logging.getLogger("app.services.rag_service").setLevel(logging.INFO)
         try:
             from app.dependencies import ensure_memory_chunk_consistency
 

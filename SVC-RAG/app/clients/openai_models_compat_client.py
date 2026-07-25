@@ -34,6 +34,7 @@ class OpenAICompatModelsClient:
         self.timeout = float(timeout)
         self.embed_batch_size = max(1, int(embed_batch_size or 24))
         self._logged_dim = False
+        self._logged_dim_note = False
 
     # ---------- инфраструктура ----------
 
@@ -125,23 +126,24 @@ class OpenAICompatModelsClient:
     # ---------- эмбеддинги ----------
 
     def _check_dim(self, dim: int) -> None:
-        """Гард размерности: НЕ мигрируем БД молча (в отличие от RagModelsClient).
+        """Раньше здесь была жёсткая ошибка при несовпадении с кластерной dim.
 
-        Авто-миграция здесь стёрла бы корпус первым же embed'ом запроса после
-        случайного выбора модели с другой размерностью. Явная миграция —
-        POST /v1/schema/embedding-dim (backend делает это в select-флоу).
+        С фазы B2 у каждой размерности своя таблица векторов, поэтому чужая
+        размерность — норма, а не авария: вектора просто лягут в свою таблицу.
+        Ошибку оставлять нельзя — она блокировала бы пер-юзерные модели.
         """
         from app.core.config import get_settings
 
         db_dim = int(get_settings().postgresql.embedding_dim or 0)
-        if db_dim and dim != db_dim:
-            raise RuntimeError(
-                f"[{self.provider_id}] модель {self.embedding_model} даёт dim={dim}, "
-                f"а БД настроена на dim={db_dim}. Автоматическая миграция запрещена "
-                f"(она очищает корпус). Либо выполните явную миграцию "
-                f'POST /v1/schema/embedding-dim {{"embedding_dim": {dim}}} и '
-                f"переиндексируйте документы, либо выберите модель с dim={db_dim}."
+        if db_dim and dim != db_dim and not self._logged_dim_note:
+            logger.info(
+                "[%s] dim=%s отличается от кластерной (%s) — вектора идут "
+                "в таблицу своей размерности",
+                self.provider_id,
+                dim,
+                db_dim,
             )
+            self._logged_dim_note = True
 
     @staticmethod
     def _parse_embeddings(data: Dict[str, Any], expected: int) -> List[List[float]]:
@@ -158,11 +160,23 @@ class OpenAICompatModelsClient:
         ordered = sorted(items, key=lambda it: int(it.get("index") or 0))
         return [list(it.get("embedding") or []) for it in ordered]
 
-    async def embed(self, texts: List[str]) -> List[List[float]]:
-        """Эмбеддинги для списка текстов. Один текст — один вектор."""
+    async def embed(
+        self,
+        texts: List[str],
+        model: Optional[str] = None,
+        kind: Optional[str] = None,
+    ) -> List[List[float]]:
+        """Эмбеддинги для списка текстов. Один текст — один вектор.
+
+        model — модель этого запроса (None = модель клиента): один клиент
+        обслуживает разных пользователей одного провайдера.
+        kind — "query"/"document". У OpenAI-совместимого API префиксов нет,
+        поле принимается ради единого контракта с RagModelsClient.
+        """
         if not texts:
             return []
-        if not self.embedding_model:
+        use_model = (model or self.embedding_model or "").strip()
+        if not use_model:
             raise ValueError(
                 f"[{self.provider_id}] embedding_model не задан — выберите модель в UI"
             )
@@ -184,7 +198,7 @@ class OpenAICompatModelsClient:
                     resp = await client.post(
                         url,
                         headers=self._headers(),
-                        json={"model": self.embedding_model, "input": batch},
+                        json={"model": use_model, "input": batch},
                     )
                     resp.raise_for_status()
                     data = resp.json()
@@ -201,14 +215,19 @@ class OpenAICompatModelsClient:
                 "[%s] embed dim=%s (model=%s)",
                 self.provider_id,
                 len(all_embeddings[0]),
-                self.embedding_model,
+                use_model,
             )
             self._logged_dim = True
         return all_embeddings
 
-    async def embed_single(self, text: str) -> List[float]:
+    async def embed_single(
+        self,
+        text: str,
+        model: Optional[str] = None,
+        kind: Optional[str] = None,
+    ) -> List[float]:
         """Один текст — один вектор."""
-        vectors = await self.embed([text])
+        vectors = await self.embed([text], model=model, kind=kind)
         return vectors[0] if vectors else []
 
     async def probe_dim(self) -> int:
@@ -243,7 +262,11 @@ class OpenAICompatModelsClient:
     # ---------- реранк ----------
 
     async def rerank(
-        self, query: str, passages: List[str], top_k: int = 20
+        self,
+        query: str,
+        passages: List[str],
+        top_k: int = 20,
+        model: Optional[str] = None,
     ) -> List[Tuple[int, float]]:
         """Реранк пассажей. Возвращает пары (индекс в passages, скор).
 
@@ -254,14 +277,15 @@ class OpenAICompatModelsClient:
         """
         if not passages:
             return []
-        if not self.reranker_model:
+        use_model = (model or self.reranker_model or "").strip()
+        if not use_model:
             raise ValueError(
                 f"[{self.provider_id}] reranker_model не задан — выберите модель в UI "
                 "(вызывающий код продолжит без реранка)"
             )
         url = f"{self.base_url}/v1/rerank"
         payload = {
-            "model": self.reranker_model,
+            "model": use_model,
             "query": query,
             "documents": passages,
             "top_n": min(int(top_k), len(passages)),
@@ -288,7 +312,7 @@ class OpenAICompatModelsClient:
             self.provider_id,
             len(pairs),
             len(passages),
-            self.reranker_model,
+            use_model,
         )
         return pairs
 

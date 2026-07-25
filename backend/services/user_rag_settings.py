@@ -9,6 +9,7 @@ user_llm_settings.rag_settings. На время обработки чата на
 
 from __future__ import annotations
 
+import os
 from contextvars import ContextVar, Token
 from copy import deepcopy
 from typing import Any, Dict, Optional
@@ -252,3 +253,70 @@ def runtime_rag_similarity_threshold() -> float:
     except (TypeError, ValueError):
         v = 0.0
     return max(0.0, min(v, 1.0))
+
+def embedding_fields_from_path(model_path: Optional[str]) -> Dict[str, Any]:
+    """Путь модели из настроек → поля запроса к svc-rag.
+
+    'local/FRIDA'  → {"embedding_model": "FRIDA", "embedding_provider": "native"}
+    'phoenix/<id>' → {"embedding_model": "<id>", "embedding_provider": "PHOENIX"}
+    ''             → {} — модель не выбрана, svc-rag берёт кластерную (как раньше)
+
+    Пустой словарь — это ВАЖНО: пользователь без выбора должен ходить ровно тем
+    же путём, что до мультимодельности.
+    """
+    p = (model_path or "").strip()
+    if not p:
+        return {}
+    if p.lower().startswith("phoenix/"):
+        provider = (
+            os.getenv("RAG_PHOENIX_PROVIDER_ID", "PHOENIX").strip() or "PHOENIX"
+        )
+        model = p.split("/", 1)[1].strip()
+    else:
+        provider = "native"
+        model = p.split("/", 1)[1].strip() if "/" in p else p
+    if not model:
+        return {}
+    return {"embedding_model": model, "embedding_provider": provider}
+
+def embedding_fields_from_rag_settings(
+    settings: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    return embedding_fields_from_path(
+        (settings or {}).get("rag_embedding_model_path")
+    )
+
+def runtime_embedding_fields() -> Dict[str, Any]:
+    """Модель ТЕКУЩЕГО запроса чата/поиска (ContextVar), если выбрана."""
+    return embedding_fields_from_rag_settings(get_runtime_rag_settings())
+
+def reranker_fields_from_path(model_path: Optional[str]) -> Dict[str, Any]:
+    """Путь реранкера из настроек -> поля запроса к svc-rag.
+
+    Разбор пути тот же, что у эмбеддера, но ключи другие: реранкер выбирается
+    независимо (можно эмбеддить нативно, а реранкать в Phoenix).
+    """
+    fields = embedding_fields_from_path(model_path)
+    if not fields:
+        return {}
+    return {
+        "reranker_model": fields["embedding_model"],
+        "reranker_provider": fields["embedding_provider"],
+    }
+
+def reranker_fields_from_rag_settings(
+    settings: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    return reranker_fields_from_path(
+        (settings or {}).get("rag_reranker_model_path")
+    )
+
+def runtime_reranker_fields() -> Dict[str, Any]:
+    """Реранкер ТЕКУЩЕГО запроса (ContextVar), если выбран."""
+    return reranker_fields_from_rag_settings(get_runtime_rag_settings())
+
+async def embedding_fields_for_user(user_id: Optional[str]) -> Dict[str, Any]:
+    """Модель конкретного пользователя — для фона и загрузок (ContextVar нет/чужой)."""
+    if not user_id:
+        return {}
+    return embedding_fields_from_rag_settings(await get_user_rag_settings(user_id))

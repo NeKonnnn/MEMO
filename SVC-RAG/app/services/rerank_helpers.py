@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 
-from typing import Any, List, Tuple
+from typing import Any, List, Optional, Tuple
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -15,6 +15,7 @@ async def rerank_vector_hits(
     rag_client: Any,
     top_k: int,
     vector_weight: float = 0.3,
+    model: Optional[str] = None,
 ) -> List[Tuple[Any, float]]:
     """
     hits: список (DocumentVector, prior_score) — prior может быть cosine или RRF.
@@ -35,7 +36,7 @@ async def rerank_vector_hits(
         top_k,
     )
     try:
-        ranked = await rag_client.rerank(query, contents, top_k=min(len(contents), max(top_k * 2, top_k)))
+        ranked = await rag_client.rerank(query, contents, top_k=min(len(contents), max(top_k * 2, top_k)), model=model,)
     except Exception as e:
         logger.warning("rerank_helpers.rerank failed: %s", e)
         return hits[:top_k] if top_k else hits

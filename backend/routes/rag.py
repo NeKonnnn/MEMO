@@ -13,7 +13,6 @@ from backend.app_state import (
     minio_client,
     rag_client,
     rag_models_client,
-    save_app_settings,
     settings,
     get_library_chunk_index_params,
     get_rag_chunk_index_params,
@@ -58,7 +57,11 @@ def _model_row_from_path(model_path: str, kind: str) -> dict:
 
 
 def _overlay_user_model_current(data: dict, user_rag: dict) -> dict:
-    """В UI current — персональный выбор пользователя, не только runtime кластера."""
+    """В UI current — персональный выбор пользователя, не runtime кластера.
+
+    Если у пользователя путь пуст — показываем cluster_default (ConfigMap на старте
+    svc-rag-models), а не live current после чужого /models/select.
+    """
     out = dict(data or {})
     cluster = dict(out.get("cluster_default") or out.get("current") or {})
     current = dict(cluster)
@@ -73,6 +76,11 @@ def _overlay_user_model_current(data: dict, user_rag: dict) -> dict:
     return out
 
 
+def _allowed_embedding_models() -> list:
+    """Белый список эмбеддеров из ENV. Пусто = разрешены все (поведение по умолчанию)."""
+    raw = (os.getenv("RAG_EMBEDDING_MODELS_ALLOWED", "") or "").replace(";", ",")
+    return [m.strip().lower() for m in raw.split(",") if m.strip()]
+
 async def _validate_local_model_path(model_type: str, model_path: str) -> None:
     data = await rag_models_client.list_models(model_type)
     rows = (data.get("models") or {}).get(model_type) or []
@@ -82,10 +90,22 @@ async def _validate_local_model_path(model_type: str, model_path: str) -> None:
             status_code=400,
             detail=(
                 f"Модель {model_path!r} не найдена в каталоге. "
-                "Доступны только папки из RAG_MODELS_DIR / ConfigMap RAG_*_MODEL*."
+                "Доступны только папки из RAG_MODELS_DIR / ConfigMap RAG**_MODEL*."
             ),
         )
-
+    # Гард по памяти: модель есть на диске, но её загрузка положит под моделей.
+    # Проверяем ДО выбора — иначе падение случится в фоне, без сообщения пользователю.
+    allowed = _allowed_embedding_models()
+    if model_type == "embedding" and allowed:
+        name = model_path.split("/")[-1].strip()
+        if name.lower() not in allowed:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Модель {name!r} сейчас недоступна для выбора: она не помещается "
+                    f"в память сервиса моделей. Доступны: {', '.join(sorted(allowed))}."
+                ),
+            )
 
 def _rag_upload_username(current_user: dict) -> str:
     return current_user.get("username") or current_user.get("user_id") or "anonymous"
@@ -109,6 +129,43 @@ router = APIRouter(tags=["rag"])
 _VALID_STRATEGIES = {"auto", "hierarchical", "hybrid", "vector", "lexical", "raw_cosine", "graph"}
 _VALID_CHUNKING_STRATEGIES = {"hierarchical", "fixed", "markdown", "separators", "semantic"}
 
+# Кто сейчас в scoped-перечанковке (project/kb). Плашка у других пользователей не горит.
+# Memory / cluster-reindex — отдельно (кластерный флаг).
+_user_scoped_reindex_kb: set[str] = set()
+_user_scoped_reindex_project: set[str] = set()
+_cluster_reindex_active: bool = False
+# Когда флаги подняли. svc-rag отвечает "started" ДО того, как возьмёт лок, —
+# без форы статус погасил бы плашку в первую же секунду.
+_reindex_flags_started_at: float = 0.0
+REINDEX_FLAG_GRACE_SECONDS = 60.0
+
+def _mark_reindex_started() -> None:
+    global _reindex_flags_started_at
+    import time
+
+    _reindex_flags_started_at = time.monotonic()
+
+def _reindex_grace_active() -> bool:
+    import time
+
+    return (time.monotonic() - _reindex_flags_started_at) < REINDEX_FLAG_GRACE_SECONDS
+
+
+def _norm_uid(user_id: Optional[str]) -> str:
+    return str(user_id or "").strip().lower()
+
+
+def _mark_user_scoped_reindex(user_id: str, *, active: bool) -> None:
+    uid = _norm_uid(user_id)
+    if not uid:
+        return
+    if active:
+        _user_scoped_reindex_kb.add(uid)
+        _user_scoped_reindex_project.add(uid)
+    else:
+        _user_scoped_reindex_kb.discard(uid)
+        _user_scoped_reindex_project.discard(uid)
+
 
 def _is_upstream_httpx_timeout(exc: BaseException) -> bool:
     seen = set()
@@ -128,7 +185,10 @@ def _rag_settings_response_dict() -> dict:
 
 @router.get("/api/rag/settings")
 async def get_rag_settings(current_user: Annotated[dict, Depends(get_current_user)]):
-    """Персональные RAG-настройки пользователя (PostgreSQL)."""
+    """Персональные RAG-настройки (project + agent).
+
+    Memory RAG (кроме стратегии поиска) — только ConfigMap/env SVC-RAG / SVC-RAG-MODELS.
+    """
     user_id = str(current_user.get("user_id") or "").strip()
     settings_data = await get_user_rag_settings(user_id)
     return settings_response_dict(settings_data)
@@ -197,24 +257,48 @@ async def get_rag_reindex_status(
     }
     if not rag_client:
         return empty_payload
+    global _reindex_flags_started_at, _cluster_reindex_active
+    global _user_scoped_reindex_kb, _user_scoped_reindex_project
     try:
         status = await rag_client.get_reindex_status()
     except Exception as exc:
         logger.warning("[RAG] reindex-status poll failed: %s", exc)
         return empty_payload
 
-    user_id = current_user.get("user_id") if current_user else None
+    # Источник истины о том, идёт ли работа, — локи svc-rag, а не наши флаги:
+    # backend узнаёт только момент ПОСТАНОВКИ задачи, не её завершение.
+    svc_busy = any(
+        bool((status.get(key) or {}).get("reindexing"))
+        for key in ("kb", "project", "memory")
+    )
+    if not svc_busy and not _reindex_grace_active():
+        if _cluster_reindex_active:
+            logger.info("[REINDEX] svc-rag освободился — снимаю кластерный флаг")
+            _cluster_reindex_active = False
+        if _user_scoped_reindex_kb or _user_scoped_reindex_project:
+            logger.info("[REINDEX] svc-rag освободился — снимаю пер-юзерные флаги")
+            _user_scoped_reindex_kb.clear()
+            _user_scoped_reindex_project.clear()
+
+    user_id = _norm_uid(current_user.get("user_id") if current_user else None)
     agent_has_kb = False
     if agent_id is not None:
-        agent_has_kb = await _resolve_agent_has_kb_documents(agent_id, user_id)
+        agent_has_kb = await _resolve_agent_has_kb_documents(agent_id, user_id or None)
 
     project_has_documents = False
     if project_id:
         project_has_documents = await _resolve_project_has_rag_documents(str(project_id).strip())
 
-    memory_flag = bool(status.get("memory", {}).get("reindexing"))
-    project_flag = bool(status.get("project", {}).get("reindexing"))
-    kb_flag = bool(status.get("kb", {}).get("reindexing"))
+    # Memory — общий стор: флаг виден всем (ConfigMap / cluster).
+    memory_flag = bool(status.get("memory", {}).get("reindexing")) or _cluster_reindex_active
+    # Project/KB scoped: плашка только у пользователя, который запустил перечанковку
+    # (или при полном cluster-reindex после смены dim).
+    if _cluster_reindex_active:
+        project_flag = bool(status.get("project", {}).get("reindexing"))
+        kb_flag = bool(status.get("kb", {}).get("reindexing"))
+    else:
+        project_flag = bool(user_id and user_id in _user_scoped_reindex_project)
+        kb_flag = bool(user_id and user_id in _user_scoped_reindex_kb)
     message = _build_reindex_status_message(
         memory_reindexing=memory_flag,
         project_reindexing=project_flag,
@@ -240,6 +324,7 @@ async def reset_rag_settings(current_user: Annotated[dict, Depends(get_current_u
             raise HTTPException(status_code=401, detail="Требуется авторизация")
         logger.debug("[RAG-CFG] сброс персональных RAG-настроек user=%s", user_id)
         defaults = default_rag_settings_snapshot()
+        # UI-дефолты сброса (как раньше в reset)
         defaults.update(
             {
                 "rag_strategy": "auto",
@@ -277,28 +362,6 @@ def _rechunk_on_settings_change() -> bool:
     return v in ("1", "true", "yes", "on")
 
 
-async def _run_background_rechunk(chunk_params: Optional[dict] = None) -> None:
-    """Фоновая перечанкировка project + kb (memo single-tenant: весь кластер)."""
-    if not rag_client:
-        return
-    params = chunk_params or get_rag_chunk_index_params()
-    cs = params.get("chunk_size")
-    co = params.get("chunk_overlap")
-    strat = params.get("chunking_strategy")
-    logger.info("[RECHUNK] старт: strategy=%s chunk_size=%s overlap=%s", strat, cs, co)
-    try:
-        kb_res = await rag_client.kb_reindex(chunk_size=cs, chunk_overlap=co, chunking_strategy=strat)
-        logger.info("[RECHUNK] kb готово: %s", kb_res)
-    except Exception:
-        logger.exception("[RECHUNK] kb ошибка")
-    try:
-        proj_res = await rag_client.project_rag_reindex_all(chunk_size=cs, chunk_overlap=co, chunking_strategy=strat)
-        logger.info("[RECHUNK] projects готово: %s", proj_res)
-    except Exception:
-        logger.exception("[RECHUNK] projects ошибка")
-    logger.info("[RECHUNK] финиш")
-
-
 def _reindex_on_model_change() -> bool:
     # Дефолт true: после смены embedding-модели вектора стёрты миграцией,
     # без реиндекса поиск мёртв до ручного перезалива
@@ -306,8 +369,115 @@ def _reindex_on_model_change() -> bool:
     return v in ("1", "true", "yes", "on")
 
 
+async def _collect_owner_agent_kb_document_ids(owner_user_id: str) -> list:
+    """document_id из config агентов, где user — author (владелец)."""
+    oid = (owner_user_id or "").strip().lower()
+    if not oid:
+        return []
+    try:
+        from backend.database.init_db import get_agent_repository
+        from backend.database.postgresql.agent_models import AgentFilters
+
+        repo = get_agent_repository()
+        agents, _total = await repo.get_agents(
+            AgentFilters(author_id=oid, author_only=True, limit=100, offset=0),
+            user_id=oid,
+        )
+        out: list = []
+        seen = set()
+        for agent in agents or []:
+            cfg = getattr(agent, "config", None) or {}
+            if isinstance(cfg, str):
+                import json
+
+                try:
+                    cfg = json.loads(cfg)
+                except Exception:
+                    cfg = {}
+            if not isinstance(cfg, dict):
+                continue
+            for raw in cfg.get("kb_document_ids") or []:
+                try:
+                    doc_id = int(raw)
+                except (TypeError, ValueError):
+                    continue
+                if doc_id not in seen:
+                    seen.add(doc_id)
+                    out.append(doc_id)
+        return out
+    except Exception:
+        logger.exception("Не удалось собрать kb_document_ids владельца %s", oid)
+        return []
+
+
+async def _run_background_rechunk_for_user(user_id: str, chunk_params: dict) -> None:
+    """Перечанковка только документов пользователя: project + agent KB (owner).
+
+    Memory RAG не трогаем — нарезка Memory только из env SVC-RAG.
+    """
+    if not rag_client or not user_id:
+        return
+    cs = chunk_params.get("chunk_size")
+    co = chunk_params.get("chunk_overlap")
+    strat = chunk_params.get("chunking_strategy")
+    oid = _norm_uid(user_id)
+    agent_doc_ids = await _collect_owner_agent_kb_document_ids(oid)
+    # Фон живёт вне запроса — ContextVar пуст, модель берём по user_id явно.
+    from backend.services.user_rag_settings import embedding_fields_for_user
+
+    emb = await embedding_fields_for_user(oid)
+    logger.info(
+        "[RECHUNK-USER] старт user=%s model=%s strategy=%s chunk_size=%s overlap=%s agent_docs=%s",
+        oid,
+        emb.get("embedding_model"),
+        strat,
+        cs,
+        co,
+        len(agent_doc_ids),
+    )
+    _mark_user_scoped_reindex(oid, active=True)
+    _mark_reindex_started()
+    try:
+        try:
+            kb_res = await rag_client.kb_reindex(
+                chunk_size=cs,
+                chunk_overlap=co,
+                chunking_strategy=strat,
+                owner_user_id=oid,
+                document_ids=agent_doc_ids or None,
+                **emb,
+            )
+            logger.info("[RECHUNK-USER] kb готово: %s", kb_res)
+        except Exception:
+            logger.exception("[RECHUNK-USER] kb ошибка")
+        try:
+            proj_res = await rag_client.project_rag_reindex_all(
+                chunk_size=cs,
+                chunk_overlap=co,
+                chunking_strategy=strat,
+                owner_user_id=oid,
+                **emb,
+            )   
+            logger.info("[RECHUNK-USER] projects готово: %s", proj_res)
+        except Exception:
+            logger.exception("[RECHUNK-USER] projects ошибка")
+        logger.info(
+            "[RECHUNK-USER] задачи поставлены в svc-rag user=%s; "
+            "флаг снимется по факту завершения",
+            oid,
+        )
+    except Exception:
+        # Ставить задачи не удалось — снимаем флаг сразу, ждать нечего.
+        _mark_user_scoped_reindex(oid, active=False)
+        raise
+
+
 async def _run_background_reindex_after_model_change() -> None:
-    """Восстановление векторов всех сторов из сохранённого текста после смены эмбеддера."""
+    """Кластерное восстановление после миграции dim (ConfigMap / reconcile).
+
+    Memory тоже переиндексируется — вектора очищены TRUNCATE всей таблицы.
+    """
+    global _cluster_reindex_active
     if not rag_client:
         return
     params = get_rag_chunk_index_params()
@@ -315,22 +485,46 @@ async def _run_background_reindex_after_model_change() -> None:
     co = params.get("chunk_overlap")
     strat = params.get("chunking_strategy")
     logger.info(
-        "[REINDEX-AUTO] старт после смены embedding-модели: strategy=%s size=%s overlap=%s",
+        "[REINDEX-CLUSTER] старт после миграции dim: strategy=%s size=%s overlap=%s",
         strat,
         cs,
         co,
     )
-    for name, call in (
-        ("kb", rag_client.kb_reindex),
-        ("projects", rag_client.project_rag_reindex_all),
-        ("memory", rag_client.memory_rag_reindex),
+    _cluster_reindex_active = True
+    _mark_reindex_started()
+    try:
+        from backend.services.memory_rag_env import get_memory_chunk_index_params
+
+        mem = get_memory_chunk_index_params()
+    except Exception:
+        mem = {"chunk_size": cs, "chunk_overlap": co, "chunking_strategy": "universal"}
+    for name, call, kwargs in (
+        ("kb", rag_client.kb_reindex, {"chunk_size": cs, "chunk_overlap": co, "chunking_strategy": strat}),
+        ("projects", rag_client.project_rag_reindex_all, {"chunk_size": cs, "chunk_overlap": co, "chunking_strategy": strat}),
+        (
+            "memory",
+            rag_client.memory_rag_reindex,
+            {
+                "chunk_size": mem.get("chunk_size"),
+                "chunk_overlap": mem.get("chunk_overlap"),
+                "chunking_strategy": mem.get("chunking_strategy"),
+            },
+        ),
     ):
         try:
-            res = await call(chunk_size=cs, chunk_overlap=co, chunking_strategy=strat)
-            logger.info("[REINDEX-AUTO] %s готово: %s", name, res)
+            res = await call(**kwargs)
+            logger.info("[REINDEX-CLUSTER] %s готово: %s", name, res)
         except Exception:
-            logger.exception("[REINDEX-AUTO] %s ошибка", name)
-    logger.info("[REINDEX-AUTO] финиш")
+            logger.exception("[REINDEX-CLUSTER] %s ошибка", name)
+    logger.info(
+        "[REINDEX-CLUSTER] задачи поставлены в svc-rag; "
+        "флаг снимется по факту завершения"
+    )
+
+
+async def _run_background_reindex_for_user(user_id: str, chunk_params: dict) -> None:
+    """Переиндексация project + agent KB только для пользователя (без Memory)."""
+    await _run_background_rechunk_for_user(user_id, chunk_params)
 
 
 @router.put("/api/rag/settings")
@@ -338,7 +532,12 @@ async def update_rag_settings(
     settings_data: RAGSettings,
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
-    """Обновить персональные RAG-настройки пользователя."""
+    """Обновить персональные RAG-настройки (project + agent).
+
+    Memory RAG (кроме strategy) через UI не меняется.
+    При смене чанкинга — перечанковка только документов текущего пользователя;
+    для agent KB — только docs с owner_user_id = этот пользователь (владелец агента).
+    """
     user_id = str(current_user.get("user_id") or "").strip()
     if not user_id:
         raise HTTPException(status_code=401, detail="Требуется авторизация")
@@ -347,7 +546,6 @@ async def update_rag_settings(
     if strat is not None and strat == "reranking":
         strat = "hybrid"
     if strat is not None and strat == "standard":
-        # Миграция старых сохранённых настроек; API больше не публикует standard.
         strat = "vector"
     if strat is not None and strat == "lexical":
         strat = "lexical"
@@ -382,8 +580,6 @@ async def update_rag_settings(
         raise HTTPException(status_code=400, detail="Нет полей для обновления")
     try:
         before = await get_user_rag_settings(user_id)
-        # Фронт шлёт весь набор настроек всегда, поэтому «поле пришло» != «значение
-        # изменилось». Речанковку запускаем только при фактическом изменении нарезки.
         _chunk_before = (
             str(before.get("rag_chunking_strategy") or ""),
             int(before.get("rag_chunk_size") or 0),
@@ -463,18 +659,116 @@ async def update_rag_settings(
             int(merged.get("rag_chunk_size") or 0),
             int(merged.get("rag_chunk_overlap") or 0),
         )
-        if _rechunk_on_settings_change() and _chunk_after != _chunk_before:
+        # Только явная смена полей нарезки — не top_k / similarity / toggles.
+        chunk_fields_touched = any(
+            k in updates
+            for k in ("rag_chunking_strategy", "rag_chunk_size", "rag_chunk_overlap")
+        )
+        if (
+            _rechunk_on_settings_change()
+            and chunk_fields_touched
+            and _chunk_after != _chunk_before
+        ):
             logger.info(
-                "[RECHUNK] настройки чанкинга изменились user=%s → фоновая перечанкировка",
+                "[RECHUNK-USER] чанкинг изменился user=%s → scoped перечанковка",
                 user_id,
             )
-            asyncio.create_task(_run_background_rechunk(chunk_params_from_rag_settings(merged)))
+            asyncio.create_task(
+                _run_background_rechunk_for_user(user_id, chunk_params_from_rag_settings(merged))
+            )
         return {"message": "Настройки RAG обновлены", "success": True, **settings_response_dict(merged)}
     except HTTPException:
         raise
     except Exception as e:
         logger.exception("Ошибка операции")
         raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+async def _run_global_reindex(chunk_params: dict, include_memory: bool) -> None:
+    """Полный реиндекс KB + проектов (все документы всех пользователей)."""
+    global _cluster_reindex_active
+    if not rag_client:
+        return
+    cs = chunk_params.get("chunk_size")
+    co = chunk_params.get("chunk_overlap")
+    strat = chunk_params.get("chunking_strategy")
+    logger.info(
+        "[REINDEX-ALL] старт: strategy=%s chunk_size=%s overlap=%s memory=%s",
+        strat,
+        cs,
+        co,
+        include_memory,
+    )
+    # Флаг снимает /api/rag/reindex-status по факту освобождения локов svc-rag:
+    # здесь мы узнаём только момент ПОСТАНОВКИ задачи (svc-rag отвечает "started"
+    # сразу), а работа идёт ещё десятки минут.
+    _cluster_reindex_active = True
+    _mark_reindex_started()
+    try:
+        kb_res = await rag_client.kb_reindex(
+            chunk_size=cs, chunk_overlap=co, chunking_strategy=strat
+        )
+        logger.info("[REINDEX-ALL] kb готово: %s", kb_res)
+    except Exception:
+        logger.exception("[REINDEX-ALL] kb ошибка")
+    try:
+        proj_res = await rag_client.project_rag_reindex_all(
+            chunk_size=cs, chunk_overlap=co, chunking_strategy=strat
+        )
+        logger.info("[REINDEX-ALL] projects готово: %s", proj_res)
+    except Exception:
+        logger.exception("[REINDEX-ALL] projects ошибка")
+    if include_memory:
+        try:
+            from backend.services.memory_rag_env import get_memory_chunk_index_params
+            
+            mem = get_memory_chunk_index_params()
+        except Exception:
+            mem = {
+                "chunk_size": cs,
+                "chunk_overlap": co,
+                "chunking_strategy": "universal",
+            }
+        try:
+            mem_res = await rag_client.memory_rag_reindex(
+                chunk_size=mem.get("chunk_size"),
+                chunk_overlap=mem.get("chunk_overlap"),
+                chunking_strategy=mem.get("chunking_strategy"),
+            )
+            logger.info("[REINDEX-ALL] memory готово: %s", mem_res)
+        except Exception:
+            logger.exception("[REINDEX-ALL] memory ошибка")
+    logger.info("[REINDEX-ALL] задачи поставлены в svc-rag")
+        
+
+@router.post("/api/rag/reindex-all")
+async def reindex_all_documents(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    include_memory: bool = False,
+):
+    """ПОЛНЫЙ реиндекс: KB + проекты всех пользователей текущей моделью.
+
+    Memory — только при include_memory=true (по умолчанию не трогаем: её нарезка из ENV).
+    Возвращает сразу, работа идёт в фоне; следить по логам [REINDEX-ALL] и [REINDEX kb|project].
+    """
+    require_service("rag")
+    if not rag_client:
+        raise HTTPException(status_code=503, detail="RAG service недоступен")
+    user_id = str(current_user.get("user_id") or "").strip()
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Требуется авторизация")
+    logger.warning(
+        "[REINDEX-ALL] запущен пользователем %s (memory=%s)", user_id, include_memory
+    )
+    merged = await get_user_rag_settings(user_id)
+    asyncio.create_task(
+        _run_global_reindex(chunk_params_from_rag_settings(merged), bool(include_memory))
+    )
+    return {
+        "ok": True,
+        "status": "started",
+        "scope": "kb+projects" + ("+memory" if include_memory else ""),
+    }
 
 
 PHOENIX_PROVIDER_ID = os.getenv("RAG_PHOENIX_PROVIDER_ID", "PHOENIX")
@@ -581,94 +875,75 @@ async def get_rag_models_current(current_user: Annotated[dict, Depends(get_curre
         raise HTTPException(status_code=502, detail=str(e)) from e
 
 
+async def _current_cluster_embedding_dim() -> Optional[int]:
+    """Текущая dim загруженной модели / health (до миграции схемы)."""
+    if not rag_models_client:
+        return None
+    try:
+        health = await rag_models_client.health()
+        if isinstance(health, dict) and health.get("embedding_dim"):
+            return int(health["embedding_dim"])
+    except Exception:
+        logger.debug("health embedding_dim недоступен", exc_info=True)
+    return None
+
+
 async def _select_phoenix_rag_model(model_type: str, model_path: str, user_id: str):
-    """Выбор модели Phoenix: НЕ грузим локально, переключаем svc-rag.
+    """Персональный выбор Phoenix-модели.
 
-    reranker: только переключение, dim не участвует.
-    embedding: переключение -> probe dim -> явная миграция схемы
-    (ensure_embedding_dim, тот же путь, что у native). При неудаче probe
-    выбор откатывается на прежний - корпус в безопасности.
-    Путь всегда сохраняется в персональных rag_settings пользователя.
+    Кластер НЕ переключаем: после B2/B3 модель едет в теле каждого запроса, а
+    вектора ложатся в таблицу своей размерности. Прежний set_models_provider
+    менял провайдера всем сразу, а 409-гард запрещал чужую dim — теперь
+    запрещать нечего.
     """
-    from backend.settings.rag_client import rag_model_path_to_provider
-
     if not rag_client:
         raise HTTPException(status_code=503, detail="RAG service недоступен")
     model_id = model_path.split("/", 1)[1].strip()
     if not model_id:
         raise HTTPException(status_code=400, detail="Пустой id модели Phoenix")
+
     try:
-        result = await rag_client.set_models_provider(
-            model_type, PHOENIX_PROVIDER_ID, model_id
-        )
+        phoenix_rows = await _phoenix_rag_models(model_type)
     except Exception as e:
-        logger.exception("Phoenix select error")
+        logger.exception("Phoenix catalog error")
         raise HTTPException(status_code=502, detail=str(e)) from e
-    path_key = (
-        "rag_embedding_model_path"
-        if model_type == "embedding"
-        else "rag_reranker_model_path"
-    )
+    paths = {str((r or {}).get("path") or "").strip() for r in (phoenix_rows or [])}
+    if paths and model_path not in paths:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Модель Phoenix {model_path!r} не найдена в каталоге",
+        )
+    result: dict = {
+        "success": True,
+        "model_type": model_type,
+        "model_path": model_path,
+        "cluster_changed": False,
+    }
+
     if model_type == "embedding":
-        emb_dim = result.get("embedding_dim") if isinstance(result, dict) else None
-        if not emb_dim:
-            # probe не удался (сеть/ключ/модель) - откатываем выбор в svc-rag
-            with logged_suppress(logger):
-                user_rag = await get_user_rag_settings(user_id)
-                prev_path = str(
-                    user_rag.get("rag_embedding_model_path")
-                    or getattr(state, "rag_embedding_model_path", "")
-                    or ""
+        merged = await save_user_rag_settings(
+            user_id, {"rag_embedding_model_path": model_path}
+        )
+        if _reindex_on_model_change():
+            # Документы пользователя переезжают в таблицу новой размерности;
+            # чужие вектора и Библиотека не затрагиваются.
+            asyncio.create_task(
+                _run_background_reindex_for_user(
+                    user_id, chunk_params_from_rag_settings(merged)
                 )
-                prev_provider, prev_model = rag_model_path_to_provider(prev_path)
-                await rag_client.set_models_provider(
-                    "embedding", prev_provider, prev_model
-                )
-            detail = (
-                result.get("probe_error") if isinstance(result, dict) else None
-            ) or "не удалось определить размерность модели"
-            raise HTTPException(
-                status_code=502,
-                detail=f"Phoenix-эмбеддер не подключён: {detail}",
             )
-        try:
-            schema = await rag_client.ensure_embedding_dim(int(emb_dim))
-            if isinstance(result, dict):
-                result = {**result, "schema": schema, "embedding_dim": emb_dim}
-            if (
-                _reindex_on_model_change()
-                and isinstance(schema, dict)
-                and schema.get("migrated")
-            ):
-                logger.info(
-                    "[REINDEX-AUTO] миграция dim очистила вектора -> фоновое восстановление"
-                )
-                asyncio.create_task(_run_background_reindex_after_model_change())
-        except Exception:
-            logger.exception(
-                "Не удалось синхронизировать embedding_dim=%s в SVC-RAG", emb_dim
-            )
-            raise HTTPException(
-                status_code=502,
-                detail=(
-                    f"Провайдер переключён, но схема БД не перешла на dim={emb_dim}. "
-                    "Индексация/поиск будут падать до миграции."
-                ),
-            ) from None
-    await save_user_rag_settings(user_id, {path_key: model_path})
-    # Seed для новых пользователей / fallback без runtime
-    state_attr = path_key
-    setattr(state, state_attr, model_path)
-    save_app_settings({path_key: model_path})
+    else:
+        await save_user_rag_settings(user_id, {"rag_reranker_model_path": model_path})
     bump_rag_semantic_cache()
-    if isinstance(result, dict):
-        result = {
-            **result,
-            "success": True,
-            "model_type": model_type,
-            "model_path": model_path,
-            "path_saved": True,
-        }
+    logger.info(
+        "[RAG-CFG] персональный выбор Phoenix user=%s type=%s path=%s "
+        "(кластер и Библиотека не меняются)",
+        user_id,
+        model_type,
+        model_path,
+    )
+    result["message"] = "Модель сохранена в ваших настройках"
+    result["reindexed"] = model_type == "embedding" and _reindex_on_model_change()
     return result
 
 
@@ -677,11 +952,12 @@ async def select_rag_model(
     body: RagModelSelectRequest,
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
-    """Выбор модели: сохранение в персональных rag_settings + загрузка в кластер (memo).
+    """Выбор embedding/reranker: загружает модель и сохраняет путь пользователю.
 
-    Local: rag_models_client.select_model + dim migrate при embedding.
-    Phoenix: set_models_provider + dim migrate.
-    Путь всегда пишется в user_llm_settings.rag_settings.
+    - UI-выбор у других пользователей не меняется (персональный Postgres).
+    - Memory RAG не переиндексируется.
+    - Смена dim из UI запрещена.
+    - При той же dim — scoped reindex только project + agent KB этого пользователя.
     """
     require_service("rag_models")
     if not rag_models_client:
@@ -710,78 +986,46 @@ async def select_rag_model(
         return await _select_phoenix_rag_model(model_type, model_path, user_id)
     try:
         await _validate_local_model_path(model_type, model_path)
-        result = await rag_models_client.select_model(model_type, model_path)
-        # Выбрана локальная модель: если svc-rag был на Phoenix - вернуть native
-        with logged_suppress(logger):
-            if rag_client:
-                await rag_client.set_models_provider(model_type, "native", None)
-        path_key = (
-            "rag_embedding_model_path"
-            if model_type == "embedding"
-            else "rag_reranker_model_path"
-        )
-        # Размерность/миграция/реиндекс касаются ТОЛЬКО эмбеддера.
-        # Реранкер не создаёт векторы — его смена не трогает схему БД.
-        if model_type == "embedding":
-            # Колонки pgvector создаются один раз (CREATE IF NOT EXISTS) —
-            # при смене эмбеддера нужно привести vector(N) к фактической dim.
-            emb_dim = result.get("embedding_dim") if isinstance(result, dict) else None
-            if emb_dim is None and rag_models_client:
-                try:
-                    health = await rag_models_client.health()
-                    emb_dim = (
-                        health.get("embedding_dim") if isinstance(health, dict) else None
-                    )
-                except Exception:
-                    logger.exception("Не удалось получить embedding_dim из health")
-            if emb_dim and rag_client:
-                try:
-                    schema = await rag_client.ensure_embedding_dim(int(emb_dim))
-                    if isinstance(result, dict):
-                        result = {**result, "schema": schema}
-                except Exception:
-                    logger.exception(
-                        "Не удалось синхронизировать embedding_dim=%s в SVC-RAG",
-                        emb_dim,
-                    )
-                    raise HTTPException(
-                        status_code=502,
-                        detail=(
-                            f"Модель загружена, но схема БД не перешла на dim={emb_dim}. "
-                            "Переиндексация может падать с expected N dimensions."
-                        ),
-                    ) from None
-            if (
-                _reindex_on_model_change()
-                and isinstance(result, dict)
-                and isinstance(result.get("schema"), dict)
-                and result["schema"].get("migrated")
-            ):
-                logger.info(
-                    "[REINDEX-AUTO] миграция dim очистила вектора → фоновое восстановление"
-                )
-                asyncio.create_task(_run_background_reindex_after_model_change())
-        await save_user_rag_settings(user_id, {path_key: model_path})
-        setattr(state, path_key, model_path)
-        save_app_settings({path_key: model_path})
-        bump_rag_semantic_cache()
-        if isinstance(result, dict):
-            result = {
-                **result,
-                "success": True,
-                "model_type": model_type,
-                "model_path": model_path,
-                "path_saved": True,
-            }
-            return result
-        return {
+        # Кластер не трогаем: модель едет в теле запроса, svc-rag-models поднимет
+        # её сам по имени (LRU из фазы A), вектора лягут в таблицу своей
+        # размерности. Прежний select_model менял модель ВСЕМ, а 409-гард
+        # запрещал чужую dim — с раздельными таблицами это больше не нужно.
+        result: dict = {
             "success": True,
-            "message": "Модель загружена, путь сохранён в настройках",
             "model_type": model_type,
             "model_path": model_path,
-            "path_saved": True,
-            "result": result,
+            "cluster_changed": False,
         }
+
+        if model_type == "embedding":
+            merged = await save_user_rag_settings(
+                user_id, {"rag_embedding_model_path": model_path}
+            )
+            if _reindex_on_model_change():
+                logger.info(
+                    "[REINDEX-USER] смена embedding user=%s → scoped reindex (без Memory)",
+                    user_id,
+                )
+                asyncio.create_task(
+                    _run_background_reindex_for_user(
+                        user_id, chunk_params_from_rag_settings(merged)
+                    )
+                )
+        else:
+            await save_user_rag_settings(user_id, {"rag_reranker_model_path": model_path})
+        bump_rag_semantic_cache()
+        result["message"] = "Модель сохранена в ваших настройках"
+        result["reindexed"] = (
+            model_type == "embedding" and _reindex_on_model_change()
+        )
+        logger.info(
+            "[RAG-CFG] персональный выбор модели user=%s type=%s path=%s "
+            "(кластер и Библиотека не меняются)",
+            user_id,
+            model_type,
+            model_path,
+        )
+        return result
     except HTTPException:
         raise
     except Exception as e:
@@ -794,17 +1038,20 @@ async def kb_upload_document(
     file: Annotated[UploadFile, File(...)],
     current_user: Annotated[dict, Depends(get_current_user)],
     chunking_strategy: Annotated[Optional[str], Form()] = None,
+    agent_id: Annotated[Optional[int], Form()] = None,
 ):
-    """Загрузка в KB (агентный RAG / библиотека KB).
+    """Загрузка в KB (агентный RAG).
 
-    Библиотека (страница KB / memory): без strategy → universal.
-    Агент (конструктор): передаёт chunking_strategy из настроек RAG.
-    При RAG_USE_PVC=true исходник пишется в /ragdb/agent/{user}/{date}/.
+    owner_user_id = автор агента (не uploader): файлы редактора принадлежат владельцу,
+    и только владелец может запускать их перечанковку через свои RAG-настройки.
+    Параметры чанкинга — из персональных настроек владельца (если agent_id задан)
+    или текущего пользователя.
     """
     require_service("rag")
     if not rag_client:
         raise HTTPException(status_code=503, detail="RAG service недоступен")
     username = _rag_upload_username(current_user)
+    uploader_id = str(current_user.get("user_id") or "").strip().lower()
     file_object_name = None
     file_bucket = None
     try:
@@ -812,13 +1059,41 @@ async def kb_upload_document(
         if not content:
             raise HTTPException(status_code=400, detail="Файл пустой")
         fn = file.filename or "unknown"
+
+        owner_user_id = uploader_id
+        resolved_agent_id: Optional[int] = None
+        if agent_id is not None:
+            from backend.database.init_db import get_agent_repository
+            from backend.database.postgresql.agent_models import (
+                AGENT_PERMISSION_EDITOR,
+                AGENT_PERMISSION_OWNER,
+            )
+
+            agent_repo = get_agent_repository()
+            permission = await agent_repo.get_user_permission(int(agent_id), uploader_id)
+            if permission not in (AGENT_PERMISSION_OWNER, AGENT_PERMISSION_EDITOR):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Недостаточно прав для загрузки файлов в KB агента",
+                )
+            agent = await agent_repo.get_agent(int(agent_id), uploader_id)
+            if not agent:
+                raise HTTPException(status_code=404, detail="Агент не найден")
+            owner_user_id = str(agent.author_id or uploader_id).strip().lower()
+            resolved_agent_id = int(agent_id)
+
+        # Чанкинг: настройки владельца агента (он же контролирует rechunk)
+        settings_user = owner_user_id or uploader_id
+        user_rag = await get_user_rag_settings(settings_user) if settings_user else {}
+        chunk_params = chunk_params_from_rag_settings(user_rag) if user_rag else get_rag_chunk_index_params()
         strategy = (chunking_strategy or "").strip().lower()
         if strategy and strategy in _VALID_CHUNKING_STRATEGIES | {"universal"}:
-            chunk_params = get_rag_chunk_index_params()
             chunk_params["chunking_strategy"] = strategy
-        else:
-            # Библиотека: всегда universal, UI-стратегия не применяется
-            chunk_params = get_library_chunk_index_params()
+        elif not strategy:
+            # Без явной strategy из конструктора — библиотечный universal
+            if resolved_agent_id is None:
+                chunk_params = get_library_chunk_index_params()
+
         if use_rag_pvc():
             file_object_name = save_rag_bytes_to_pvc(
                 content,
@@ -835,12 +1110,22 @@ async def kb_upload_document(
                 )
             file_bucket = RAG_PVC_BUCKET_MARKER
         try:
+            from backend.services.user_rag_settings import (
+                embedding_fields_from_rag_settings,
+            )
+
+            # Модель владельца агента, а не заливающего: реиндекс документа
+            # потом запустит владелец из своих настроек, и модель должна совпасть.
             out = await rag_client.kb_upload_document(
                 file_bytes=content,
                 filename=fn,
                 minio_object=file_object_name,
                 minio_bucket=file_bucket,
+                owner_user_id=owner_user_id or None,
+                agent_id=resolved_agent_id,
+                uploaded_by=username or None,
                 **chunk_params,
+                **embedding_fields_from_rag_settings(user_rag),
             )
         except Exception as e:
             if file_object_name and file_bucket:

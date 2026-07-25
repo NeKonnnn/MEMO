@@ -18,10 +18,8 @@ from backend.app_state import (
     get_conversation_repository,
     get_current_model_path,
     get_model_comparison_models,
-    get_rag_chat_top_k,
     get_recent_dialog_history,
     minio_client,
-    rag_client,
     recognize_speech_from_file,
     save_dialog_entry,
     speak_text,
@@ -30,16 +28,7 @@ from backend.auth.jwt_handler import get_current_user
 from backend.mcp.resolvers import resolve_chat_tool_ids
 from backend.database.mongodb.models import Conversation, Message as DbMessage
 from backend.llm_providers import get_registry
-from backend.rag_query.post_generation import maybe_replace_ungrounded
-from backend.rag_query.prompts import RAG_STRICT_NOT_FOUND_MESSAGE, merge_strict_rag_system_prompt
-from backend.realtime.helpers import _is_structure_query, _terminal_chat_inference_banner
-from backend.realtime.rag_evidence import (
-    build_rag_id_to_filename,
-    filter_rag_hits_by_score,
-    format_rag_fragments,
-    maybe_rag_no_evidence_message,
-    rag_guard_env,
-)
+from backend.realtime.helpers import _terminal_chat_inference_banner
 from backend.schemas import (
     ChatMessage,
     ContextBreakdownRequest,
@@ -51,7 +40,6 @@ from backend.services.follow_up_suggestions import generate_follow_up_suggestion
 from backend.settings.cef_logger.cef_logger import log_cef_event
 from backend.settings.logging import get_logger
 from backend.settings.logging.errors import logged_suppress
-from backend.settings.service_toggles import is_service_enabled  # FEATURE-FLAG
 
 logger = get_logger(__name__)
 
@@ -197,69 +185,8 @@ async def chat_with_ai(
                         )
                 except Exception:
                     logger.exception("REST MCP agent loop error")
-            if rag_client and response is None and is_service_enabled("rag"):  # FEATURE-FLAG
-                try:
-                    min_sim, rag_block = rag_guard_env()
-                    hits = await rag_client.search(
-                        message.message, k=get_rag_chat_top_k(), strategy=state.current_rag_strategy
-                    )
-                    hits = filter_rag_hits_by_score(hits, min_sim)
-                    canned = await maybe_rag_no_evidence_message(
-                        rag_client,
-                        block_when_no_evidence=rag_block,
-                        context_added=bool(hits),
-                        global_attempted=True,
-                        project_id=None,
-                        use_kb_rag=False,
-                        use_memory_library_rag=False,
-                        use_agent_scoped_kb=False,
-                        agent_kb_doc_ids=None,
-                        implicit_global_corpus=True,
-                    )
-                    if canned:
-                        response = canned
-                    elif hits:
-                        if _is_structure_query(message.message):
-                            seen = {(d, i) for _, _, d, i in hits}
-                            for doc_id in {d for _, _, d, _ in hits if d}:
-                                with logged_suppress(logger):
-                                    for c, sc, did, idx in await rag_client.get_document_start_chunks(
-                                        doc_id, max_chunks=2
-                                    ):
-                                        if (did, idx) not in seen:
-                                            hits = [(c, sc, did, idx)] + hits
-                                            seen.add((did, idx))
-                        id_map = build_rag_id_to_filename(list(await rag_client.list_documents() or []))
-                        parts, _ = format_rag_fragments(
-                            hits, id_map, max_chars=12000, store_label="global/rest-api-chat"
-                        )
-                        doc_context = "\n".join(parts)
-                        prompt = (
-                            f"CONTEXT (фрагменты из документов):\n{doc_context}\n"
-                            f"Вопрос пользователя: {message.message}\nОтвет:"
-                        )
-                        current_model_path = message.model or get_current_model_path()
-                        _terminal_chat_inference_banner(
-                            sid="HTTP-POST-/api/chat",
-                            conversation_id=None,
-                            user_preview=prompt,
-                            mode_label="REST /api/chat — ответ с RAG",
-                            model_path_for_call=current_model_path,
-                        )
-                        response = ask_agent(
-                            prompt,
-                            history=[],
-                            streaming=False,
-                            model_path=current_model_path,
-                            system_prompt=merge_strict_rag_system_prompt(
-                                None, rag_override=getattr(state, "rag_system_prompt", None)
-                            ),
-                        )
-                        response = await maybe_replace_ungrounded(
-                            prompt[:20000], response, RAG_STRICT_NOT_FOUND_MESSAGE
-                        )
-                except Exception:
-                    logger.exception("ПРЯМОЙ РЕЖИМ: ошибка при получении контекста документов через SVC-RAG")
+            # Global documents store отключён: REST /api/chat без явных store-флагов
+            # идёт напрямую в LLM (KB/memory/project — через Socket.IO чат).
             if not response:
                 logger.info("ПРЯМОЙ РЕЖИМ: Используем обычный AI agent без контекста документов")
                 current_model_path = message.model or get_current_model_path()
@@ -748,28 +675,8 @@ async def websocket_chat(websocket: WebSocket):
                     if not models:
                         await websocket.send_text(json.dumps({"type": "error", "error": "Модели не выбраны"}))
                         continue
-                    doc_context = None
-                    if rag_client and is_service_enabled("rag"):  # FEATURE-FLAG
-                        try:
-                            hits = await rag_client.search(
-                                user_message, k=get_rag_chat_top_k(), strategy=state.current_rag_strategy
-                            )
-                            if hits:
-                                id_map = build_rag_id_to_filename(list(await rag_client.list_documents() or []))
-                                parts, _ = format_rag_fragments(
-                                    hits, id_map, max_chars=12000, store_label="global/ws-chat"
-                                )
-                                doc_context = "\n".join(parts)
-                        except Exception:
-                            logger.exception("WebSocket: Ошибка при получении контекста документов через SVC-RAG")
+                    # Global store отключён — multi-LLM WS без автоподмешивания /search
                     final_user_message = user_message
-                    if doc_context:
-                        final_user_message = (
-                            f"Контекст из загруженных документов:\n{doc_context}\n"
-                            f"Вопрос пользователя: {user_message}\n"
-                            "Пожалуйста, ответьте на вопрос пользователя, используя информацию из предоставленных документов. "
-                            "Если в документах нет информации для ответа, честно скажите об этом."
-                        )
 
                     async def _gen_one(
                         model_name,

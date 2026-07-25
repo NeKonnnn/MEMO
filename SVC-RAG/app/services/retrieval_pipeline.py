@@ -167,6 +167,9 @@ async def run_retrieval_pipeline(
     find_docs_by_filename: Optional[FindDocsByFilenameFn] = None,
     vector_repo_for_window: Any = None,
     bm25_index: Optional[InMemoryBm25Index] = None,
+    embed_model: Optional[str] = None,
+    rerank_client: Optional[RagModelsClient] = None,
+    rerank_model: Optional[str] = None,
     # Метаданные для retrieval_eval / логов — опциональны:
     eval_gold_document_ids: Optional[List[int]] = None,
     eval_gold_chunks: Optional[List[Tuple[int, int]]] = None,
@@ -416,7 +419,9 @@ async def run_retrieval_pipeline(
 
     emb_src = vq or q_text
     try:
-        query_emb = await rag_client.embed([emb_src])
+        query_emb = await rag_client.embed(
+            [emb_src], model=embed_model, kind="query"
+        )
     except Exception as e:
         trace.warn(f"embed_error: {e}")
         await log_retrieval_with_eval(
@@ -620,8 +625,9 @@ async def run_retrieval_pipeline(
                 hits = await rerank_vector_hits(
                     q_text,
                     hits,
-                    rag_client,
+                    rerank_client or rag_client,
                     top_k=int(cfg.rerank_top_k or 20),
+                    model=rerank_model,
                 )
                 used_rr = True
                 trace.add("cross_encoder_rerank", count=len(hits))
@@ -948,9 +954,10 @@ async def run_retrieval_pipeline(
             hits = await rerank_vector_hits(
                 q_text,
                 hits,
-                rag_client,
+                rerank_client or rag_client,
                 top_k=max(len(hits), k * 4, int(cfg.rerank_top_k or 20)),
                 vector_weight=0.3,
+                model=rerank_model,
             )
             used_rr = True
             trace.add("cross_encoder_rerank", count=len(hits))

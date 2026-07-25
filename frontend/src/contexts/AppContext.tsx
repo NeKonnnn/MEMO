@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useReducer, useEffect, ReactNode } from 'react';
-import { getApiUrl } from '../config/api';
+import { getApiUrl, API_ENDPOINTS } from '../config/api';
 import { initSettings } from '../settings';
 import { useAuth } from './AuthContext';
 import { normalizeMcpToolCallList } from '../mcp/utils/normalizeToolCall';
@@ -1351,6 +1351,29 @@ export function useAppActions() {
     
     deleteProject: (projectId: string) => {
       dispatch({ type: 'DELETE_PROJECT', payload: projectId });
+      // Бэкенд чистит RAG-документы проекта, файлы в MinIO/PVC и диалоги.
+      // Без этого вызова документы остаются в БД навсегда и переиндексируются впустую.
+      const effectiveToken = token || localStorage.getItem('auth_token');
+      if (effectiveToken) {
+        initSettings()
+          .then(() => {
+            fetch(getApiUrl(API_ENDPOINTS.PROJECT_DELETE(projectId)), {
+              method: 'DELETE',
+              headers: { Authorization: `Bearer ${effectiveToken}` },
+            })
+              .then((response) => {
+                if (!response.ok) {
+                  console.error(
+                    `Не удалось удалить данные проекта ${projectId}: HTTP ${response.status}`,
+                  );
+                }
+              })
+              .catch((error) => {
+                console.error(`Ошибка удаления данных проекта ${projectId}:`, error);
+              });
+          })
+          .catch(() => {});
+      }
     },
     
     getProjects: () => {

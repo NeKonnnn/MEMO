@@ -51,6 +51,20 @@ def _with_chunk_index_form_data(
     return data
 
 
+def _svc_rag_search_timeout() -> httpx.Timeout:
+    """Ожидание ответа на поиск.
+
+    Дефолтные 60с общего клиента рассчитаны на быстрый эмбеддер. Тяжёлая модель
+    на CPU тратит на вектор запроса 40-80с — запрос рвётся по ReadTimeout
+    """
+    try:
+        read_sec = float(os.getenv("SVC_RAG_SEARCH_READ_TIMEOUT", "180"))
+    except ValueError:
+        read_sec = 180.0
+    read_sec = max(30.0, read_sec)
+    return httpx.Timeout(30.0, read=read_sec)    
+
+
 def _svc_rag_document_index_timeout() -> httpx.Timeout:
     """Ожидание ответа POST /…/documents: парсинг + чанки + серия embed к rag-models."""
     try:
@@ -233,7 +247,9 @@ class RagClient:
             body = {**base_body, "query": qtext}
             if idx > 0 or not vq:
                 body.pop("vector_query", None)
-            resp = await self._request("POST", path, json=body)
+            resp = await self._request(
+                "POST", path, json=body, http_timeout=_svc_rag_search_timeout()
+            )
             for tup in self._parse_hits(resp):
                 key = (tup[2], tup[3])
                 prev = merged.get(key)
@@ -250,14 +266,26 @@ class RagClient:
         *,
         log_tag: str,
         document_id: Optional[int] = None,
+        document_ids: Optional[List[int]] = None,
         use_reranking: Optional[bool] = None,
         strategy: Optional[str] = None,
         project_id: Optional[str] = None,
+        settings_source: str = "user",
     ) -> List[Tuple[str, float, Optional[int], Optional[int]]]:
         from backend.rag_query.pipeline import process_user_query
         from backend.rag_query.postprocess import dedupe_rag_hits
         from backend.rag_query.semantic_cache import cache_get, cache_set, make_cache_key, semantic_cache_enabled
-        from backend.services.user_rag_settings import get_runtime_rag_settings
+        from backend.services.memory_rag_env import get_memory_rag_retrieval_settings
+        from backend.services.user_rag_settings import (
+            get_runtime_rag_settings,
+            runtime_embedding_fields,
+            runtime_reranker_fields,
+        )
+
+        # Библиотека вне пер-юзерности: у неё своя модель из ENV svc-rag.
+        is_memory = (settings_source or "user").strip().lower() == "memory"
+        emb_fields = {} if is_memory else runtime_embedding_fields()
+        rr_fields = {} if is_memory else runtime_reranker_fields()
 
         st = (strategy or "").strip().lower()
         raw_mode = st == "raw_cosine"
@@ -265,7 +293,12 @@ class RagClient:
             body: Dict[str, Any] = {"query": query, "k": k, "strategy": "raw_cosine"}
             if document_id is not None:
                 body["document_id"] = document_id
-            resp = await self._request("POST", path, json=body)
+            if document_ids:
+                body["document_ids"] = [int(x) for x in document_ids]
+            body.update(emb_fields)
+            resp = await self._request(
+                "POST", path, json=body, http_timeout=_svc_rag_search_timeout()
+            )
             hits = self._parse_hits(resp)
             _log_backend_rag_strategy_banner(
                 path=path,
@@ -279,14 +312,21 @@ class RagClient:
                 from_cache=False,
             )
             return hits
-        user_rag = get_runtime_rag_settings()
+        if (settings_source or "user").strip().lower() == "memory":
+            user_rag = get_memory_rag_retrieval_settings()
+        else:
+            user_rag = get_runtime_rag_settings()
         _fix = bool(user_rag.get("rag_query_fix_typos", False))
         _multi = bool(user_rag.get("rag_multi_query_enabled", False))
         _hyde = bool(user_rag.get("rag_hyde_enabled", False))
         pq = await process_user_query(query, fix_typos=_fix, multi_query=_multi, hyde=_hyde)
         body: Dict[str, Any] = {"query": pq.query_for_search, "k": k}
+        body.update(emb_fields)
+        body.update(rr_fields)
         if document_id is not None:
             body["document_id"] = document_id
+        if document_ids:
+            body["document_ids"] = [int(x) for x in document_ids]
         _rr_enabled = bool(user_rag.get("rag_reranking_enabled", False))
         effective_reranking = bool(use_reranking) if use_reranking is not None else _rr_enabled
         if strategy and str(strategy).strip().lower() == "lexical":
@@ -299,7 +339,7 @@ class RagClient:
         body["use_reranking"] = effective_reranking
         logger.debug(
             "[RAG-SEARCH] mode=%s strategy=%s k=%s reranking=%s rerank_top_n=%s"
-            " fix_typos=%s multi_query=%s hyde=%s document_id=%s project_id=%s",
+            "fix_typos=%s multi_query=%s hyde=%s document_id=%s project_id=%s",
             path,
             strategy,
             k,
@@ -321,7 +361,12 @@ class RagClient:
             path,
             pq.normalized,
             k,
-            f"{strategy}|topn={rerank_top_n if effective_reranking else 0}",
+            f"{strategy}|topn={rerank_top_n if effective_reranking else 0}"
+            f"|docs={','.join(str(int(x)) for x in sorted(document_ids or []))}"
+            f"|emb={emb_fields.get('embedding_provider') or '-'}"
+            f"/{emb_fields.get('embedding_model') or '-'}"
+            f"|rr={rr_fields.get('reranker_provider') or '-'}"
+            f"/{rr_fields.get('reranker_model') or '-'}",
             document_id,
             effective_reranking,
             pq.filters,
@@ -349,7 +394,9 @@ class RagClient:
         if pq.multi_variants:
             hits = await self._merge_variant_searches(path, body, pq.multi_variants, k)
         else:
-            resp = await self._request("POST", path, json=body)
+            resp = await self._request(
+                "POST", path, json=body, http_timeout=_svc_rag_search_timeout()
+            )
             hits = self._parse_hits(resp)
         hits = dedupe_rag_hits(hits, jaccard_threshold=_dedupe_jaccard_threshold())
         if effective_reranking:
@@ -484,6 +531,11 @@ class RagClient:
         chunking_strategy: Optional[str] = None,
         minio_object: Optional[str] = None,
         minio_bucket: Optional[str] = None,
+        owner_user_id: Optional[str] = None,
+        agent_id: Optional[int] = None,
+        uploaded_by: Optional[str] = None,
+        embedding_model: Optional[str] = None,
+        embedding_provider: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Загрузить документ в постоянную Базу Знаний."""
         files = {"file": (filename, file_bytes, "application/octet-stream")}
@@ -492,6 +544,17 @@ class RagClient:
             data["minio_object"] = minio_object
         if minio_bucket:
             data["minio_bucket"] = minio_bucket
+        if owner_user_id:
+            data["owner_user_id"] = str(owner_user_id).strip().lower()
+        if uploaded_by:
+            data["uploaded_by"] = str(uploaded_by).strip().lower()
+        if agent_id is not None:
+            data["agent_id"] = str(int(agent_id))
+        # Документ индексируется моделью владельца, а не того, кто заливает.
+        if embedding_model:
+            data["embedding_model"] = str(embedding_model).strip().lower()
+        if embedding_provider:
+            data["embedding_provider"] = str(embedding_provider).strip().lower()
         data = _with_chunk_index_form_data(
             data,
             chunk_size=chunk_size,
@@ -518,6 +581,7 @@ class RagClient:
         document_id: Optional[int] = None,
         use_reranking: Optional[bool] = None,
         strategy: Optional[str] = None,
+        document_ids: Optional[List[int]] = None,
     ) -> List[Tuple[str, float, Optional[int], Optional[int]]]:
         """Поиск по Базе Знаний.
 
@@ -529,6 +593,7 @@ class RagClient:
             k,
             log_tag="/kb/search",
             document_id=document_id,
+            document_ids=document_ids,
             use_reranking=use_reranking,
             strategy=strategy,
             project_id=None,
@@ -539,8 +604,12 @@ class RagClient:
         chunk_size: Optional[int] = None,
         chunk_overlap: Optional[int] = None,
         chunking_strategy: Optional[str] = None,
+        owner_user_id: Optional[str] = None,
+        document_ids: Optional[list] = None,
+        embedding_model: Optional[str] = None,
+        embedding_provider: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Перечанкировать всю Базу Знаний."""
+        """Перечанкировать Базу Знаний (опционально только документы владельца)."""
         body: Dict[str, Any] = {}
         if chunk_size is not None:
             body["chunk_size"] = int(chunk_size)
@@ -548,6 +617,14 @@ class RagClient:
             body["chunk_overlap"] = int(chunk_overlap)
         if chunking_strategy is not None:
             body["chunking_strategy"] = str(chunking_strategy)
+        if owner_user_id:
+            body["owner_user_id"] = str(owner_user_id).strip().lower()
+        if document_ids:
+            body["document_ids"] = [int(x) for x in document_ids if x is not None]
+        if embedding_model:
+            body["embedding_model"] = str(embedding_model).strip().lower()
+        if embedding_provider:
+            body["embedding_provider"] = str(embedding_provider).strip().lower()
         return await self._request(
             "POST",
             "/kb/reindex",
@@ -612,21 +689,34 @@ class RagClient:
     async def memory_rag_search(
         self,
         query: str,
-        k: int = 8,
+        k: Optional[int] = None,
         document_id: Optional[int] = None,
         use_reranking: Optional[bool] = None,
         strategy: Optional[str] = None,
     ) -> List[Tuple[str, float, Optional[int], Optional[int]]]:
-        return await self._search_with_pipeline(
+        """Поиск по Memory/Библиотеке.
+
+        Retrieval (top_k, rerank, hyde, …) — из env RAG_MEMORY_*.
+        strategy — из UI/чата (единственная Memory-настройка из UI).
+        """
+        from backend.services.memory_rag_env import (
+            filter_hits_by_memory_similarity,
+            get_memory_rag_chat_top_k,
+        )
+
+        eff_k = int(k) if k is not None else get_memory_rag_chat_top_k()
+        hits = await self._search_with_pipeline(
             "/memory-rag/search",
             query,
-            k,
+            eff_k,
             log_tag="/memory-rag/search",
             document_id=document_id,
             use_reranking=use_reranking,
             strategy=strategy,
             project_id=None,
+            settings_source="memory",
         )
+        return filter_hits_by_memory_similarity(hits)
 
     async def project_rag_upload_document(
         self,
@@ -638,6 +728,10 @@ class RagClient:
         chunk_size: Optional[int] = None,
         chunk_overlap: Optional[int] = None,
         chunking_strategy: Optional[str] = None,
+        owner_user_id: Optional[str] = None,
+        uploaded_by: Optional[str] = None,
+        embedding_model: Optional[str] = None,
+        embedding_provider: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Загрузить документ в RAG-хранилище проекта."""
         files = {"file": (filename, file_bytes, "application/octet-stream")}
@@ -646,6 +740,14 @@ class RagClient:
             data["minio_object"] = minio_object
         if minio_bucket:
             data["minio_bucket"] = minio_bucket
+        if owner_user_id:
+            data["owner_user_id"] = str(owner_user_id).strip().lower()
+        if uploaded_by:
+            data["uploaded_by"] = str(uploaded_by).strip().lower()
+        if embedding_model:
+            data["embedding_model"] = str(embedding_model).strip().lower()
+        if embedding_provider:
+            data["embedding_provider"] = str(embedding_provider).strip().lower()
         data = _with_chunk_index_form_data(
             data,
             chunk_size=chunk_size,
@@ -700,8 +802,11 @@ class RagClient:
         chunk_size: Optional[int] = None,
         chunk_overlap: Optional[int] = None,
         chunking_strategy: Optional[str] = None,
+        owner_user_id: Optional[str] = None,
+        embedding_model: Optional[str] = None,
+        embedding_provider: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Перечанкировать все проекты."""
+        """Перечанкировать проекты (опционально только документы пользователя)."""
         body: Dict[str, Any] = {}
         if chunk_size is not None:
             body["chunk_size"] = int(chunk_size)
@@ -709,6 +814,12 @@ class RagClient:
             body["chunk_overlap"] = int(chunk_overlap)
         if chunking_strategy is not None:
             body["chunking_strategy"] = str(chunking_strategy)
+        if owner_user_id:
+            body["owner_user_id"] = str(owner_user_id).strip().lower()
+        if embedding_model:
+            body["embedding_model"] = str(embedding_model).strip().lower()
+        if embedding_provider:
+            body["embedding_provider"] = str(embedding_provider).strip().lower()
         return await self._request(
             "POST",
             "/project-rag/reindex",

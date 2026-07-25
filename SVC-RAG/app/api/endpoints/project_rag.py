@@ -2,6 +2,8 @@
 from typing import Any, Dict, List, Optional
 
 import asyncio
+import os 
+
 from fastapi import (
     APIRouter,
     BackgroundTasks,
@@ -52,6 +54,11 @@ class ProjectRagSearchRequest(RagSearchEvalBody):
     vector_query: Optional[str] = None
     filters: Optional[RagSearchFiltersBody] = None
     debug_trace: bool = False
+    # Модель пользователя (резолвит backend). None = кластерная.
+    embedding_model: Optional[str] = None
+    embedding_provider: Optional[str] = None
+    reranker_model: Optional[str] = None
+    reranker_provider: Optional[str] = None
 
 class ProjectRagSearchHit(BaseModel):
     content: str
@@ -72,7 +79,11 @@ async def project_rag_upload(
     chunk_size: Optional[int] = Form(None),
     chunk_overlap: Optional[int] = Form(None),
     chunking_strategy: Optional[str] = Form(None),
+    owner_user_id: Optional[str] = Form(None),
+    uploaded_by: Optional[str] = Form(None),
     svc: ProjectRagService = Depends(get_project_rag_service),
+    embedding_model: Optional[str] = Form(None),
+    embedding_provider: Optional[str] = Form(None),
 ):
     """Загрузить документ в RAG-хранилище проекта."""
     if not file.filename:
@@ -90,6 +101,10 @@ async def project_rag_upload(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
         chunking_strategy=chunking_strategy,
+        owner_user_id=owner_user_id,
+        uploaded_by=uploaded_by,
+        model=embedding_model,
+        provider=embedding_provider,
     )
     if not result.get("ok"):
         raise HTTPException(
@@ -152,10 +167,14 @@ async def project_rag_search(
     svc: ProjectRagService = Depends(get_project_rag_service),
 ):
     """Семантический поиск по RAG-документам проекта."""
-    if _project_reindex_lock.locked():
+    if (
+        _block_search_on_reindex()
+        and _project_reindex_lock.locked()
+        and _project_reindex_owner is None
+    ):
         raise HTTPException(
             status_code=409,
-            detail="Идёт переиндексация проектов — поиск временно недоступен",
+            detail="Идёт полная переиндексация проектов — поиск временно недоступен",
         )
     payload = await svc.search(
         query=body.query,
@@ -167,6 +186,10 @@ async def project_rag_search(
         vector_query=body.vector_query,
         filters=filters_body_to_domain(body.filters),
         return_trace=True,
+        model=body.embedding_model,
+        provider=body.embedding_provider,
+        reranker_model=body.reranker_model,
+        reranker_provider=body.reranker_provider,
         **eval_search_kwargs_from_body(body),
     )
     results, trace = payload
@@ -184,15 +207,29 @@ class ProjectRagReindexRequest(BaseModel):
     chunk_size: Optional[int] = None
     chunk_overlap: Optional[int] = None
     chunking_strategy: Optional[str] = None
+    owner_user_id: Optional[str] = None
+    embedding_model: Optional[str] = None
+    embedding_provider: Optional[str] = None
 
 _project_reindex_lock = asyncio.Lock()
+# Чей реиндекс идёт. None при УДЕРЖИВАЕМОМ локе = глобальный прогон.
+_project_reindex_owner: Optional[str] = None
+
+def _block_search_on_reindex() -> bool:
+    """Отбивать ли поиск во время ГЛОБАЛЬНОГО реиндекса."""
+    v = os.getenv("RAG_BLOCK_SEARCH_DURING_REINDEX", "true").strip().lower()
+    return v in ("1", "true", "yes", "on")
 
 async def _project_reindex_all_bg(
     svc: ProjectRagService,
     chunk_size: Optional[int],
     chunk_overlap: Optional[int],
     chunking_strategy: Optional[str],
+    owner_user_id: Optional[str] = None,
+    embedding_model: Optional[str] = None,
+    embedding_provider: Optional[str] = None,
 ) -> None:
+    global _project_reindex_owner
     from app.services.project_rag_service import (
         bump_project_reindex_generation,
         current_project_reindex_generation,
@@ -203,18 +240,29 @@ async def _project_reindex_all_bg(
         if gen != current_project_reindex_generation():
             logger.info("[REINDEX project ALL] пропуск: поколение устарело до старта")
             return
+        _project_reindex_owner = (owner_user_id or "").strip().lower() or None
+        logger.info(
+            "[REINDEX project] лок взят: owner=%s (поиск %s)",
+            _project_reindex_owner or "*",
+            "заблокирован" if _project_reindex_owner is None else "работает",
+        )
         try:
             res = await svc.reindex_all_projects(
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap,
                 chunking_strategy=chunking_strategy,
                 generation=gen,
+                owner_user_id=owner_user_id,
+                model=embedding_model,
+                provider=embedding_provider,
             )
             logger.info(
                 "[REINDEX project ALL] фоновая перечанкировка завершена: %s", res
             )
         except Exception:
             logger.exception("[REINDEX project ALL] фоновая перечанкировка упала")
+        finally:
+            _project_reindex_owner = None
 
 @router.post("/reindex")
 async def project_rag_reindex_all(
@@ -222,17 +270,26 @@ async def project_rag_reindex_all(
     background: BackgroundTasks,
     svc: ProjectRagService = Depends(get_project_rag_service),
 ):
-    """Перечанкировать ВСЕ проекты В ФОНЕ. Отвечает сразу."""
+    """Перечанкировать проекты В ФОНЕ.
+
+    С owner_user_id — только документы пользователя.
+    Без фильтра — все проекты (кластерный путь после смены dim).
+    """
     background.add_task(
         _project_reindex_all_bg,
         svc,
         body.chunk_size,
         body.chunk_overlap,
         body.chunking_strategy,
+        body.owner_user_id,
+        body.embedding_model,
+        body.embedding_provider,
     )
-    return {"ok": True, "status": "started"}
-
+    return {"ok": True, "status": "started", "owner_user_id": body.owner_user_id}
 
 @router.get("/reindex/status")
 async def project_rag_reindex_status():
-    return {"reindexing": _project_reindex_lock.locked()}
+    return {
+        "reindexing": _project_reindex_lock.locked(),
+        "owner_user_id": _project_reindex_owner,
+    }

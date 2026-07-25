@@ -9,20 +9,27 @@ import logging.config
 
 from app.core.config import settings
 from app.api import router as api_router
-from app.dependencies.rag_models_handler import get_rag_models_handler, cleanup_rag_models_handler, get_last_rag_models_error
+from app.dependencies.rag_models_handler import (
+    get_rag_models_handler,
+    cleanup_rag_models_handler,
+    get_last_rag_models_error,
+)
 
-logging.config.dictConfig({
-    "version": 1,
-    "formatters": {"default": {"format": settings.logging.format}},
-    "handlers": {
-        "console": {
-            "class": "logging.StreamHandler",
-            "formatter": "default",
-            "level": settings.logging.level,
-        }
-    },
-    "root": {"handlers": ["console"], "level": settings.logging.level},
-})
+logging.config.dictConfig(
+    {
+        "version": 1,
+        "disable_existing_loggers": False,
+        "formatters": {"default": {"format": settings.logging.format}},
+        "handlers": {
+            "console": {
+                "class": "logging.StreamHandler",
+                "formatter": "default",
+                "level": settings.logging.level,
+            }
+        },
+        "root": {"handlers": ["console"], "level": settings.logging.level},
+    }
+)
 logger = logging.getLogger(__name__)
 
 
@@ -78,7 +85,9 @@ async def log_requests(request: Request, call_next):
             body = await request.body()
             if body and "application/json" in (request.headers.get("content-type") or ""):
                 try:
-                    logger.info(f"Request {request_id}: body=%s", json.dumps(json.loads(body), ensure_ascii=False)[:500])
+                    logger.info(
+                        f"Request {request_id}: body=%s", json.dumps(json.loads(body), ensure_ascii=False)[:500]
+                    )
                 except Exception:
                     pass
         except Exception as e:

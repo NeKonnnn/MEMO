@@ -50,7 +50,15 @@ class PostgreSQLConnection:
             async with self.pool.acquire() as conn:
                 await conn.execute("SELECT 1")
                 await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
-            logger.info("PostgreSQL (SVC-RAG): подключено")
+                _pgv = await conn.fetchval(
+                    "SELECT extversion FROM pg_extension WHERE extname = 'vector'"
+                )
+                _pg = await conn.fetchval("SHOW server_version")
+            logger.info(
+                "PostgreSQL (SVC-RAG): подключено (postgres=%s, pgvector=%s)",
+                _pg,
+                _pgv,
+            )
             return True
         except Exception as e:
             logger.error("PostgreSQL (SVC-RAG): ошибка подключения: %s", e)

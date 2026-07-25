@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from backend.app_state import minio_client, rag_client, get_rag_chunk_index_params, settings
 from backend.auth.jwt_handler import get_current_user
 from backend.rag_query.semantic_cache import bump_rag_semantic_cache
+from backend.services.user_rag_settings import chunk_params_from_rag_settings, get_user_rag_settings
 from backend.settings.logging import get_logger
 from backend.settings.logging.errors import logged_suppress
 from backend.settings.service_toggles import is_service_enabled, require_service
@@ -96,15 +97,22 @@ async def project_rag_upload(
                     logger.exception("MinIO загрузка project-rag")
                     raise HTTPException(status_code=500, detail=f"MinIO: {e}") from e
         try:
-            # Project RAG: UI-стратегия чанкования применяется
-            chunk_params = get_rag_chunk_index_params()
+            # Project RAG: UI-стратегия чанкования из персональных настроек пользователя
+            user_id = str(current_user.get("user_id") or "").strip()
+            user_rag = await get_user_rag_settings(user_id) if user_id else {}
+            chunk_params = chunk_params_from_rag_settings(user_rag) if user_rag else get_rag_chunk_index_params()
+            from backend.services.user_rag_settings import (
+                embedding_fields_from_rag_settings,
+            )
             result = await rag_client.project_rag_upload_document(
                 file_bytes=content,
                 filename=fn,
                 project_id=project_id,
                 minio_object=file_object_name,
                 minio_bucket=project_bucket if file_object_name else None,
+                owner_user_id=user_id or None,
                 **chunk_params,
+                **embedding_fields_from_rag_settings(user_rag),
             )
         except Exception as e:
             if file_object_name and project_bucket:

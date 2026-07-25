@@ -19,6 +19,8 @@ import {
 import { incrementTabNotification } from '../utils/tabNotifications';
 import { getMcpToolIdsForChat } from '../mcp/selectionStorage';
 import type { McpToolCallRecord } from '../mcp/types';
+import { extractSkillIds } from '../utils/skillMentions';
+import { getActiveSkillIds } from '../utils/skillSelectionStorage';
 import { getApiUrl } from '../config/api';
 import { isLikelyImageGenerationPrompt } from '../utils/imageGenerationPrompt';
 import { readSelectedImageGenPresetId } from '../utils/imageGenerationPresets';
@@ -171,6 +173,23 @@ export function SocketProvider({ children }: { children: ReactNode }) {
   const mcpToolCallsRef = useRef<McpToolCallRecord[]>([]);
 
   const resolveMcpToolIds = (chatId: string): string[] => getMcpToolIdsForChat(chatId);
+
+  /** Mentions `$` + выбранные в меню «Инструменты → Skills». */
+  const resolveSkillIds = (message: string): string[] => {
+    const fromMention = extractSkillIds(message);
+    const fromMenu = getActiveSkillIds();
+    if (!fromMention.length && !fromMenu.length) return [];
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const id of [...fromMenu, ...fromMention]) {
+      const s = String(id || '').trim();
+      if (s && !seen.has(s)) {
+        seen.add(s);
+        out.push(s);
+      }
+    }
+    return out;
+  };
 
   const normalizeRagStrategy = (raw: string | null): string => {
     const s = (raw || 'auto').trim().toLowerCase();
@@ -1231,6 +1250,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
     const project = projectId ? getProjectById(projectId) : null;
 
     // Отправляем сообщение через Socket.IO
+    const skillIds = resolveSkillIds(message);
     const messageData = {
       message,
       streaming,
@@ -1247,6 +1267,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
       project_instructions: project?.instructions || null,
       model_comparison_enabled: Boolean(expectMultiLlm),
       enable_thinking: resolveEnableThinking(),
+      skill_ids: skillIds.length ? skillIds : undefined,
       // Inline-вложения (без RAG/эмбединга)
       inline_context: inlineData?.inline_context || undefined,
       inline_images: inlineData?.inline_images?.length ? inlineData.inline_images : undefined,
@@ -1340,6 +1361,10 @@ export function SocketProvider({ children }: { children: ReactNode }) {
       project_instructions: project?.instructions || null,
       model_comparison_enabled: true,
       enable_thinking: resolveEnableThinking(),
+      skill_ids: (() => {
+        const ids = resolveSkillIds(userMessage);
+        return ids.length ? ids : undefined;
+      })(),
       request_id: requestId,
       tool_ids: resolveMcpToolIds(chatId),
     });
@@ -1412,6 +1437,10 @@ export function SocketProvider({ children }: { children: ReactNode }) {
       agent_id: agentIdForChat,
       rag_strategy: ragStrategy,
       enable_thinking: resolveEnableThinking(),
+      skill_ids: (() => {
+        const ids = resolveSkillIds(userMessage);
+        return ids.length ? ids : undefined;
+      })(),
       request_id: requestId,
       tool_ids: resolveMcpToolIds(chatId),
       image_gen_preset_id: readSelectedImageGenPresetId() || undefined,

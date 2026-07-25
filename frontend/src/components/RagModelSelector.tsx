@@ -167,7 +167,7 @@ export default function RagModelSelector({
     const prevPath = selectedPath;
     if (kind === 'embedding') {
       const ok = window.confirm(
-        'Смена embedding-модели сохраняется в ваших настройках и загружает модель в сервис. Векторный корпус может потребовать переиндексации. Продолжить?',
+        'Смена embedding-модели загрузит её для поиска/индексации и переиндексирует только ваши документы в проектах и KB агентов (где вы владелец). В настройках других пользователей выбор не меняется. Memory RAG не затрагивается. Модели с другой размерностью (dim) — только через ConfigMap. Продолжить?',
       );
       if (!ok) return;
     }
@@ -188,18 +188,13 @@ export default function RagModelSelector({
         );
       }
       setSelectedPath(modelPath);
-      const migrated = Boolean(data?.schema?.migrated);
-      const cleared = Number(data?.schema?.cleared_rows || 0);
-      if (kind === 'embedding' && migrated) {
-        showNotification(
-          'warning',
-          cleared > 0
-            ? `Модель сохранена и загружена (dim=${data?.embedding_dim ?? '?'}). Старые векторы очищены — загрузите документы заново.`
-            : `Модель сохранена. Схема БД обновлена под dim=${data?.embedding_dim ?? '?'}.`,
-        );
-      } else {
-        showNotification('success', 'Модель сохранена в ваших настройках');
-      }
+      const reindexed = Boolean(data?.reindexed);
+      showNotification(
+        'success',
+        reindexed
+          ? 'Модель загружена. Запущена переиндексация ваших документов (без Memory RAG).'
+          : 'Модель RAG успешно загружена',
+      );
       handleClose();
       onModelSelect?.(modelPath);
       await loadModels();

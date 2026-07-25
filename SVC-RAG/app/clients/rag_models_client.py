@@ -8,7 +8,6 @@ from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
 
-
 class RagModelsClient:
     """Вызовы эмбеддинга и реранкера в SVC-RAG-MODELS."""
 
@@ -20,19 +19,41 @@ class RagModelsClient:
         self.timeout = timeout if timeout is not None else cfg.timeout
         self.embed_batch_size = max(1, int(getattr(cfg, "embed_batch_size", 24) or 24))
 
-    async def _ensure_db_dim(self, dim: int) -> None:
-        """Один раз на смену размерности — привести pgvector к модели."""
+    async def _ensure_db_dim(self, dim: int, *, allow_migrate: bool = True) -> None:
+        """Привести pgvector к размерности модели — ТОЛЬКО для кластерной модели.
+
+        allow_migrate=False (когда модель названа явно) миграцию НЕ запускает:
+        migrate_vector_tables делает TRUNCATE всех таблиц векторов, то есть стёр бы
+        корпус всех пользователей из-за одного запроса чужой моделью.
+        """
         if dim < 1:
             return
         if RagModelsClient._last_ensured_dim == dim:
+            return
+        if not allow_migrate:
+            logger.warning(
+                "embed: получен вектор dim=%s при явно указанной модели — "
+                "миграцию схемы НЕ запускаем (защита от TRUNCATE чужих векторов)",
+                dim,
+            )
             return
         from app.dependencies import ensure_embedding_dim
 
         await ensure_embedding_dim(dim)
         RagModelsClient._last_ensured_dim = dim
 
-    async def embed(self, texts: List[str]) -> List[List[float]]:
-        """Получить эмбеддинги для списка текстов. Один текст — один вектор."""
+    async def embed(
+        self,
+        texts: List[str],
+        model: Optional[str] = None,
+        kind: Optional[str] = None,
+    ) -> List[List[float]]:
+        """Эмбеддинги для списка текстов. Один текст — один вектор.
+
+        model — какой моделью считать (None = кластерная по умолчанию).
+        kind — "query" для запроса, "document" для чанков: включает префиксы
+        у асимметричных моделей (FRIDA). Моделей без промптов не касается.
+        """
         if not texts:
             return []
         url = f"{self.base_url}/v1/embed"
@@ -48,23 +69,43 @@ class RagModelsClient:
                         start + len(batch),
                         len(texts),
                     )
-                resp = await client.post(url, json={"texts": batch})
+                payload: dict = {"texts": batch}
+                if model:
+                    payload["model"] = model
+                if kind:
+                    payload["kind"] = kind
+                resp = await client.post(url, json=payload)
                 resp.raise_for_status()
                 data = resp.json()
                 part = data.get("embeddings", [])
                 if len(part) != len(batch):
-                    raise ValueError(f"Число эмбеддингов ({len(part)}) не совпадает с размером батча ({len(batch)})")
+                    raise ValueError(
+                        f"Число эмбеддингов ({len(part)}) не совпадает с размером батча ({len(batch)})"
+                    )
                 if part and part[0]:
-                    await self._ensure_db_dim(len(part[0]))
+                    await self._ensure_db_dim(
+                        len(part[0]), allow_migrate=model is None
+                    )
                 all_embeddings.extend(part)
         return all_embeddings
 
-    async def embed_single(self, text: str) -> List[float]:
+    async def embed_single(
+        self,
+        text: str,
+        model: Optional[str] = None,
+        kind: Optional[str] = None,
+    ) -> List[float]:
         """Один текст — один вектор."""
-        vectors = await self.embed([text])
+        vectors = await self.embed([text], model=model, kind=kind)
         return vectors[0] if vectors else []
 
-    async def rerank(self, query: str, passages: List[str], top_k: int = 20) -> List[tuple[int, float]]:
+    async def rerank(
+        self,
+        query: str,
+        passages: List[str],
+        top_k: int = 20,
+        model: Optional[str] = None,
+    ) -> List[tuple[int, float]]:
         """
         Реранк пассажей по релевантности к запросу.
         Возвращает список пар (индекс в passages, скор).
@@ -72,7 +113,13 @@ class RagModelsClient:
         if not passages:
             return []
         url = f"{self.base_url}/v1/rerank"
-        payload = {"query": query, "passages": passages, "top_k": min(top_k, len(passages))}
+        payload = {
+            "query": query,
+            "passages": passages,
+            "top_k": min(top_k, len(passages)),
+        }
+        if model:
+            payload["model"] = model
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             resp = await client.post(url, json=payload)
             resp.raise_for_status()

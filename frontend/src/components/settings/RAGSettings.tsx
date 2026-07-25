@@ -37,6 +37,7 @@ import {
 } from '../../constants/menuStyles';
 import MemoryRagLibraryModal from '../MemoryRagLibraryModal';
 import RagModelSelector from '../RagModelSelector';
+import { useAuth } from '../../contexts/AuthContext';
 import {
   MODEL_SETTINGS_RESET_BUTTON_SX,
   MODEL_SETTINGS_LABEL_WRAPPER_SX,
@@ -88,6 +89,11 @@ const RAG_CHUNKING_STORAGE_KEY = 'rag_chunking_strategy';
 const DEFAULT_RAG_SYSTEM_PROMPT =
   'Используй только предоставленный контекст. Если ответа нет в тексте, скажи «Не знаю». Не придумывай факты.';
 
+function ragStorageKey(base: string, userId?: string | null): string {
+  const uid = (userId || '').trim().toLowerCase();
+  return uid ? `${base}:${uid}` : base;
+}
+
 function normalizeStoredStrategy(raw: string | null): RAGStrategy {
   const s = (raw || 'auto').trim().toLowerCase();
   if (s === 'reranking') return 'hybrid';
@@ -114,14 +120,13 @@ interface RAGSettingsProps {
 export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsProps = {}) {
   const theme = useTheme();
   const isDarkMode = isDarkModeProp ?? theme.palette.mode === 'dark';
+  const { user } = useAuth();
+  const ragUserId = user?.user_id || user?.username || '';
   const dropdownItemSx = useMemo(() => getDropdownItemSx(isDarkMode), [isDarkMode]);
   const dropdownTriggerSx = useMemo(() => getDropdownTriggerButtonSx(isDarkMode), [isDarkMode]);
   const dropdownTriggerTextSx = useMemo(() => getDropdownTriggerTextSx(isDarkMode), [isDarkMode]);
   const dropdownChevronSx = useMemo(() => getDropdownChevronSx(isDarkMode), [isDarkMode]);
-  const [selectedStrategy, setSelectedStrategy] = useState<RAGStrategy>(() => {
-    const saved = typeof localStorage !== 'undefined' ? localStorage.getItem(RAG_STRATEGY_STORAGE_KEY) : null;
-    return normalizeStoredStrategy(saved);
-  });
+  const [selectedStrategy, setSelectedStrategy] = useState<RAGStrategy>('auto');
   const [isLoading, setIsLoading] = useState(false);
   const [strategyPopoverAnchor, setStrategyPopoverAnchor] = useState<HTMLElement | null>(null);
   const [chunkingPopoverAnchor, setChunkingPopoverAnchor] = useState<HTMLElement | null>(null);
@@ -131,10 +136,7 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
   const [ragMultiQueryEnabled, setRagMultiQueryEnabled] = useState(false);
   const [ragHydeEnabled, setRagHydeEnabled] = useState(false);
   const [ragChatTopK, setRagChatTopK] = useState(5);
-  const [ragChunkingStrategy, setRagChunkingStrategy] = useState<ChunkingStrategy>(() => {
-    const saved = typeof localStorage !== 'undefined' ? localStorage.getItem(RAG_CHUNKING_STORAGE_KEY) : null;
-    return normalizeChunkingStrategy(saved);
-  });
+  const [ragChunkingStrategy, setRagChunkingStrategy] = useState<ChunkingStrategy>('hierarchical');
   const [ragChunkOverlap, setRagChunkOverlap] = useState(200);
   const [ragChunkSize, setRagChunkSize] = useState(1000);
   const [ragSimilarityThreshold, setRagSimilarityThreshold] = useState(0);
@@ -148,24 +150,22 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
   const { showNotification } = useAppActions();
 
   useEffect(() => {
-    loadRAGSettings();
-  }, []);
+    isInitializedRef.current = false;
+    void loadRAGSettings();
+  }, [ragUserId]);
 
   // Автосохранение настроек RAG после первичной загрузки.
   useEffect(() => {
     if (!isInitializedRef.current) return;
 
-    // Обновляем localStorage сразу, чтобы следующий отправленный запрос
-    // (SocketContext) использовал выбранную стратегию без ожидания таймера.
+    // Кэш стратегии на пользователя — SocketContext читает localStorage.
     if (typeof localStorage !== 'undefined') {
-      localStorage.setItem(RAG_STRATEGY_STORAGE_KEY, selectedStrategy);
+      localStorage.setItem(ragStorageKey(RAG_STRATEGY_STORAGE_KEY, ragUserId), selectedStrategy);
     }
 
     const timeoutId = setTimeout(() => {
-      // Не перечитываем настройки сразу после PUT: при ошибке/старой версии
-      // backend это возвращало прежнее ``auto`` и визуально отменяло выбор.
       void saveRAGSettings();
-    }, 300); // Небольшая задержка для "дребезга" изменений
+    }, 300);
 
     return () => clearTimeout(timeoutId);
   }, [
@@ -182,6 +182,7 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
     ragRerankingEnabled,
     ragRerankTopN,
     ragSystemPrompt,
+    ragUserId,
   ]);
 
   const loadRAGSettings = async () => {
@@ -193,17 +194,11 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
       if (response.ok) {
         const data = await response.json();
         if (data.strategy) {
-          // Для чата стратегия является пользовательским выбором этого браузера:
-          // SocketContext тоже читает её из localStorage. Не затираем её старым
-          // серверным ``auto`` при открытии настроек или временной ошибке сохранения.
-          const localStrategy =
-            typeof localStorage !== 'undefined'
-              ? localStorage.getItem(RAG_STRATEGY_STORAGE_KEY)
-              : null;
-          const next = normalizeStoredStrategy(localStrategy ?? String(data.strategy));
+          // Источник истины — Postgres пользователя, не общий localStorage браузера.
+          const next = normalizeStoredStrategy(String(data.strategy));
           setSelectedStrategy(next);
           if (typeof localStorage !== 'undefined') {
-            localStorage.setItem(RAG_STRATEGY_STORAGE_KEY, next);
+            localStorage.setItem(ragStorageKey(RAG_STRATEGY_STORAGE_KEY, ragUserId), next);
           }
         }
         if (typeof data.agentic_rag_enabled === 'boolean') {
@@ -226,7 +221,7 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
           const strategy = normalizeChunkingStrategy(data.rag_chunking_strategy);
           setRagChunkingStrategy(strategy);
           if (typeof localStorage !== 'undefined') {
-            localStorage.setItem(RAG_CHUNKING_STORAGE_KEY, strategy);
+            localStorage.setItem(ragStorageKey(RAG_CHUNKING_STORAGE_KEY, ragUserId), strategy);
           }
         }
         if (typeof data.rag_chunk_overlap === 'number' && Number.isFinite(data.rag_chunk_overlap)) {
@@ -252,7 +247,6 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
       }
     } catch (error) {
       console.error('Ошибка загрузки настроек RAG:', error);
-      // Оставляем текщее значение (локальное), если сервер недоступен
     } finally {
       setIsLoading(false);
       isInitializedRef.current = true;
@@ -310,7 +304,7 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
       }
       skipNextRagSaveToastRef.current = true;
       if (typeof localStorage !== 'undefined') {
-        localStorage.setItem(RAG_STRATEGY_STORAGE_KEY, 'auto');
+        localStorage.setItem(ragStorageKey(RAG_STRATEGY_STORAGE_KEY, ragUserId), 'auto');
       }
       await loadRAGSettings();
       showNotification('success', 'Настройки RAG восстановлены по умолчанию');
@@ -467,6 +461,14 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
               </IconButton>
             </Tooltip>
           </Typography>
+          <Alert severity="info" sx={{ mb: 2 }}>
+            Настройки ниже персональные (PostgreSQL по user_id): проекты и KB агентов, где вы
+            владелец. Выбор embedding/reranker тоже ваш в UI: при смене модели переиндексируются
+            только ваши документы, у других пользователей ничего не меняется. Глобальное хранилище
+            («Открыть базу данных») — через ConfigMap/env, из UI для неё меняется только
+            стратегия поиска. Рыжая плашка перечанковки показывается только вам при вашем
+            scoped-rechunk (не всем пользователям).
+          </Alert>
 
           <List sx={{ p: 0 }}>
             <ListItem
@@ -507,7 +509,7 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
                     </Tooltip>
                   </Box>
                 }
-                secondary="Библиотека памяти всегда индексируется универсальным чанкером; выбор стратегии чанкования ниже на неё не влияет."
+                secondary="Библиотека памяти индексируется и ищется по ConfigMap/env (RAG_MEMORY_*). Из UI на неё влияет только стратегия поиска."
                 primaryTypographyProps={{
                   variant: 'body1',
                   fontWeight: 500,
@@ -540,7 +542,7 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
                 <Box sx={RAG_MODEL_SELECTOR_ROW_SX}>
                   {ragModelRowLabel(
                     'Модель эмбеддингов',
-                    'Преобразует текст документов и запросов в векторы для семантического поиска в RAG.'
+                    'Ваши документы и запросы считаются этой моделью. Выбор сохраняется вам в Postgres, у других пользователей ничего не меняется; ваши документы переиндексируются в фоне. Библиотека памяти не затрагивается — у неё своя модель из ConfigMap.'
                   )}
                   <Box sx={{ flexShrink: 0, width: { xs: '100%', sm: 'auto' } }}>
                     <RagModelSelector
@@ -642,7 +644,10 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
                           // Обновляем сразу, чтобы следующий запрос (SocketContext) не успел
                           // прочитать "старое" значение.
                           if (typeof localStorage !== 'undefined') {
-                            localStorage.setItem(RAG_STRATEGY_STORAGE_KEY, strategy);
+                            localStorage.setItem(
+                              ragStorageKey(RAG_STRATEGY_STORAGE_KEY, ragUserId),
+                              strategy,
+                            );
                           }
                           setSelectedStrategy(strategy);
                           setStrategyPopoverAnchor(null);

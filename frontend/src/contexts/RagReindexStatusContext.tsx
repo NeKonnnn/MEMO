@@ -4,7 +4,6 @@ import React, {
   useContext,
   useEffect,
   useMemo,
-  useRef,
   useState,
   type ReactNode,
 } from 'react';
@@ -64,22 +63,14 @@ export function RagReindexStatusProvider({ children }: { children: ReactNode }) 
   const location = useLocation();
   const [status, setStatus] = useState<RagReindexStatusPayload | null>(null);
 
-  // Нельзя класть state.chats в deps интервала: при стриминге чат обновляется
-  // каждый чанк → эффект перезапускается → шквал /reindex/status в логах.
-  const chatsRef = useRef(state.chats);
-  const currentChatIdRef = useRef(state.currentChatId);
-  const pathnameRef = useRef(location.pathname);
-  chatsRef.current = state.chats;
-  currentChatIdRef.current = state.currentChatId;
-  pathnameRef.current = location.pathname;
-
-  const currentChatProjectId =
-    state.chats.find((c) => c.id === state.currentChatId)?.projectId ?? null;
-
   const pollProjectId = useMemo(() => {
     const routeProjectId = projectIdFromPathname(location.pathname);
-    return routeProjectId ?? currentChatProjectId;
-  }, [location.pathname, currentChatProjectId]);
+    if (routeProjectId) return routeProjectId;
+    const chat = state.chats.find((c) => c.id === state.currentChatId);
+    return chat?.projectId ?? null;
+  }, [location.pathname, state.chats, state.currentChatId]);
+
+  const pollAgentId = useMemo(() => readActiveAgentId(), [location.pathname, state.currentChatId]);
 
   useEffect(() => {
     let interval: ReturnType<typeof setInterval> | undefined;
@@ -102,8 +93,8 @@ export function RagReindexStatusProvider({ children }: { children: ReactNode }) 
 
       const poll = async () => {
         const activeAgentId = readActiveAgentId();
-        const routeProjectId = projectIdFromPathname(pathnameRef.current);
-        const chat = chatsRef.current.find((c) => c.id === currentChatIdRef.current);
+        const routeProjectId = projectIdFromPathname(location.pathname);
+        const chat = state.chats.find((c) => c.id === state.currentChatId);
         const activeProjectId = routeProjectId ?? chat?.projectId ?? null;
         const params = new URLSearchParams();
         if (activeAgentId != null) {
@@ -142,7 +133,7 @@ export function RagReindexStatusProvider({ children }: { children: ReactNode }) 
       cancelled = true;
       if (interval) clearInterval(interval);
     };
-  }, [location.pathname, state.currentChatId, pollProjectId]);
+  }, [location.pathname, state.chats, state.currentChatId, pollProjectId, pollAgentId]);
 
   const effectiveStatus = status ?? defaultStatus;
   const blockMessage = ragReindexBlockMessage(effectiveStatus);

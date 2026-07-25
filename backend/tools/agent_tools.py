@@ -234,7 +234,10 @@ def retrieve_rag_context(request: str) -> str:
             # у агента нет своих документов -> по KB ничего не ищем (без утечки общей БЗ)
         if "memory" in stores:
             try:
-                hits = await rag_client.memory_rag_search(query, k=k, strategy=strategy)
+                from backend.services.memory_rag_env import get_memory_rag_chat_top_k
+
+                mem_k = get_memory_rag_chat_top_k()
+                hits = await rag_client.memory_rag_search(query, k=mem_k, strategy=strategy)
                 for c, s, doc_id, chunk_idx in hits:
                     results.append(
                         {
@@ -273,4 +276,14 @@ class AgentTools:
     @staticmethod
     def get_tools():
         """Получение всех инструментов агентов"""
-        return [search_documents, retrieve_rag_context]
+        tools = [search_documents, retrieve_rag_context]
+        try:
+            from backend.tools.skill_tools import view_skill
+            from backend.tools.tool_context import get_tool_context
+
+            ctx = get_tool_context() or {}
+            if ctx.get("__skill_ids__"):
+                tools.append(view_skill)
+        except Exception:
+            pass
+        return tools
