@@ -533,9 +533,15 @@ WHERE {where_clause}{rating_filter}
                     params.append(json.dumps(agent_data.tools))
                     param_num += 1
                 if agent_data.is_public is not None:
-                    update_fields.append(f"is_public = ${param_num}")
-                    params.append(agent_data.is_public)
-                    param_num += 1
+                    # Публикация в галерею — только владелец; у редактора поле игнорируем
+                    if permission == AGENT_PERMISSION_OWNER:
+                        update_fields.append(f"is_public = ${param_num}")
+                        params.append(agent_data.is_public)
+                        param_num += 1
+                    else:
+                        logger.info(
+                            f"Игнорируем смену is_public от редактора: user={author_id}, agent={agent_id}"
+                        )
                 update_fields.append(f"updated_at = ${param_num}")
                 params.append(datetime.utcnow())
                 param_num += 1

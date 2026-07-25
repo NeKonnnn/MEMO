@@ -94,6 +94,7 @@ import ChatGearMcpPanel from '../components/ChatGearMcpPanel';
 import ChatGearSkillsPanel from '../components/ChatGearSkillsPanel';
 import VoiceChatDialog from '../components/VoiceChatDialog';
 import AgentConstructorPanel from '../components/AgentConstructorPanel';
+import GalleryNavButton from '../components/GalleryNavButton';
 import AgentSelector from '../components/AgentSelector';
 import ChatInputStatusCluster from '../components/ChatInputStatusCluster';
 import ChatContextUsagePopover from '../components/ChatContextUsagePopover';
@@ -172,7 +173,6 @@ import {
 import SidebarRailMenuGlyph from '../components/SidebarRailMenuGlyph';
 import {
   SidebarRailTranscribeIcon,
-  SidebarRailPromptsIcon,
   SidebarRailAgentIcon,
 } from '../constants/sidebarRailIcons';
 
@@ -1873,7 +1873,6 @@ export default function UnifiedChatPage({
     inlineAttachments,
     availableModels,
     configuredContextSize: state.modelSettings.context_size,
-    configuredOutputTokens: state.modelSettings.output_tokens,
     loadedModelCtx: state.currentModel?.n_ctx,
     isMultiLlmMode,
     multiLlmModelPaths: multiLlmSelectedPaths,
@@ -5076,18 +5075,7 @@ export default function UnifiedChatPage({
                   </Box>
                 </Tooltip>
               </ListItem>
-              <ListItem disablePadding sx={{ mb: 0.5, display: 'block' }}>
-                <Tooltip title="Галерея промптов" placement="left">
-                  <Box component="span" sx={{ display: 'flex', width: '100%', justifyContent: 'center' }}>
-                    <ListItemButton
-                      onClick={() => navigate('/prompts')}
-                      sx={getSidebarRailCollapsedListItemButtonSx(isDarkMode)}
-                    >
-                      <SidebarRailPromptsIcon sx={SIDEBAR_LIST_ICON_SX} />
-                    </ListItemButton>
-                  </Box>
-                </Tooltip>
-              </ListItem>
+              <GalleryNavButton variant="collapsed" isDarkMode={isDarkMode} />
               <ListItem disablePadding sx={{ mb: 0.5, display: 'block' }}>
                 <Tooltip title="Skills" placement="left">
                   <Box component="span" sx={{ display: 'flex', width: '100%', justifyContent: 'center' }}>
@@ -5349,9 +5337,10 @@ export default function UnifiedChatPage({
                   </Button>
                 </Box>
               )}
+              <GalleryNavButton variant="expanded" isDarkMode={isDarkMode} />
               <ListItem disablePadding sx={{ mb: 0.5 }}>
                 <ListItemButton
-                  onClick={() => navigate('/prompts')}
+                  onClick={() => navigate('/skills')}
                   sx={{
                     ...SIDEBAR_CHAT_ROW_LIST_ITEM_BUTTON_SX,
                     color: 'white',
@@ -5368,40 +5357,13 @@ export default function UnifiedChatPage({
                       '& .MuiSvgIcon-root': { fontSize: '1.375rem' },
                     }}
                   >
-                    <SidebarRailPromptsIcon />
-                  </ListItemIcon>
-                  <ListItemText
-                    primary="Галерея промптов"
-                    primaryTypographyProps={{
-                      sx: { fontSize: '0.8rem', fontWeight: 400, color: '#ffffff' },
-                    }}
-                  />
-                </ListItemButton>
-              </ListItem>
-              <ListItem disablePadding>
-                <ListItemButton
-                  onClick={() => navigate('/skills')}
-                  sx={{
-                    borderRadius: 1,
-                    color: isDarkMode ? 'white' : '#333',
-                    py: 1.25,
-                    '&:hover': {
-                      backgroundColor: isDarkMode ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)',
-                    },
-                  }}
-                >
-                  <ListItemIcon
-                    sx={{
-                      color: isDarkMode ? 'white' : '#333',
-                      minWidth: 'auto',
-                      mr: `${SIDEBAR_LIST_ICON_TO_TEXT_GAP_PX}px`,
-                    }}
-                  >
                     <SkillsNavIcon />
                   </ListItemIcon>
                   <ListItemText
                     primary="Skills"
-                    primaryTypographyProps={{ fontSize: '0.9rem' }}
+                    primaryTypographyProps={{
+                      sx: { fontSize: '0.8rem', fontWeight: 400, color: '#ffffff' },
+                    }}
                   />
                 </ListItemButton>
               </ListItem>

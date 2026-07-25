@@ -13,6 +13,7 @@ import DocumentsPage from './pages/DocumentsPage';
 // import SettingsPage from './pages/SettingsPage'; // Удалено - теперь используется модальное окно
 import HistoryPage from './pages/HistoryPage';
 import PromptGalleryPage from './pages/PromptGalleryPage';
+import AgentGalleryPage from './pages/AgentGalleryPage';
 import SkillsPage from './pages/SkillsPage';
 import ReleaseNotesPage from './pages/ReleaseNotesPage';
 import ProjectPage from './pages/ProjectPage';
@@ -326,6 +327,7 @@ function App() {
                             <Route path="/search" element={<UnifiedChatPage isDarkMode={isDarkMode} sidebarOpen={sidebarOpen} sidebarHidden={sidebarHidden} />} />
                             <Route path="/creations" element={<CreationsPage />} />
                             <Route path="/prompts" element={<PromptGalleryPage />} />
+                            <Route path="/agents-gallery" element={<AgentGalleryPage />} />
                             <Route path="/skills" element={<SkillsPage />} />
                             <Route path="/docs/astrachat-release-1.0" element={<ReleaseNotesPage />} />
                             <Route path="/docs/astrachat-release-1.0.html" element={<ReleaseNotesPage />} />

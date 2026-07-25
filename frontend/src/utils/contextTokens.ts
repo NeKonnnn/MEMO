@@ -312,7 +312,6 @@ export const CONTEXT_SEGMENT_COLORS: Record<string, string> = {
   attachments: '#78909c',
   current_user: '#0288d1',
   generation: '#6d4c41',
-  output_reserve: '#8d6e63',
 };
 
 export const CONTEXT_SEGMENT_ORDER: string[] = [
@@ -326,7 +325,6 @@ export const CONTEXT_SEGMENT_ORDER: string[] = [
   'attachments',
   'current_user',
   'generation',
-  'output_reserve',
 ];
 
 export interface ContextFeatureFlags {
@@ -341,7 +339,6 @@ export function mergeContextUsageWithOverhead(
   overheadSegments: ContextUsageSegment[],
   maxTokens: number,
   features: ContextFeatureFlags = {},
-  outputTokensReserve = 0,
 ): ChatContextUsage {
   const overheadById = new Map(overheadSegments.map((s) => [s.id, s]));
 
@@ -382,17 +379,6 @@ export function mergeContextUsageWithOverhead(
       showWhenEmpty: true,
     },
   ];
-
-  const reserve = Math.max(0, outputTokensReserve || 0);
-  if (reserve > 0) {
-    convSegments.push({
-      id: 'output_reserve',
-      label: 'Резерв ответа (max_tokens)',
-      tokens: reserve,
-      active: true,
-      showWhenEmpty: true,
-    });
-  }
 
   const overheadIds = ['context_instructions', 'project', 'agent', 'rag_rules', 'mcp_tools'];
   const overheadOrdered: ContextUsageSegment[] = overheadIds.map((id) => {
@@ -465,7 +451,7 @@ export function mergeContextUsageWithOverhead(
     conversation.ragContentTokens +
     conversation.attachmentTokens;
 
-  const currentTokens = overheadActive + conversationTotal + reserve;
+  const currentTokens = overheadActive + conversationTotal;
   const safeMax = Math.max(1, maxTokens);
   const percent = Math.round((currentTokens / safeMax) * 100);
 

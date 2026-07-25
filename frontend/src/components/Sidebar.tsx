@@ -496,6 +496,9 @@ export default function Sidebar({ open, onToggle, isDarkMode, onToggleTheme, onH
       case 'prompts':
         navigate('/prompts');
         break;
+      case 'agents-gallery':
+        navigate('/agents-gallery');
+        break;
       case 'logout':
         logout();
         navigate('/login');

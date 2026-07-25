@@ -103,6 +103,7 @@ import { copyMcpToolIds, projectMcpChatKey } from '../mcp/selectionStorage';
 import { getApiUrl } from '../config/api';
 import { useTheme } from '@mui/material/styles';
 import AgentConstructorPanel from '../components/AgentConstructorPanel';
+import GalleryNavButton from '../components/GalleryNavButton';
 import {
   getProjectIconGlyphSx,
   getDropdownItemSx,
@@ -132,7 +133,6 @@ import {
 import SidebarRailMenuGlyph from '../components/SidebarRailMenuGlyph';
 import {
   SidebarRailTranscribeIcon,
-  SidebarRailPromptsIcon,
   SidebarRailAgentIcon,
 } from '../constants/sidebarRailIcons';
 import { getSidebarPanelBackground } from '../constants/sidebarPanelColor';
@@ -1547,18 +1547,7 @@ export default function ProjectPage() {
                     </Box>
                   </Tooltip>
                 </ListItem>
-                <ListItem disablePadding sx={{ mb: 0.5, display: 'block' }}>
-                  <Tooltip title="Галерея промптов" placement="left">
-                    <Box component="span" sx={{ display: 'flex', width: '100%', justifyContent: 'center' }}>
-                      <ListItemButton
-                        onClick={() => navigate('/prompts')}
-                        sx={getSidebarRailCollapsedListItemButtonSx(isDarkMode)}
-                      >
-                        <SidebarRailPromptsIcon sx={SIDEBAR_LIST_ICON_SX} />
-                      </ListItemButton>
-                    </Box>
-                  </Tooltip>
-                </ListItem>
+                <GalleryNavButton variant="collapsed" isDarkMode={isDarkMode} />
                 <ListItem disablePadding sx={{ mb: 0.5, display: 'block' }}>
                   <Tooltip title="Конструктор агента" placement="left">
                     <Box component="span" sx={{ display: 'flex', width: '100%', justifyContent: 'center' }}>
@@ -1688,35 +1677,7 @@ export default function ProjectPage() {
                   </ListItemButton>
                 </ListItem>
 
-                <ListItem disablePadding sx={{ mb: 0.5 }}>
-                  <ListItemButton
-                    onClick={() => navigate('/prompts')}
-                    sx={{
-                      ...SIDEBAR_CHAT_ROW_LIST_ITEM_BUTTON_SX,
-                      color: 'white',
-                      '&:hover': {
-                        backgroundColor: 'rgba(255,255,255,0.08)',
-                      },
-                    }}
-                  >
-                    <ListItemIcon
-                      sx={{
-                        color: '#ffffff',
-                        minWidth: 40,
-                        mr: `${SIDEBAR_LIST_ICON_TO_TEXT_GAP_PX}px`,
-                        '& .MuiSvgIcon-root': { fontSize: '1.375rem' },
-                      }}
-                    >
-                      <SidebarRailPromptsIcon />
-                    </ListItemIcon>
-                    <ListItemText
-                      primary="Галерея промптов"
-                      primaryTypographyProps={{
-                        sx: { fontSize: '0.8rem', fontWeight: 400, color: '#ffffff' },
-                      }}
-                    />
-                  </ListItemButton>
-                </ListItem>
+                <GalleryNavButton variant="expanded" isDarkMode={isDarkMode} />
 
                 <ListItem disablePadding sx={{ mb: 0.5 }}>
                   <ListItemButton

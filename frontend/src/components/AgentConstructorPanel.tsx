@@ -43,6 +43,8 @@ import {
   History as VersionIcon,
   Save as SaveIcon,
   Share as ShareIcon,
+  Public as PublicIcon,
+  PublicOff as PublicOffIcon,
   Description as FileIcon,
   PictureAsPdf as PdfIcon,
   TableChart as ExcelIcon,
@@ -58,6 +60,10 @@ import { getApiUrl, API_ENDPOINTS, getAuthFetchHeaders } from '../config/api';
 import { useAuth } from '../contexts/AuthContext';
 import { useAppActions } from '../contexts/AppContext';
 import { applyAgentModelAndSettings } from '../utils/applyAgentServer';
+import {
+  ASTRA_OPEN_AGENT_CONSTRUCTOR,
+  ASTRA_OPEN_AGENT_CONSTRUCTOR_ID_KEY,
+} from '../constants/hotkeys';
 import {
   DROPDOWN_CHEVRON_SX,
   getDropdownPopoverPaperSx,
@@ -274,15 +280,24 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
   const [agentPopoverAnchor, setAgentPopoverAnchor] = useState<HTMLElement | null>(null);
   const [categoryPopoverAnchor, setCategoryPopoverAnchor] = useState<HTMLElement | null>(null);
   const [shareDialogOpen, setShareDialogOpen] = useState(false);
+  const [isPublishing, setIsPublishing] = useState(false);
 
   const kbFileInputRef = useRef<HTMLInputElement>(null);
+  const selectedAgentIdRef = useRef<number | 'new'>(selectedAgentId);
+  selectedAgentIdRef.current = selectedAgentId;
+  const showNotificationRef = useRef(showNotification);
+  showNotificationRef.current = showNotification;
+  const tokenRef = useRef(token);
+  tokenRef.current = token;
+  /** Чтобы не перезагружать данные на каждый ре-рендер родителя, пока панель открыта. */
+  const bootstrappedOpenRef = useRef(false);
 
   // ─── Load agents ────────────────────────────────────────────────────────────
 
   const loadAgents = useCallback(async () => {
     setIsLoadingAgents(true);
     try {
-      const headers: HeadersInit = token ? { Authorization: `Bearer ${token}` } : {};
+      const headers: HeadersInit = tokenRef.current ? { Authorization: `Bearer ${tokenRef.current}` } : {};
       const [mineResp, sharedResp] = await Promise.all([
         fetch(getApiUrl('/api/agents/my/agents'), { headers }),
         fetch(getApiUrl('/api/agents/my/shared'), { headers }),
@@ -291,18 +306,49 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
       const shared: Agent[] = sharedResp.ok
         ? ((await sharedResp.json()).agents || []).map((a: Agent) => ({ ...a, is_shared_with_me: true }))
         : [];
-      const byId = new Map<number, Agent>();
-      for (const a of mine) byId.set(a.id, { ...a, my_permission: a.my_permission || 'owner' });
-      for (const a of shared) {
-        if (!byId.has(a.id)) byId.set(a.id, a);
-      }
-      setAgents(Array.from(byId.values()));
+      setAgents((prev) => {
+        const byId = new Map<number, Agent>();
+        for (const a of mine) byId.set(a.id, { ...a, my_permission: a.my_permission || 'owner' });
+        for (const a of shared) {
+          if (!byId.has(a.id)) byId.set(a.id, a);
+        }
+        // Не затирать агента, открытого из галереи (ещё не в «Мои» / shared)
+        const keepId = selectedAgentIdRef.current;
+        if (typeof keepId === 'number') {
+          const kept = prev.find((a) => a.id === keepId);
+          if (kept && !byId.has(keepId)) byId.set(keepId, kept);
+        }
+        return Array.from(byId.values());
+      });
     } catch (e) {
       // silent
     } finally {
       setIsLoadingAgents(false);
     }
-  }, [token]);
+  }, []);
+
+  /** Открыть агента из галереи / по id (подтянуть актуальные данные и роль). */
+  const selectExternalAgent = useCallback(async (agentId: number) => {
+    if (!Number.isFinite(agentId) || agentId <= 0) return;
+    try {
+      const headers: HeadersInit = tokenRef.current
+        ? { Authorization: `Bearer ${tokenRef.current}` }
+        : {};
+      const resp = await fetch(getApiUrl(`/api/agents/${agentId}`), { headers });
+      if (!resp.ok) {
+        showNotificationRef.current('error', 'Не удалось открыть агента в конструкторе');
+        return;
+      }
+      const full = (await resp.json()) as Agent;
+      setAgents((prev) => {
+        const others = prev.filter((a) => a.id !== full.id);
+        return [...others, full];
+      });
+      setSelectedAgentId(full.id);
+    } catch {
+      showNotificationRef.current('error', 'Не удалось открыть агента в конструкторе');
+    }
+  }, []);
 
   const loadModels = useCallback(async () => {
     try {
@@ -366,42 +412,81 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
     }
   }, []);
 
+  // Загрузка при открытии панели — один раз на сессию открытия (без зависимости от нестабильных колбэков)
   useEffect(() => {
-    if (isOpen) {
-      loadAgents();
-      loadModels();
-      loadKbDocuments();
-      void (async () => {
-        try {
-          const headers: HeadersInit = token ? { Authorization: `Bearer ${token}` } : {};
-          const resp = await fetch(`${getApiUrl(API_ENDPOINTS.SKILLS)}/list?limit=100`, { headers });
-          if (!resp.ok) return;
-          const data = await resp.json();
-          setAvailableSkills(
-            (data.items || [])
-              .filter((s: { is_active?: boolean }) => s.is_active !== false)
-              .map((s: { id: number; slug: string; name: string; description?: string }) => ({
-                id: s.id,
-                slug: s.slug,
-                name: s.name,
-                description: s.description,
-              })),
-          );
-        } catch {
-          /* silent */
-        }
-      })();
+    if (!isOpen) {
+      bootstrappedOpenRef.current = false;
+      return;
     }
-  }, [isOpen, loadAgents, loadModels, loadKbDocuments, token]);
+    if (bootstrappedOpenRef.current) return;
+    bootstrappedOpenRef.current = true;
 
-  // ─── Load selected agent into form ──────────────────────────────────────────
+    void loadModels();
+    void loadKbDocuments();
+    void (async () => {
+      try {
+        const headers: HeadersInit = tokenRef.current
+          ? { Authorization: `Bearer ${tokenRef.current}` }
+          : {};
+        const resp = await fetch(`${getApiUrl(API_ENDPOINTS.SKILLS)}/list?limit=100`, { headers });
+        if (!resp.ok) return;
+        const data = await resp.json();
+        setAvailableSkills(
+          (data.items || [])
+            .filter((s: { is_active?: boolean }) => s.is_active !== false)
+            .map((s: { id: number; slug: string; name: string; description?: string }) => ({
+              id: s.id,
+              slug: s.slug,
+              name: s.name,
+              description: s.description,
+            })),
+        );
+      } catch {
+        /* silent */
+      }
+    })();
+
+    void (async () => {
+      await loadAgents();
+      try {
+        const raw = sessionStorage.getItem(ASTRA_OPEN_AGENT_CONSTRUCTOR_ID_KEY);
+        if (raw) {
+          sessionStorage.removeItem(ASTRA_OPEN_AGENT_CONSTRUCTOR_ID_KEY);
+          const id = Number(raw);
+          if (Number.isFinite(id) && id > 0) {
+            await selectExternalAgent(id);
+          }
+        }
+      } catch {
+        /* */
+      }
+    })();
+  }, [isOpen, loadAgents, loadModels, loadKbDocuments, selectExternalAgent]);
+
+  // Слушаем событие открытия с agentId (галерея / хоткей с detail)
+  useEffect(() => {
+    const onOpen = (e: Event) => {
+      const detail = (e as CustomEvent<{ agentId?: number }>).detail;
+      const id = detail?.agentId;
+      if (typeof id === 'number' && Number.isFinite(id) && id > 0) {
+        void selectExternalAgent(id);
+      }
+    };
+    window.addEventListener(ASTRA_OPEN_AGENT_CONSTRUCTOR, onOpen);
+    return () => window.removeEventListener(ASTRA_OPEN_AGENT_CONSTRUCTOR, onOpen);
+  }, [selectExternalAgent]);
+
+  const agentsRef = useRef(agents);
+  agentsRef.current = agents;
+
+  // ─── Load selected agent into form (только при смене выбранного id) ──────────
 
   useEffect(() => {
     if (selectedAgentId === 'new') {
       resetForm();
       return;
     }
-    const agent = agents.find(a => a.id === selectedAgentId);
+    const agent = agentsRef.current.find((a) => a.id === selectedAgentId);
     if (!agent) return;
     setName(agent.name);
     setDescription(agent.description || '');
@@ -440,7 +525,8 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
     );
     setSupportName(cfg.support_name || '');
     setSupportEmail(cfg.support_email || '');
-  }, [selectedAgentId, agents]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- только смена агента; agents читаем из ref
+  }, [selectedAgentId]);
 
   function resetForm() {
     setName('');
@@ -535,11 +621,15 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
     }
     setSaveError('');
     setIsSaving(true);
+    const currentIsPublic =
+      selectedAgentId !== 'new'
+        ? !!(agents.find((a) => a.id === selectedAgentId)?.is_public)
+        : false;
     const payload = {
       name: name.trim(),
       description: description.trim() || undefined,
       system_prompt: instructions.trim() || 'Системные инструкции не заданы.',
-      is_public: false,
+      is_public: currentIsPublic,
       tools: [
         ...(codeInterpreter ? ['code_interpreter'] : []),
         ...(webSearch ? ['web_search'] : []),
@@ -632,6 +722,42 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
       setSaveError(e.message);
     } finally {
       setIsSaving(false);
+    }
+  };
+
+  // ─── Publish / unpublish to gallery ──────────────────────────────────────────
+
+  const handleTogglePublish = async () => {
+    if (selectedAgentId === 'new' || typeof selectedAgentId !== 'number') return;
+    const agent = agents.find((a) => a.id === selectedAgentId);
+    if (!agent) return;
+    const nextPublic = !agent.is_public;
+    setIsPublishing(true);
+    try {
+      const resp = await fetch(getApiUrl(`/api/agents/${selectedAgentId}`), {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ is_public: nextPublic }),
+      });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+        throw new Error(err.detail || resp.statusText);
+      }
+      await loadAgents();
+      showNotification(
+        'success',
+        nextPublic
+          ? 'Агент опубликован в галерее'
+          : 'Агент снят с публикации в галерее',
+      );
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      showNotification('error', `Не удалось изменить публикацию: ${msg}`);
+    } finally {
+      setIsPublishing(false);
     }
   };
 
@@ -832,8 +958,8 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
         >
           <Typography sx={{ fontSize: '0.72rem', color: 'rgba(255,255,255,0.75)' }}>
             {readOnly
-              ? 'Общий агент · роль «Зритель» — только просмотр и использование, изменение недоступно.'
-              : 'Общий агент · роль «Редактор» — можно изменять; удаление и повторный шаринг доступны только владельцу.'}
+              ? 'Агент доступен в режиме «Зритель» — просмотр и использование; изменение недоступно.'
+              : 'Агент доступен в режиме «Редактор» — можно изменять; удаление и шаринг — только у владельца.'}
           </Typography>
         </Box>
       )}
@@ -1507,8 +1633,8 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
           </Button>
         </Box>
 
-        {/* Share + Delete + Save */}
-        <Box sx={{ display: 'flex', gap: 1 }}>
+        {/* Share + Publish + Delete + Save */}
+        <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
           {selectedAgentId !== 'new' && isOwner && (
             <Tooltip title="Поделиться агентом">
               <IconButton
@@ -1524,6 +1650,51 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
               >
                 <ShareIcon sx={{ fontSize: '1rem' }} />
               </IconButton>
+            </Tooltip>
+          )}
+          {selectedAgentId !== 'new' && isOwner && (
+            <Tooltip
+              title={
+                selectedAgent?.is_public
+                  ? 'Снять с публикации в галерее'
+                  : 'Опубликовать агента в галерее'
+              }
+            >
+              <span>
+                <Button
+                  size="small"
+                  disabled={isPublishing}
+                  startIcon={
+                    isPublishing ? (
+                      <CircularProgress size={12} sx={{ color: 'inherit' }} />
+                    ) : selectedAgent?.is_public ? (
+                      <PublicOffIcon sx={{ fontSize: '0.9rem !important' }} />
+                    ) : (
+                      <PublicIcon sx={{ fontSize: '0.9rem !important' }} />
+                    )
+                  }
+                  onClick={() => void handleTogglePublish()}
+                  sx={{
+                    textTransform: 'none',
+                    fontSize: '0.72rem',
+                    fontWeight: 600,
+                    color: selectedAgent?.is_public ? '#81c784' : 'rgba(255,255,255,0.75)',
+                    border: `1px solid ${selectedAgent?.is_public ? 'rgba(129,199,132,0.45)' : 'rgba(255,255,255,0.12)'}`,
+                    bgcolor: selectedAgent?.is_public ? 'rgba(129,199,132,0.12)' : 'transparent',
+                    py: 0.55,
+                    px: 1,
+                    whiteSpace: 'nowrap',
+                    '&:hover': {
+                      bgcolor: selectedAgent?.is_public
+                        ? 'rgba(129,199,132,0.2)'
+                        : 'rgba(255,255,255,0.06)',
+                    },
+                    '&:disabled': { color: 'rgba(255,255,255,0.35)' },
+                  }}
+                >
+                  {selectedAgent?.is_public ? 'В галерее' : 'Опубликовать в галерее'}
+                </Button>
+              </span>
             </Tooltip>
           )}
           {selectedAgentId !== 'new' && isOwner && (
@@ -1556,6 +1727,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
                 fontWeight: 600,
                 fontSize: '0.82rem',
                 py: 0.9,
+                flex: '1 1 120px',
                 '&:hover': { bgcolor: '#388e3c' },
                 '&:disabled': { bgcolor: 'rgba(46,125,50,0.4)', color: 'rgba(255,255,255,0.5)' },
               }}
@@ -1573,6 +1745,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
                 fontWeight: 600,
                 fontSize: '0.82rem',
                 py: 0.9,
+                flex: '1 1 120px',
                 color: 'rgba(255,255,255,0.85)',
                 borderColor: 'rgba(255,255,255,0.25)',
                 '&:hover': { borderColor: 'rgba(255,255,255,0.5)', bgcolor: 'rgba(255,255,255,0.06)' },

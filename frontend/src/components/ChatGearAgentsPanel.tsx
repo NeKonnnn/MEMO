@@ -31,6 +31,7 @@ import {
   CHAT_GEAR_SCROLL_AREA_NO_VISIBLE_SCROLLBAR_SX,
 } from '../constants/menuStyles';
 import ChatGearMyAgentsTab from './ChatGearMyAgentsTab';
+import ChatGearGalleryAgentsTab from './ChatGearGalleryAgentsTab';
 import { getOrchestratorAgentTitleRu } from '../utils/orchestratorAgentDisplay';
 import {
   dispatchAgentStatusChanged,
@@ -79,7 +80,7 @@ export default function ChatGearAgentsPanel({ isDarkMode, canUseAgents }: ChatGe
   const [agentStatusOrchestratorActive, setAgentStatusOrchestratorActive] = useState<boolean | undefined>(undefined);
   const [orchestratorConfirmOpen, setOrchestratorConfirmOpen] = useState(false);
   const [pendingOrchestratorOff, setPendingOrchestratorOff] = useState(false);
-  const [agentsSubtab, setAgentsSubtab] = useState<'standard' | 'my'>('standard');
+  const [agentsSubtab, setAgentsSubtab] = useState<'standard' | 'my' | 'gallery'>('standard');
 
   const dropdownItemSx = useMemo(() => getDropdownItemSx(isDarkMode), [isDarkMode]);
   const muted = isDarkMode ? 'rgba(255,255,255,0.65)' : 'rgba(0,0,0,0.6)';
@@ -362,7 +363,7 @@ export default function ChatGearAgentsPanel({ isDarkMode, canUseAgents }: ChatGe
         <ToggleButtonGroup
           exclusive
           value={agentsSubtab}
-          onChange={(_, v: 'standard' | 'my' | null) => {
+          onChange={(_, v: 'standard' | 'my' | 'gallery' | null) => {
             if (v) setAgentsSubtab(v);
           }}
           fullWidth
@@ -379,13 +380,15 @@ export default function ChatGearAgentsPanel({ isDarkMode, canUseAgents }: ChatGe
               flex: 1,
               py: 0.4,
               textTransform: 'none',
-              fontSize: MENU_ACTION_TEXT_SIZE,
+              fontSize: '0.7rem',
               fontWeight: 500,
+              lineHeight: 1.2,
             },
           }}
         >
-          <ToggleButton value="standard">Стандартные агенты</ToggleButton>
+          <ToggleButton value="standard">Стандартные</ToggleButton>
           <ToggleButton value="my">Мои агенты</ToggleButton>
+          <ToggleButton value="gallery">Агенты из галереи</ToggleButton>
         </ToggleButtonGroup>
         <Box
           sx={{
@@ -433,6 +436,12 @@ export default function ChatGearAgentsPanel({ isDarkMode, canUseAgents }: ChatGe
 
       {agentsSubtab === 'my' ? (
         <ChatGearMyAgentsTab isDarkMode={isDarkMode} searchQuery={agentSearch} visible={agentsSubtab === 'my'} />
+      ) : agentsSubtab === 'gallery' ? (
+        <ChatGearGalleryAgentsTab
+          isDarkMode={isDarkMode}
+          searchQuery={agentSearch}
+          visible={agentsSubtab === 'gallery'}
+        />
       ) : (
         <Box
           sx={{

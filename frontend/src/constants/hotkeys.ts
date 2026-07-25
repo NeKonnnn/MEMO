@@ -8,6 +8,9 @@ export const ASTRA_OPEN_SETTINGS_SECTION = 'astrachat:open-settings-section';
 export const ASTRA_OPEN_AGENT_CONSTRUCTOR = 'astrachat:open-agent-constructor';
 export const ASTRA_OPEN_TRANSCRIPTION_SIDEBAR = 'astrachat:open-transcription-sidebar';
 
+/** sessionStorage: id агента, которого нужно открыть в конструкторе после перехода в чат */
+export const ASTRA_OPEN_AGENT_CONSTRUCTOR_ID_KEY = 'astrachat_open_agent_constructor_id';
+
 export const ASTRA_HOTKEYS_CHANGED = 'astrachat:hotkeys-changed';
 
 export type HotkeyActionId =

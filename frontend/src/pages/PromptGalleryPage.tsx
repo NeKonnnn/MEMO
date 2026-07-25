@@ -1080,6 +1080,9 @@ export default function PromptGalleryPage() {
                 <Button size="small" onClick={() => navigate('/')}>
                   К чату
                 </Button>
+                <Button size="small" onClick={() => navigate('/agents-gallery')}>
+                  Галерея агентов
+                </Button>
               </Stack>
               <Typography variant="body2" color="text.secondary">
                 Делитесь лучшими промптами с командой
@@ -1711,21 +1714,29 @@ function PromptCard({ prompt, onRate, onUse, onEdit, onDelete, onToggleBookmark,
   };
 
   return (
-    <Card sx={{ 
+    <Card
+      sx={{ 
       height: '100%', 
       display: 'flex', 
       flexDirection: 'column',
       backgroundColor: isDarkMode ? undefined : '#ffffff',
       boxShadow: isDarkMode ? undefined : '0 2px 8px rgba(0,0,0,0.1)',
       border: isDarkMode ? undefined : '1px solid rgba(0,0,0,0.08)',
-    }}>
+      cursor: 'pointer',
+      transition: 'box-shadow 0.15s ease',
+      '&:hover': {
+        boxShadow: isDarkMode ? '0 4px 16px rgba(0,0,0,0.45)' : '0 4px 16px rgba(0,0,0,0.14)',
+      },
+    }}
+      onClick={handleViewPrompt}
+    >
       <CardContent sx={{ flex: 1 }}>
         {/* Заголовок, закладка и меню */}
         <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', mb: 1 }}>
           <Typography variant="h6" component="div" sx={{ flex: 1, fontWeight: 'bold' }}>
             {prompt.title}
           </Typography>
-          <Box sx={{ display: 'flex', gap: 0.5 }}>
+          <Box sx={{ display: 'flex', gap: 0.5 }} onClick={(e) => e.stopPropagation()}>
             {/* Кнопка закладки */}
             <Tooltip title={prompt.is_bookmarked ? 'Удалить из закладок' : 'Добавить в закладки'}>
               <IconButton size="small" onClick={onToggleBookmark}>
@@ -1784,7 +1795,10 @@ function PromptCard({ prompt, onRate, onUse, onEdit, onDelete, onToggleBookmark,
               <Button
                 size="small"
                 endIcon={<ExpandMoreIcon />}
-                onClick={handleViewPrompt}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleViewPrompt();
+                }}
                 sx={{ minWidth: 'auto', p: 0.5 }}
               >
                 Показать больше
@@ -1812,7 +1826,7 @@ function PromptCard({ prompt, onRate, onUse, onEdit, onDelete, onToggleBookmark,
         </Box>
 
         {/* Теги */}
-        <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap sx={{ mb: 2 }}>
+        <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5, mb: 2 }}>
           {prompt.tags.map((tag) => (
             <Chip
               key={tag.id}
@@ -1825,10 +1839,10 @@ function PromptCard({ prompt, onRate, onUse, onEdit, onDelete, onToggleBookmark,
               }}
             />
           ))}
-        </Stack>
+        </Box>
 
         {/* Рейтинг */}
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }} onClick={(e) => e.stopPropagation()}>
           <Rating
             value={prompt.average_rating}
             onChange={(_, value) => {
@@ -1863,7 +1877,7 @@ function PromptCard({ prompt, onRate, onUse, onEdit, onDelete, onToggleBookmark,
         </Box>
       </CardContent>
 
-      <CardActions>
+      <CardActions onClick={(e) => e.stopPropagation()}>
         <Button
           size="small"
           startIcon={<CopyIcon />}
@@ -1875,18 +1889,27 @@ function PromptCard({ prompt, onRate, onUse, onEdit, onDelete, onToggleBookmark,
         </Button>
       </CardActions>
       
-      {/* Модальное окно для просмотра промпта */}
+      {/* Модальное окно: настройки / детали промпта */}
       <Dialog 
         open={showViewDialog} 
         onClose={handleCloseViewDialog}
         maxWidth="md"
         fullWidth
+        onClick={(e) => e.stopPropagation()}
       >
         <DialogTitle>
-          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <Typography variant="h5" component="div" sx={{ fontWeight: 'bold' }}>
-              {prompt.title}
-            </Typography>
+          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 1 }}>
+            <Box sx={{ minWidth: 0 }}>
+              <Typography variant="h5" component="div" sx={{ fontWeight: 'bold', wordBreak: 'break-word' }}>
+                {prompt.title}
+              </Typography>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mt: 0.5 }}>
+                <PersonIcon fontSize="small" color="action" />
+                <Typography variant="body2" color="text.secondary">
+                  {prompt.author_name}
+                </Typography>
+              </Box>
+            </Box>
             <IconButton
               edge="end"
               color="inherit"
@@ -1897,48 +1920,40 @@ function PromptCard({ prompt, onRate, onUse, onEdit, onDelete, onToggleBookmark,
             </IconButton>
           </Box>
         </DialogTitle>
-        <DialogContent>
-          <Stack spacing={3}>
-            {/* Автор */}
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-              <PersonIcon fontSize="small" color="action" />
-              <Typography variant="body2" color="text.secondary">
-                Автор: {prompt.author_name}
-              </Typography>
-            </Box>
-            
-            {/* Описание */}
-            {prompt.description && (
+        <DialogContent dividers>
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2.5 }}>
+            {prompt.description ? (
               <Box>
                 <Typography variant="subtitle2" color="text.secondary" gutterBottom>
-                  Описание:
+                  Описание
                 </Typography>
                 <Typography variant="body1">
                   {prompt.description}
                 </Typography>
               </Box>
-            )}
+            ) : null}
             
-            {/* Содержание промпта */}
             <Box>
               <Typography variant="subtitle2" color="text.secondary" gutterBottom>
-                Промпт:
+                Текст промпта
               </Typography>
               <Box sx={{ 
                 p: 2, 
                 bgcolor: isDarkMode ? 'rgba(0, 0, 0, 0.3)' : 'rgba(0, 0, 0, 0.04)', 
                 borderRadius: 1, 
                 border: '1px solid', 
-                borderColor: isDarkMode ? 'rgba(255, 255, 255, 0.15)' : 'rgba(0, 0, 0, 0.1)'
+                borderColor: isDarkMode ? 'rgba(255, 255, 255, 0.15)' : 'rgba(0, 0, 0, 0.1)',
+                maxHeight: 320,
+                overflow: 'auto',
               }}>
                 <Typography 
-                  variant="body1" 
+                  variant="body2" 
                   sx={{ 
                     whiteSpace: 'pre-wrap', 
                     wordBreak: 'break-word',
                     fontFamily: 'monospace',
-                    fontSize: '0.9rem',
-                    lineHeight: 1.8,
+                    fontSize: '0.875rem',
+                    lineHeight: 1.7,
                     color: isDarkMode ? 'rgba(255, 255, 255, 0.9)' : 'rgba(0, 0, 0, 0.87)'
                   }}
                 >
@@ -1946,14 +1961,72 @@ function PromptCard({ prompt, onRate, onUse, onEdit, onDelete, onToggleBookmark,
                 </Typography>
               </Box>
             </Box>
+
+            <Box>
+              <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+                Параметры
+              </Typography>
+              <Box
+                sx={{
+                  bgcolor: isDarkMode ? 'rgba(0, 0, 0, 0.3)' : 'rgba(0, 0, 0, 0.04)',
+                  borderRadius: 1,
+                  border: '1px solid',
+                  borderColor: isDarkMode ? 'rgba(255, 255, 255, 0.15)' : 'rgba(0, 0, 0, 0.1)',
+                  px: 2,
+                }}
+              >
+                <Box
+                  sx={{
+                    display: 'grid',
+                    gridTemplateColumns: { xs: '1fr', sm: '160px 1fr' },
+                    gap: { xs: 0.25, sm: 1.5 },
+                    py: 0.75,
+                  }}
+                >
+                  <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 500 }}>
+                    Публичный
+                  </Typography>
+                  <Typography variant="body2">{prompt.is_public ? 'Да (в галерее)' : 'Нет'}</Typography>
+                </Box>
+                <Box
+                  sx={{
+                    display: 'grid',
+                    gridTemplateColumns: { xs: '1fr', sm: '160px 1fr' },
+                    gap: { xs: 0.25, sm: 1.5 },
+                    py: 0.75,
+                  }}
+                >
+                  <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 500 }}>
+                    Создан
+                  </Typography>
+                  <Typography variant="body2">
+                    {prompt.created_at ? new Date(prompt.created_at).toLocaleString('ru-RU') : '—'}
+                  </Typography>
+                </Box>
+                <Box
+                  sx={{
+                    display: 'grid',
+                    gridTemplateColumns: { xs: '1fr', sm: '160px 1fr' },
+                    gap: { xs: 0.25, sm: 1.5 },
+                    py: 0.75,
+                  }}
+                >
+                  <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 500 }}>
+                    Обновлён
+                  </Typography>
+                  <Typography variant="body2">
+                    {prompt.updated_at ? new Date(prompt.updated_at).toLocaleString('ru-RU') : '—'}
+                  </Typography>
+                </Box>
+              </Box>
+            </Box>
             
-            {/* Теги */}
-            {prompt.tags.length > 0 && (
+            {prompt.tags.length > 0 ? (
               <Box>
                 <Typography variant="subtitle2" color="text.secondary" gutterBottom>
-                  Теги:
+                  Теги
                 </Typography>
-                <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1 }}>
                   {prompt.tags.map((tag) => (
                     <Chip
                       key={tag.id}
@@ -1966,16 +2039,15 @@ function PromptCard({ prompt, onRate, onUse, onEdit, onDelete, onToggleBookmark,
                       }}
                     />
                   ))}
-                </Stack>
+                </Box>
               </Box>
-            )}
+            ) : null}
             
-            {/* Рейтинг */}
             <Box>
               <Typography variant="subtitle2" color="text.secondary" gutterBottom>
-                Рейтинг:
+                Рейтинг и статистика
               </Typography>
-              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
                 <Rating
                   value={prompt.average_rating}
                   onChange={(_, value) => {
@@ -1987,31 +2059,18 @@ function PromptCard({ prompt, onRate, onUse, onEdit, onDelete, onToggleBookmark,
                   readOnly={!!prompt.user_rating}
                   size="large"
                 />
-                <Typography variant="body1" color="text.secondary">
+                <Typography variant="body2" color="text.secondary">
                   {prompt.average_rating.toFixed(1)} ({prompt.total_votes} {prompt.total_votes === 1 ? 'оценка' : 'оценок'})
-                  {prompt.user_rating && ` • Ваша оценка: ${prompt.user_rating}`}
+                  {prompt.user_rating ? ` • Ваша оценка: ${prompt.user_rating}` : ''}
                 </Typography>
               </Box>
+              <Typography variant="body2" color="text.secondary">
+                Просмотров: {prompt.views_count} · Использований: {prompt.usage_count}
+              </Typography>
             </Box>
-            
-            {/* Статистика */}
-            <Box sx={{ display: 'flex', gap: 3 }}>
-              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                <ViewIcon fontSize="small" color="action" />
-                <Typography variant="body2" color="text.secondary">
-                  Просмотров: {prompt.views_count}
-                </Typography>
-              </Box>
-              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                <TrendingUpIcon fontSize="small" color="action" />
-                <Typography variant="body2" color="text.secondary">
-                  Использований: {prompt.usage_count}
-                </Typography>
-              </Box>
-            </Box>
-          </Stack>
+          </Box>
         </DialogContent>
-        <DialogActions>
+        <DialogActions sx={{ px: 3, py: 2 }}>
           <Button onClick={handleCloseViewDialog}>
             Закрыть
           </Button>

@@ -49,7 +49,6 @@ export interface UseChatContextUsageOptions {
   inlineAttachments?: InlineAttachment[];
   availableModels: ModelContextMeta[];
   configuredContextSize?: number | null;
-  configuredOutputTokens?: number | null;
   loadedModelCtx?: number | null;
   isMultiLlmMode?: boolean;
   multiLlmModelPaths?: string[];
@@ -65,7 +64,6 @@ export interface ChatContextUsageResult {
   segments?: ContextUsageSegment[];
   overheadLoading: boolean;
   refreshOverhead: () => void;
-  outputTokensReserve: number;
   isOverLimit: boolean;
 }
 
@@ -75,7 +73,6 @@ export function useChatContextUsage({
   inlineAttachments = [],
   availableModels,
   configuredContextSize,
-  configuredOutputTokens,
   loadedModelCtx,
   isMultiLlmMode = false,
   multiLlmModelPaths = [],
@@ -85,7 +82,6 @@ export function useChatContextUsage({
 }: UseChatContextUsageOptions): ChatContextUsageResult {
   const [selectedModelPath, setSelectedModelPath] = useState(readStoredModelPath);
   const [settingsContextSize, setSettingsContextSize] = useState<number | null>(null);
-  const [settingsOutputTokens, setSettingsOutputTokens] = useState<number | null>(null);
   const [overheadSegments, setOverheadSegments] = useState<ContextUsageSegment[]>([]);
   const [overheadLoading, setOverheadLoading] = useState(false);
   const [agentId, setAgentId] = useState<number | null>(() => readStoredAgentId());
@@ -102,10 +98,6 @@ export function useChatContextUsage({
       const ctx = data?.context_size;
       if (typeof ctx === 'number' && ctx > 0) {
         setSettingsContextSize(ctx);
-      }
-      const out = data?.output_tokens;
-      if (typeof out === 'number' && out > 0) {
-        setSettingsOutputTokens(out);
       }
     } catch {
       /* ignore */
@@ -157,12 +149,6 @@ export function useChatContextUsage({
     (typeof configuredContextSize === 'number' && configuredContextSize > 0
       ? configuredContextSize
       : null);
-
-  const effectiveOutputTokens =
-    settingsOutputTokens ??
-    (typeof configuredOutputTokens === 'number' && configuredOutputTokens > 0
-      ? configuredOutputTokens
-      : 0);
 
   const modelPathForLimit = useMemo(() => {
     if (isMultiLlmMode && multiLlmModelPaths.some(Boolean)) {
@@ -260,14 +246,12 @@ export function useChatContextUsage({
       overheadSegments,
       maxTokens,
       featureFlags,
-      effectiveOutputTokens,
     );
     const isOverLimit = isContextRequestOverLimit(usage.currentTokens, usage.maxTokens);
     return {
       ...usage,
       overheadLoading,
       refreshOverhead,
-      outputTokensReserve: effectiveOutputTokens,
       isOverLimit,
     };
   }, [
@@ -277,7 +261,6 @@ export function useChatContextUsage({
     maxTokens,
     overheadSegments,
     featureFlags,
-    effectiveOutputTokens,
     overheadLoading,
     refreshOverhead,
   ]);
