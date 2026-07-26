@@ -198,10 +198,10 @@ export default function MemoryRagLibraryModal({ open, onClose }: Props) {
         <LibraryIcon color="primary" />
         <Box flex={1}>
           <Typography variant="h6" component="span">
-            Документы для RAG (библиотека памяти)
+            Общая библиотека документов
           </Typography>
           <Typography variant="caption" color="text.secondary" display="block">
-            Оригиналы в MinIO (bucket astrachat-memory-rag), чанки и векторы — в PostgreSQL
+            Общие файлы для любого чата. Не путать с документами проекта или документами агента.
           </Typography>
         </Box>
         <IconButton aria-label="закрыть" onClick={onClose} sx={{ position: 'absolute', right: 8, top: 8 }}>
@@ -263,8 +263,8 @@ export default function MemoryRagLibraryModal({ open, onClose }: Props) {
           <LinearProgress />
         ) : documents.length === 0 ? (
           <Typography color="text.secondary" variant="body2">
-            Пока нет документов. Включите «Учитывать в ответах чата» в настройках памяти, чтобы модель использовала
-            загруженные материалы.
+            Пока нет документов. После загрузки включите «Учитывать в ответах чата» здесь в настройках или кнопку
+            «Общий RAG» в чате.
           </Typography>
         ) : (
           <List dense disablePadding>

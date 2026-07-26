@@ -4843,7 +4843,7 @@ export default function UnifiedChatPage({
                  >
                    <KbIcon sx={{ fontSize: 18, color: isDarkMode ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.6)', flexShrink: 0 }} />
                    <Typography sx={{ flex: 1, minWidth: 0, fontSize: MENU_ACTION_TEXT_SIZE, whiteSpace: 'nowrap' }}>
-                     {useKbRag ? 'Отключить библиотеку' : 'Библиотека'}
+                     {useKbRag ? 'Отключить общий RAG' : 'Общий RAG'}
                    </Typography>
                    {useKbRag ? (
                      <CheckIcon sx={{ fontSize: 16, color: 'primary.main', flexShrink: 0 }} />
@@ -4884,6 +4884,7 @@ export default function UnifiedChatPage({
                 <ChatGearAgentsPanel
                   isDarkMode={isDarkMode}
                   canUseAgents={Boolean(agentStatus?.is_initialized)}
+                  onAgentsInitialized={loadAgentStatus}
                 />
               ) : gearToolsPanel === 'skills' ? (
                 <ChatGearSkillsPanel isDarkMode={isDarkMode} />

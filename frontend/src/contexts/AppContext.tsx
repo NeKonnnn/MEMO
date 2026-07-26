@@ -37,7 +37,7 @@ export interface Message {
   currentResponseIndex?: number; // Индекс текущего отображаемого варианта (0-based)
   /** Лайк/дизлайк ответа ассистента */
   feedback?: MessageFeedback | null;
-  /** Трейс поиска по базе знаний / библиотеке (с бэкенда при «Подключить базу знаний») */
+  /** Трейс поиска по документам (общая библиотека / проект / агент) */
   documentSearch?: {
     query: string;
     sourceFiles: string[];

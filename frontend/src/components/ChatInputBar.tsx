@@ -98,7 +98,7 @@ export interface ChatInputBarProps {
 
   extraActions?: React.ReactNode;
 
-  /** Между «вложения» и «инструменты»: например индикатор «Библиотека» при включённом RAG */
+  /** Между «вложения» и «инструменты»: например индикатор «Общая библиотека» */
   libraryBadge?: React.ReactNode;
 
   /** Подсказки над полем ввода (MCP chips и т.п.) */

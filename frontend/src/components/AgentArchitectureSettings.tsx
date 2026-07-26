@@ -33,7 +33,6 @@ import {
 import { getApiUrl } from '../config/api';
 import type { McpPlatformStatus } from '../mcp/types';
 import { formatMcpAggregateLabel, isMcpPlatformHealthy } from '../mcp/utils/statusLabel';
-import { ASTRA_OPEN_SETTINGS_SECTION } from '../constants/hotkeys';
 
 // Backend URL
 
@@ -292,25 +291,12 @@ export default function AgentArchitectureSettings() {
               size="small"
             />
             {mcpStatus && (
-              <>
-                <Chip
-                  icon={isMcpPlatformHealthy(mcpStatus) ? <CheckIcon /> : <ErrorIcon />}
-                  label={formatMcpAggregateLabel(mcpStatus)}
-                  color={isMcpPlatformHealthy(mcpStatus) ? 'success' : 'error'}
-                  size="small"
-                />
-                <Button
-                  size="small"
-                  variant="text"
-                  onClick={() =>
-                    window.dispatchEvent(
-                      new CustomEvent(ASTRA_OPEN_SETTINGS_SECTION, { detail: { section: 'mcp' } }),
-                    )
-                  }
-                >
-                  Настройки MCP →
-                </Button>
-              </>
+              <Chip
+                icon={isMcpPlatformHealthy(mcpStatus) ? <CheckIcon /> : <ErrorIcon />}
+                label={formatMcpAggregateLabel(mcpStatus)}
+                color={isMcpPlatformHealthy(mcpStatus) ? 'success' : 'error'}
+                size="small"
+              />
             )}
             {langgraphStatus && (
               <Chip

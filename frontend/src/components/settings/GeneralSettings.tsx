@@ -73,14 +73,14 @@ export default function GeneralSettings({ isDarkMode, onToggleTheme }: GeneralSe
       });
       
       if (response.ok) {
-        showNotification('success', 'Настройки памяти сохранены');
+        showNotification('success', 'Настройки контекста диалога сохранены');
         return true;
       } else {
-        throw new Error('Ошибка сохранения настроек памяти');
+        throw new Error('Ошибка сохранения настроек контекста диалога');
       }
     } catch (error) {
-      console.error('Ошибка сохранения настроек памяти:', error);
-      showNotification('error', 'Ошибка сохранения настроек памяти');
+      console.error('Ошибка сохранения настроек контекста диалога:', error);
+      showNotification('error', 'Ошибка сохранения настроек контекста диалога');
       return false;
     }
   };
@@ -100,7 +100,7 @@ export default function GeneralSettings({ isDarkMode, onToggleTheme }: GeneralSe
     };
     setMemorySettings(defaultSettings);
     saveMemorySettings(defaultSettings);
-    showNotification('info', 'Настройки памяти сброшены к значениям по умолчанию');
+    showNotification('info', 'Настройки контекста диалога сброшены к значениям по умолчанию');
   };
 
 
@@ -140,14 +140,14 @@ export default function GeneralSettings({ isDarkMode, onToggleTheme }: GeneralSe
         </CardContent>
       </Card>
 
-      {/* Настройки памяти */}
+      {/* Контекст диалога (история сообщений) — не путать с общей библиотекой документов */}
       <Card sx={{ mb: 3 }}>
         <CardContent>
           <Typography variant="h6" gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
             <MemoryIcon color="primary" />
-            Настройки памяти
+            Контекст диалога
             <Tooltip 
-              title="Как это работает: Ассистент использует последние сообщения из диалога для понимания контекста. Больше сообщений = лучше понимание, но больше потребление памяти. Рекомендуется: 20-40 сообщений для обычного общения." 
+              title="Сколько последних сообщений чата учитывать в ответе. Это история переписки, а не общая библиотека документов и не RAG. Рекомендуется: 20–40 сообщений." 
               arrow
             >
               <IconButton 
@@ -182,9 +182,9 @@ export default function GeneralSettings({ isDarkMode, onToggleTheme }: GeneralSe
               <ListItemText
                 primary={
                   <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-                    Неограниченная память
+                    Неограниченная история
                     <Tooltip 
-                      title="Неограниченная память: Ассистент будет запоминать все сообщения в диалоге. Это может значительно увеличить потребление памяти при длинных диалогах." 
+                      title="Ассистент будет учитывать все сообщения в диалоге. На длинных чатах это сильнее нагружает контекст модели." 
                       arrow
                     >
                       <IconButton 
@@ -342,7 +342,7 @@ export default function GeneralSettings({ isDarkMode, onToggleTheme }: GeneralSe
 
             <Divider />
 
-            {/* Очищать память при перезапуске */}
+            {/* Очищать историю при перезапуске */}
             <ListItem
               sx={{
                 px: 0,
@@ -353,7 +353,7 @@ export default function GeneralSettings({ isDarkMode, onToggleTheme }: GeneralSe
               }}
             >
               <ListItemText
-                primary="Очищать память при перезапуске"
+                primary="Очищать историю при перезапуске"
                 primaryTypographyProps={{
                   variant: 'body1',
                   fontWeight: 500,

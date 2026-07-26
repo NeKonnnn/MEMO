@@ -39,7 +39,7 @@ import {
   switchToDirectIfNoAgentsActive,
 } from '../hooks/useChatInputAgentIndicators';
 
-/** Как в настройках «Агенты» → список в агентном режиме (ответ /api/agent/agents). */
+/** Как в панели «Инструменты → Агенты» (ответ /api/agent/agents). */
 export interface OrchestratorAgentRow {
   name: string;
   description: string;
@@ -65,15 +65,22 @@ interface ChatGearAgentsPanelProps {
   isDarkMode: boolean;
   /** Агентная архитектура инициализирована (режим direct/agent подключается при включении агента здесь) */
   canUseAgents: boolean;
+  /** После POST /api/agent/initialize — обновить статус в родителе */
+  onAgentsInitialized?: () => void;
 }
 
-export default function ChatGearAgentsPanel({ isDarkMode, canUseAgents }: ChatGearAgentsPanelProps) {
+export default function ChatGearAgentsPanel({
+  isDarkMode,
+  canUseAgents,
+  onAgentsInitialized,
+}: ChatGearAgentsPanelProps) {
   const { showNotification } = useAppActions();
   const showNotificationRef = useRef(showNotification);
   showNotificationRef.current = showNotification;
 
   const [agents, setAgents] = useState<OrchestratorAgentRow[]>([]);
   const [loading, setLoading] = useState(false);
+  const [initializing, setInitializing] = useState(false);
   const [agentSearch, setAgentSearch] = useState('');
   const [expandedAgentKey, setExpandedAgentKey] = useState<string | null>(null);
   const [langgraphStatus, setLanggraphStatus] = useState<LangGraphStatusPayload | null>(null);
@@ -308,13 +315,43 @@ export default function ChatGearAgentsPanel({ isDarkMode, canUseAgents }: ChatGe
     setPendingOrchestratorOff(false);
   }, [pendingOrchestratorOff, applyOrchestratorToggle]);
 
+  const handleInitializeAgents = useCallback(async () => {
+    setInitializing(true);
+    try {
+      const response = await fetch(getApiUrl('/api/agent/initialize'), {
+        method: 'POST',
+        headers: getAuthFetchHeaders(),
+      });
+      if (!response.ok) {
+        throw new Error('initialize');
+      }
+      showNotificationRef.current('success', 'Агентная архитектура инициализирована');
+      onAgentsInitialized?.();
+      dispatchAgentStatusChanged();
+    } catch {
+      showNotificationRef.current('error', 'Не удалось инициализировать агентную архитектуру');
+    } finally {
+      setInitializing(false);
+    }
+  }, [onAgentsInitialized]);
+
   if (!canUseAgents) {
     return (
       <Box sx={{ p: 1.5, maxWidth: 320 }}>
-        <Typography variant="body2" sx={{ color: muted, fontSize: MENU_ACTION_TEXT_SIZE, lineHeight: 1.45 }}>
-          Список агентов доступен после инициализации агентной архитектуры в разделе{' '}
-          <strong style={{ color: text }}>Настройки → Агенты</strong>. Включение агента здесь переводит чат в агентный режим.
+        <Typography variant="body2" sx={{ color: muted, fontSize: MENU_ACTION_TEXT_SIZE, lineHeight: 1.45, mb: 1.5 }}>
+          Список стандартных агентов доступен после инициализации агентной архитектуры. Включение агента здесь
+          переводит чат в агентный режим.
         </Typography>
+        <Button
+          size="small"
+          variant="contained"
+          disabled={initializing}
+          onClick={() => void handleInitializeAgents()}
+          startIcon={initializing ? <CircularProgress size={14} color="inherit" /> : <AgentIcon sx={{ fontSize: 16 }} />}
+          sx={{ textTransform: 'none' }}
+        >
+          {initializing ? 'Инициализация…' : 'Инициализировать'}
+        </Button>
       </Box>
     );
   }

@@ -1,6 +1,7 @@
 /**
- * Единый флаг «база знаний в чате»: и классическая KB (use_kb_rag),
- * и библиотека из настроек (use_memory_library_rag). Socket читает оба ключа при отправке.
+ * Флаг «общая библиотека в чате» (memory RAG).
+ * Ключи localStorage сохранены для совместимости: use_kb_rag / use_memory_library_rag.
+ * Socket читает оба ключа при отправке.
  */
 const KB_KEY = 'use_kb_rag';
 const MEM_KEY = 'use_memory_library_rag';

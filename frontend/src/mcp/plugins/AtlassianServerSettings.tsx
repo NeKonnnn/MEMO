@@ -3,7 +3,7 @@ import AtlassianServerDetails from './AtlassianServerDetails';
 import McpCredentialsSection from '../components/McpCredentialsSection';
 import type { ServerPluginProps } from '../types';
 
-/** Settings/admin: metadata + credentials для Atlassian. */
+/** Карточка Atlassian в чате: metadata + credentials. */
 export function AtlassianServerSettings({ serverId, isDarkMode, compact, authMode }: ServerPluginProps) {
   if (serverId !== 'atlassian') return null;
   return (

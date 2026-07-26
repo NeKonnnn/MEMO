@@ -154,7 +154,7 @@ function App() {
   /** Настройки по Alt+S — в App, чтобы работало даже при скрытой левой панели. */
   const [settingsFromHotkeyOpen, setSettingsFromHotkeyOpen] = useState(false);
   const [settingsInitialSection, setSettingsInitialSection] = useState<
-    'general' | 'profile' | 'interface' | 'models' | 'agents' | 'mcp' | 'rag' | 'transcription' | 'chats' | 'about' | undefined
+    'general' | 'profile' | 'interface' | 'models' | 'rag' | 'transcription' | 'chats' | 'about' | undefined
   >(undefined);
 
   useEffect(() => {

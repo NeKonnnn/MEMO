@@ -22,7 +22,6 @@ import {
   Search as SearchIcon,
   HelpOutline as HelpOutlineIcon,
   ExpandMore as ExpandMoreIcon,
-  LibraryBooks as LibraryBooksIcon,
   Restore as RestoreIcon,
 } from '@mui/icons-material';
 import { useAppActions } from '../../contexts/AppContext';
@@ -35,7 +34,7 @@ import {
   getDropdownChevronSx,
   getDropdownItemStateSx,
 } from '../../constants/menuStyles';
-import MemoryRagLibraryModal from '../MemoryRagLibraryModal';
+import MemoryRagLibrarySection from './MemoryRagLibrarySection';
 import RagModelSelector from '../RagModelSelector';
 import { useAuth } from '../../contexts/AuthContext';
 import {
@@ -130,7 +129,7 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
   const [isLoading, setIsLoading] = useState(false);
   const [strategyPopoverAnchor, setStrategyPopoverAnchor] = useState<HTMLElement | null>(null);
   const [chunkingPopoverAnchor, setChunkingPopoverAnchor] = useState<HTMLElement | null>(null);
-  const [memoryRagModalOpen, setMemoryRagModalOpen] = useState(false);
+  const [scopePopoverAnchor, setScopePopoverAnchor] = useState<HTMLElement | null>(null);
   const [agenticRagEnabled, setAgenticRagEnabled] = useState(true);
   const [ragQueryFixTypos, setRagQueryFixTypos] = useState(false);
   const [ragMultiQueryEnabled, setRagMultiQueryEnabled] = useState(false);
@@ -145,6 +144,8 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
   const [ragSystemPrompt, setRagSystemPrompt] = useState(DEFAULT_RAG_SYSTEM_PROMPT);
   const [strategyInfoExpanded, setStrategyInfoExpanded] = useState(true);
   const [chunkingInfoExpanded, setChunkingInfoExpanded] = useState(true);
+  /** UI-фокус карточки: проекты | агенты (параметры пока общий набор в API). */
+  const [projectsAgentsScope, setProjectsAgentsScope] = useState<'project' | 'agent'>('project');
   const isInitializedRef = useRef(false);
   const skipNextRagSaveToastRef = useRef(false);
   const { showNotification } = useAppActions();
@@ -384,7 +385,7 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
 
   const getChunkingDescription = (strategy: ChunkingStrategy): string => {
     const scope =
-      ' Применяется только к проектному RAG и базе знаний агента. Библиотека памяти («Открыть базу данных» / KB / memory) всегда режется универсальным структурным чанкером и этот выбор не использует.';
+      ' Действует только для документов проекта и документов агента. Общая библиотека всегда режется своим чанкером и этот выбор не использует.';
     switch (strategy) {
       case 'hierarchical':
         return (
@@ -435,18 +436,20 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
 
   return (
     <Box sx={{ p: 3 }}>
+      <MemoryRagLibrarySection variant="prominent" />
+
       <Card sx={{ mb: 3 }}>
         <CardContent>
           <Typography variant="h6" gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
             <SearchIcon color="primary" />
-            Настройки для RAG
-            <Tooltip 
-              title="RAG (Retrieval-Augmented Generation) - система поиска релевантных документов для улучшения ответов модели. Выберите стратегию поиска, которая лучше всего подходит для ваших задач." 
+            Проекты и агенты
+            <Tooltip
+              title="Персональные настройки индексации и поиска для документов проекта и документов агента. Стратегия поиска также применяется к общей библиотеке."
               arrow
             >
-              <IconButton 
-                size="small" 
-                sx={{ 
+              <IconButton
+                size="small"
+                sx={{
                   ml: 0.5,
                   opacity: 0.7,
                   '&:hover': {
@@ -461,14 +464,6 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
               </IconButton>
             </Tooltip>
           </Typography>
-          <Alert severity="info" sx={{ mb: 2 }}>
-            Настройки ниже персональные (PostgreSQL по user_id): проекты и KB агентов, где вы
-            владелец. Выбор embedding/reranker тоже ваш в UI: при смене модели переиндексируются
-            только ваши документы, у других пользователей ничего не меняется. Глобальное хранилище
-            («Открыть базу данных») — через ConfigMap/env, из UI для неё меняется только
-            стратегия поиска. Рыжая плашка перечанковки показывается только вам при вашем
-            scoped-rechunk (не всем пользователям).
-          </Alert>
 
           <List sx={{ p: 0 }}>
             <ListItem
@@ -483,9 +478,9 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
               <ListItemText
                 primary={
                   <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-                    Управление документами
+                    Настройки для
                     <Tooltip
-                      title="Загрузка PDF, Word, Excel, TXT в библиотеку памяти (MinIO + pgvector). Подключение поиска к ответам — в зоне ввода сообщения кнопкой «Подключить базу знаний»."
+                      title="Выберите, для какого источника показывать подсказки: документы проекта или документы агента."
                       arrow
                     >
                       <IconButton
@@ -502,37 +497,64 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
                           },
                         }}
                         onClick={(e) => e.stopPropagation()}
-                        aria-label="Справка по библиотеке документов"
                       >
                         <HelpOutlineIcon fontSize="small" color="action" />
                       </IconButton>
                     </Tooltip>
                   </Box>
                 }
-                secondary="Библиотека памяти индексируется и ищется по ConfigMap/env (RAG_MEMORY_*). Из UI на неё влияет только стратегия поиска."
                 primaryTypographyProps={{
                   variant: 'body1',
                   fontWeight: 500,
                 }}
-                secondaryTypographyProps={{
-                  variant: 'caption',
-                  color: 'text.secondary',
-                }}
               />
-              <Button
-                variant="outlined"
-                color="primary"
-                startIcon={<LibraryBooksIcon />}
-                onClick={() => setMemoryRagModalOpen(true)}
-                sx={{
-                  textTransform: 'none',
-                  minWidth: 180,
-                  whiteSpace: 'nowrap',
-                  flexShrink: 0,
-                }}
-              >
-                Открыть базу данных
-              </Button>
+              <Box sx={{ minWidth: 280 }}>
+                <Box
+                  onClick={(e) => setScopePopoverAnchor(e.currentTarget)}
+                  sx={dropdownTriggerSx}
+                >
+                  <Typography sx={dropdownTriggerTextSx}>
+                    {projectsAgentsScope === 'project' ? 'Проекты' : 'Агенты'}
+                  </Typography>
+                  <ExpandMoreIcon
+                    sx={{
+                      ...dropdownChevronSx,
+                      transform: scopePopoverAnchor ? 'rotate(180deg)' : 'none',
+                    }}
+                  />
+                </Box>
+                <Popover
+                  open={Boolean(scopePopoverAnchor)}
+                  anchorEl={scopePopoverAnchor}
+                  onClose={() => setScopePopoverAnchor(null)}
+                  anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
+                  transformOrigin={{ vertical: 'top', horizontal: 'left' }}
+                  slotProps={{ paper: { sx: getDropdownPopoverPaperSx(scopePopoverAnchor, isDarkMode) } }}
+                >
+                  <Box sx={{ py: 0.5 }}>
+                    {(
+                      [
+                        { value: 'project' as const, label: 'Проекты' },
+                        { value: 'agent' as const, label: 'Агенты' },
+                      ]
+                    ).map((option) => (
+                      <Box
+                        key={option.value}
+                        onClick={() => {
+                          setProjectsAgentsScope(option.value);
+                          setScopePopoverAnchor(null);
+                        }}
+                        sx={{
+                          ...dropdownItemSx,
+                          ...getDropdownItemStateSx(isDarkMode, projectsAgentsScope === option.value),
+                        }}
+                      >
+                        {option.label}
+                      </Box>
+                    ))}
+                  </Box>
+                </Popover>
+              </Box>
             </ListItem>
 
             <Divider />
@@ -542,7 +564,9 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
                 <Box sx={RAG_MODEL_SELECTOR_ROW_SX}>
                   {ragModelRowLabel(
                     'Модель эмбеддингов',
-                    'Ваши документы и запросы считаются этой моделью. Выбор сохраняется вам в Postgres, у других пользователей ничего не меняется; ваши документы переиндексируются в фоне. Библиотека памяти не затрагивается — у неё своя модель из ConfigMap.'
+                    projectsAgentsScope === 'project'
+                      ? 'Для документов проекта. Общая библиотека использует свою модель (задаётся администратором) и этим выбором не затрагивается.'
+                      : 'Для документов агента. Общая библиотека использует свою модель (задаётся администратором) и этим выбором не затрагивается.'
                   )}
                   <Box sx={{ flexShrink: 0, width: { xs: '100%', sm: 'auto' } }}>
                     <RagModelSelector
@@ -556,7 +580,9 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
                 <Box sx={RAG_MODEL_SELECTOR_ROW_SX}>
                   {ragModelRowLabel(
                     'Cross-encoder (реранкер)',
-                    'Переупорядочивает найденные чанки после первичного поиска для более точной выдачи.'
+                    projectsAgentsScope === 'project'
+                      ? 'Переупорядочивает найденные чанки после первичного поиска для документов проекта.'
+                      : 'Переупорядочивает найденные чанки после первичного поиска для документов агента.'
                   )}
                   <Box sx={{ flexShrink: 0, width: { xs: '100%', sm: 'auto' } }}>
                     <RagModelSelector
@@ -585,13 +611,17 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
                 primary={
                   <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
                     Стратегия поиска
-                    <Tooltip 
-                      title="Выберите стратегию поиска по документам. Каждая стратегия имеет свои преимущества и подходит для разных задач." 
+                    <Tooltip
+                      title={
+                        projectsAgentsScope === 'project'
+                          ? 'Способ поиска по документам проекта. Также применяется к общей библиотеке и документам агента.'
+                          : 'Способ поиска по документам агента. Также применяется к общей библиотеке и документам проекта.'
+                      }
                       arrow
                     >
-                      <IconButton 
-                        size="small" 
-                        sx={{ 
+                      <IconButton
+                        size="small"
+                        sx={{
                           p: 0,
                           ml: 0.5,
                           opacity: 0.7,
@@ -609,9 +639,14 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
                     </Tooltip>
                   </Box>
                 }
+                secondary="Также влияет на общую библиотеку."
                 primaryTypographyProps={{
                   variant: 'body1',
                   fontWeight: 500,
+                }}
+                secondaryTypographyProps={{
+                  variant: 'caption',
+                  color: 'text.secondary',
                 }}
               />
               <Box sx={{ minWidth: 280 }}>
@@ -724,9 +759,13 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
               <ListItemText
                 primary={
                   <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-                    Стратегия чанкования (проекты и агенты)
+                    Стратегия чанкования
                     <Tooltip
-                      title="Способ нарезки документов на чанки перед индексацией. Применяется ТОЛЬКО к проектному RAG и базе знаний агента. Библиотека памяти (кнопка «Открыть базу данных» выше) всегда индексируется универсальным чанкером и этот выбор игнорирует."
+                      title={
+                        projectsAgentsScope === 'project'
+                          ? 'Способ нарезки документов проекта перед индексацией. Общая библиотека всегда использует свой чанкер.'
+                          : 'Способ нарезки документов агента перед индексацией. Общая библиотека всегда использует свой чанкер.'
+                      }
                       arrow
                     >
                       <IconButton
@@ -749,7 +788,11 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
                     </Tooltip>
                   </Box>
                 }
-                secondary="Не влияет на библиотеку памяти — она всегда режется универсальным чанкером."
+                secondary={
+                  projectsAgentsScope === 'project'
+                    ? 'Только документы проекта. На общую библиотеку не влияет.'
+                    : 'Только документы агента. На общую библиотеку не влияет.'
+                }
                 primaryTypographyProps={{
                   variant: 'body1',
                   fontWeight: 500,
@@ -865,7 +908,9 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
                         Количество чанков (K)
                         <Tooltip
                           title={
-                            'Сколько наиболее релевантных фрагментов запрашивать у SVC-RAG и подмешивать в промпт. Диапазон 1–64, по умолчанию 5. Больше K — длиннее контекст и медленнее ответ LLM.'
+                            projectsAgentsScope === 'project'
+                              ? 'Сколько фрагментов подмешивать в промпт для документов проекта (1–64, по умолчанию 5). Для общей библиотеки K задаётся администратором.'
+                              : 'Сколько фрагментов подмешивать в промпт для документов агента (1–64, по умолчанию 5). Для общей библиотеки K задаётся администратором.'
                           }
                           arrow
                         >
@@ -1051,9 +1096,14 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
                 multiline
                 minRows={4}
                 maxRows={12}
-                label="Системный промпт для RAG"
+                label="Системный промпт для поиска по документам"
                 value={ragSystemPrompt}
                 onChange={(e) => setRagSystemPrompt(e.target.value)}
+                helperText={
+                  projectsAgentsScope === 'project'
+                    ? 'Для документов проекта. Общая библиотека использует свой серверный промпт.'
+                    : 'Для документов агента. Общая библиотека использует свой серверный промпт.'
+                }
                 InputLabelProps={{ shrink: true }}
                 sx={MODEL_SETTINGS_INPUT_SX}
               />
@@ -1074,6 +1124,11 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
             <SearchIcon color="primary" />
             Методы улучшения запросов
           </Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+            {projectsAgentsScope === 'project'
+              ? 'В основном для документов проекта. У общей библиотеки свои серверные параметры (кроме стратегии поиска выше).'
+              : 'В основном для документов агента. У общей библиотеки свои серверные параметры (кроме стратегии поиска выше).'}
+          </Typography>
 
           <List sx={{ p: 0 }}>
             <ListItem
@@ -1092,8 +1147,8 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
                     <Tooltip
                       title={
                         'В режиме чата «Агент»: модель сама запрашивает документы инструментом retrieve_rag_context. ' +
-                        'Выключите, чтобы фрагменты из проекта/KB/памяти заранее подмешивались в запрос (классический pre-retrieval). ' +
-                        'Нужен режим «Агент» в чате. Стратегия из списка выше применяется к вызовам SVC-RAG из инструментов.'
+                        'Выключите, чтобы фрагменты из проекта, документов агента и общей библиотеки заранее подмешивались в запрос. ' +
+                        'Нужен режим «Агент» в чате. Стратегия поиска выше применяется к вызовам из инструментов.'
                       }
                       arrow
                     >
@@ -1372,8 +1427,6 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
           </List>
         </CardContent>
       </Card>
-
-      <MemoryRagLibraryModal open={memoryRagModalOpen} onClose={() => setMemoryRagModalOpen(false)} />
     </Box>
   );
 }

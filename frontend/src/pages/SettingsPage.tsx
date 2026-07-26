@@ -1049,18 +1049,18 @@ export default function SettingsPage() {
           </CardContent>
         </Card>
 
-                 {/* Настройки памяти */}
+                 {/* Контекст диалога + общая библиотека (legacy страница) */}
          <Card sx={{ mb: 3 }}>
            <CardContent>
              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
                <MemoryIcon color="primary" />
                <Typography variant="h6" gutterBottom sx={{ mb: 0 }}>
-                 Настройки памяти ассистента
+                 Контекст диалога
                </Typography>
              </Box>
              
              <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-               Управление контекстом и памятью ассистента для более эффективного общения
+               История сообщений чата (не путать с общей библиотекой документов ниже)
              </Typography>
 
              <Box sx={{ mb: 2, display: 'flex', flexWrap: 'wrap', gap: 2, alignItems: 'center' }}>
@@ -1070,7 +1070,7 @@ export default function SettingsPage() {
                  startIcon={<LibraryBooksIcon />}
                  onClick={() => setMemoryRagModalOpen(true)}
                >
-                 Документы для RAG (библиотека)
+                 Общая библиотека документов
                </Button>
                <FormControlLabel
                  control={
@@ -1082,11 +1082,11 @@ export default function SettingsPage() {
                      }}
                    />
                  }
-                 label="Учитывать эти документы в ответах чата"
+                 label="Учитывать общую библиотеку в ответах чата"
                />
              </Box>
              <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 2 }}>
-               Файлы хранятся в отдельном bucket MinIO; для поиска используются векторы (pgvector) и текстовые чанки.
+               Общие документы для любого чата. Документы проекта и агента настраиваются отдельно.
              </Typography>
 
              <MemoryRagLibraryModal open={memoryRagModalOpen} onClose={() => setMemoryRagModalOpen(false)} />
@@ -1292,7 +1292,7 @@ export default function SettingsPage() {
                      include_system_prompts: true,
                      clear_on_restart: false,
                    });
-                   showNotification('info', 'Настройки памяти сброшены к значениям по умолчанию');
+                   showNotification('info', 'Настройки контекста диалога сброшены к значениям по умолчанию');
                  }}
                >
                  Сбросить к умолчаниям

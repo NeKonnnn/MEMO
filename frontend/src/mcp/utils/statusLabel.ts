@@ -2,7 +2,7 @@ import type { McpPlatformStatus, McpServerStatus } from '../types';
 
 type McpStatusLegacy = McpPlatformStatus & { servers?: McpServerStatus[] | number };
 
-/** Единый label для aggregate MCP status (AgentsSettings, AgentArchitectureSettings). */
+/** Единый label для aggregate MCP status (AgentArchitectureSettings и др.). */
 export function formatMcpAggregateLabel(status: McpPlatformStatus): string {
   const tools = status.tools_total ?? status.tools ?? 0;
   const raw = status as McpStatusLegacy;

@@ -1,83 +1,75 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import {
   Box,
   Typography,
   Card,
   CardContent,
   Button,
-  FormControlLabel,
-  Switch,
+  IconButton,
+  Tooltip,
 } from '@mui/material';
-import { LibraryBooks as LibraryBooksIcon } from '@mui/icons-material';
-import MemoryRagLibraryModal from '../MemoryRagLibraryModal';
 import {
-  isKnowledgeRagEnabled,
-  setKnowledgeRagEnabled,
-  KNOWLEDGE_RAG_STORAGE_EVENT,
-} from '../../utils/knowledgeRagStorage';
+  LibraryBooks as LibraryBooksIcon,
+  HelpOutline as HelpOutlineIcon,
+} from '@mui/icons-material';
+import MemoryRagLibraryModal from '../MemoryRagLibraryModal';
 
 type Variant = 'prominent' | 'inline';
 
 interface Props {
-  /** prominent — отдельная заметная карточка сверху; inline — внутри другой карточки */
+  /** prominent — отдельная карточка сверху; inline — внутри другой карточки */
   variant?: Variant;
 }
 
+const LIBRARY_HELP =
+  'Общие файлы для любого чата (не привязаны к проекту или агенту). Загрузите PDF, Word, Excel, TXT и включите переключатель — либо кнопку «Общий RAG» в чате.';
+
 export default function MemoryRagLibrarySection({ variant = 'prominent' }: Props) {
   const [memoryRagModalOpen, setMemoryRagModalOpen] = useState(false);
-  const [useMemoryLibraryRag, setUseMemoryLibraryRag] = useState(() => isKnowledgeRagEnabled());
 
-  useEffect(() => {
-    const onRag = () => setUseMemoryLibraryRag(isKnowledgeRagEnabled());
-    window.addEventListener(KNOWLEDGE_RAG_STORAGE_EVENT, onRag);
-    return () => window.removeEventListener(KNOWLEDGE_RAG_STORAGE_EVENT, onRag);
-  }, []);
+  const title = (
+    <Typography
+      variant={variant === 'prominent' ? 'h6' : 'subtitle2'}
+      gutterBottom
+      sx={{ display: 'flex', alignItems: 'center', gap: 1, fontWeight: variant === 'prominent' ? undefined : 500 }}
+    >
+      <LibraryBooksIcon color="primary" fontSize={variant === 'prominent' ? 'medium' : 'small'} />
+      Общая библиотека документов
+      <Tooltip title={LIBRARY_HELP} arrow>
+        <IconButton
+          size="small"
+          sx={{
+            ml: 0.5,
+            opacity: 0.7,
+            '&:hover': {
+              opacity: 1,
+              '& .MuiSvgIcon-root': {
+                color: 'primary.main',
+              },
+            },
+          }}
+          aria-label="Справка: общая библиотека документов"
+        >
+          <HelpOutlineIcon fontSize="small" color="action" />
+        </IconButton>
+      </Tooltip>
+    </Typography>
+  );
 
   const inner = (
     <>
-      <Typography
-        variant={variant === 'prominent' ? 'h6' : 'subtitle2'}
-        gutterBottom
-        sx={{ display: 'flex', alignItems: 'center', gap: 1, fontWeight: variant === 'prominent' ? 600 : 500 }}
-      >
-        <LibraryBooksIcon color="primary" fontSize={variant === 'prominent' ? 'medium' : 'small'} />
-        Документы для RAG (библиотека памяти)
-      </Typography>
-      {variant === 'prominent' && (
-        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-          Загрузите PDF, Word, Excel, TXT — файлы в MinIO, поиск по векторам в PostgreSQL. Включите переключатель, чтобы
-          модель использовала их в чате.
-        </Typography>
-      )}
+      {title}
       <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 2, alignItems: 'center' }}>
         <Button
-          variant="contained"
+          variant="outlined"
           color="primary"
-          size={variant === 'prominent' ? 'large' : 'medium'}
+          size="medium"
           startIcon={<LibraryBooksIcon />}
           onClick={() => setMemoryRagModalOpen(true)}
-          sx={variant === 'prominent' ? { minWidth: 280 } : undefined}
         >
-          Открыть библиотеку документов
+          Открыть общую библиотеку
         </Button>
-        <FormControlLabel
-          control={
-            <Switch
-              checked={useMemoryLibraryRag}
-              onChange={(_, c) => {
-                setUseMemoryLibraryRag(c);
-                setKnowledgeRagEnabled(c);
-              }}
-            />
-          }
-          label="Учитывать в ответах чата"
-        />
       </Box>
-      {variant === 'inline' && (
-        <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>
-          MinIO + pgvector. Переключатель включает контекст из библиотеки в сообщениях.
-        </Typography>
-      )}
       <MemoryRagLibraryModal open={memoryRagModalOpen} onClose={() => setMemoryRagModalOpen(false)} />
     </>
   );
@@ -100,15 +92,7 @@ export default function MemoryRagLibrarySection({ variant = 'prominent' }: Props
   }
 
   return (
-    <Card
-      sx={{
-        mb: 3,
-        border: 2,
-        borderColor: 'primary.main',
-        background: (t) =>
-          t.palette.mode === 'dark' ? 'rgba(25, 118, 210, 0.08)' : 'rgba(25, 118, 210, 0.06)',
-      }}
-    >
+    <Card sx={{ mb: 3 }}>
       <CardContent>{inner}</CardContent>
     </Card>
   );

@@ -1213,13 +1213,13 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
             />
           </Box>
 
-          {/* File context — тот же KB upload, что и «Поиск файлов» */}
+          {/* File context — тот же upload, что и «Документы агента» */}
           <Box>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 0.75 }}>
               <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.45)', fontSize: '0.72rem' }}>
                 Контекст файла
               </Typography>
-              <Tooltip title="Файл индексируется в Базу Знаний агента и доступен через поиск по файлам. После загрузки сохраните агента." arrow>
+              <Tooltip title="Файл добавляется в документы этого агента (не в общую библиотеку). После загрузки сохраните агента." arrow>
                 <HelpIcon sx={{ fontSize: 12, color: 'rgba(255,255,255,0.25)' }} />
               </Tooltip>
             </Box>
@@ -1342,7 +1342,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
 
         {/* ── File Search (KB) ─────────────────────────────────────────────── */}
         <Box sx={{ minWidth: 0 }}>
-          <SectionHeader>Поиск файлов</SectionHeader>
+          <SectionHeader>Документы агента</SectionHeader>
 
           <Box sx={{ mt: 1, minWidth: 0 }}>
             <FormControlLabel
@@ -1356,9 +1356,11 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
               }
               label={
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-                  <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.75)', fontSize: '0.78rem' }}>Включить поиск файлов</Typography>
+                  <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.75)', fontSize: '0.78rem' }}>
+                    Искать по документам агента
+                  </Typography>
                   <Tooltip
-                    title="Файлы привязываются к этому агенту. В чате поиск по ним включается при выбранном агенте с включённым поиском файлов."
+                    title="Файлы привязаны к этому агенту (не общая библиотека и не документы проекта). В чате поиск включается при выбранном агенте с этим флагом. Параметры индексации — в «RAG» → «Проекты и агенты»."
                     arrow
                   >
                     <HelpIcon sx={{ fontSize: 12, color: 'rgba(255,255,255,0.25)' }} />

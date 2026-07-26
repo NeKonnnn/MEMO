@@ -67,7 +67,7 @@ export default function ProjectRagLibraryInline({
   projectId,
   onResolveProjectId,
   autoLoad = true,
-  subtitle = 'Оригиналы в MinIO, чанки и векторы — в PostgreSQL (только этот проект)',
+  subtitle = 'Документы только этого проекта. В чатах проекта подключаются автоматически — отдельный тумблер не нужен.',
   dense = false,
 }: ProjectRagLibraryInlineProps) {
   const [documents, setDocuments] = useState<ProjectRagDoc[]>([]);
@@ -273,7 +273,7 @@ export default function ProjectRagLibraryInline({
   return (
     <Box>
       <Typography variant="subtitle2" fontWeight={600} gutterBottom>
-        Файлы проекта (RAG)
+        Документы проекта
       </Typography>
       <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1 }}>
         {subtitle}

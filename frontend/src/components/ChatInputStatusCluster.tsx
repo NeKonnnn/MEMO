@@ -47,7 +47,9 @@ export default function ChatInputStatusCluster({
   const tooltipTitle = useMemo(() => {
     const parts: string[] = [];
     if (libraryActive) {
-      parts.push('Библиотека в ответах включена. Нажмите на книгу, чтобы отключить.');
+      parts.push(
+        'Общий RAG в ответах включён. Нажмите на книгу, чтобы отключить. Документы проекта и агента подключаются отдельно.',
+      );
     }
     if (standardAgentsActive && myAgentName) {
       parts.push(`Стандартные агенты активны; выбран агент «${myAgentName}» (Мои агенты).`);
