@@ -33,6 +33,27 @@ auth:
     max_failed_attempts: 5
     lockout_duration_seconds: 900
 
+# Coding agent (workspace tools в чате, паттерн Odysseus)
+coding_agent:
+  enabled: true
+  max_rounds: 50
+  max_tool_calls: 40
+  bash_timeout_sec: 60
+  python_timeout_sec: 60
+  # Пусто = любой абсолютный путь (dev). В prod задайте корни, напр. /workspaces
+  allowed_roots: []
+  # Windows-путь с хоста → путь внутри контейнера (см. volumes в docker-compose)
+  path_aliases:
+    "F:/test_CLI": "/workspaces/test_CLI"
+    "F:\\test_CLI": "/workspaces/test_CLI"
+  # Workspace по умолчанию и пресеты для UI (шестерёнка → Coding)
+  default_workspace: /workspaces/test_CLI
+  workspace_presets:
+    - id: test_cli
+      label: "Test CLI"
+      path: /workspaces/test_CLI
+      host_hint: "F:/test_CLI"
+
 # ========================================================
 # MCP PLATFORM (универсальная интеграция MCP-серверов)
 # ========================================================

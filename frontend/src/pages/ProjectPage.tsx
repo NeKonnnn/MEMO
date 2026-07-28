@@ -104,6 +104,8 @@ import { getApiUrl } from '../config/api';
 import { useTheme } from '@mui/material/styles';
 import AgentConstructorPanel from '../components/AgentConstructorPanel';
 import GalleryNavButton from '../components/GalleryNavButton';
+import ModelSelector from '../components/ModelSelector';
+import AgentSelector from '../components/AgentSelector';
 import {
   getProjectIconGlyphSx,
   getDropdownItemSx,
@@ -197,7 +199,21 @@ const projectIconMap: Record<string, React.ComponentType<any>> = {
   luggage: LuggageIcon,
 };
 
-export default function ProjectPage() {
+type ModelSelectorMode = 'settings' | 'workspace' | 'workspace_agent';
+
+const readModelSelectorMode = (): ModelSelectorMode => {
+  const saved = localStorage.getItem('model_selector_mode');
+  if (saved === 'settings' || saved === 'workspace' || saved === 'workspace_agent') return saved;
+  const oldBool = localStorage.getItem('show_model_selector_in_settings');
+  return oldBool === 'true' ? 'settings' : 'workspace_agent';
+};
+
+interface ProjectPageProps {
+  sidebarOpen?: boolean;
+  sidebarHidden?: boolean;
+}
+
+export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false }: ProjectPageProps) {
   const { projectId } = useParams<{ projectId: string }>();
   const navigate = useNavigate();
   const theme = useTheme();
@@ -209,6 +225,7 @@ export default function ProjectPage() {
   const [chatSuggestionsEnabled, setChatSuggestionsEnabled] = useState(
     () => loadFollowUpSettings().followUpAutoGenerate,
   );
+  const [modelSelectorMode, setModelSelectorMode] = useState<ModelSelectorMode>(readModelSelectorMode);
   const [isSending, setIsSending] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -220,12 +237,13 @@ export default function ProjectPage() {
   }, []);
 
   useEffect(() => {
-    const syncSuggestionsSetting = () => {
+    const syncInterfaceSettings = () => {
       setChatSuggestionsEnabled(loadFollowUpSettings().followUpAutoGenerate);
+      setModelSelectorMode(readModelSelectorMode());
     };
-    syncSuggestionsSetting();
-    window.addEventListener('interfaceSettingsChanged', syncSuggestionsSetting);
-    return () => window.removeEventListener('interfaceSettingsChanged', syncSuggestionsSetting);
+    syncInterfaceSettings();
+    window.addEventListener('interfaceSettingsChanged', syncInterfaceSettings);
+    return () => window.removeEventListener('interfaceSettingsChanged', syncInterfaceSettings);
   }, []);
 
   useEffect(() => {
@@ -806,6 +824,30 @@ export default function ProjectPage() {
     >
       {workZoneMode === 'starry' ? <WorkZoneStarrySky isDarkMode={isDarkMode} /> : null}
       {workZoneMode === 'snowfall' ? <WorkZoneSnowfall isDarkMode={isDarkMode} /> : null}
+
+      {/* Селектор моделей — как в обычном чате, левый верхний угол */}
+      {(modelSelectorMode === 'workspace' || modelSelectorMode === 'workspace_agent') && (
+        <Box
+          sx={{
+            position: 'absolute',
+            top: 16,
+            left: sidebarHidden ? 16 : sidebarOpen ? 16 : 80,
+            zIndex: 1200,
+            transition: 'left 0.3s ease',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 0.75,
+          }}
+        >
+          {modelSelectorMode === 'workspace' && (
+            <ModelSelector isDarkMode={isDarkMode} onModelSelect={() => {}} />
+          )}
+          {modelSelectorMode === 'workspace_agent' && (
+            <AgentSelector isDarkMode={isDarkMode} triggerMaxWidth={180} onModelSelect={() => {}} />
+          )}
+        </Box>
+      )}
+
       {/* Основной контент с центрированием */}
       <Box
         sx={{

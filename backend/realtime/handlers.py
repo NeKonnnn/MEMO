@@ -49,6 +49,7 @@ from backend.services.user_llm_settings import (
 from backend.services.user_rag_settings import (
     bind_user_rag_runtime,
     get_user_rag_settings,
+    raw_user_rag_settings,
     reset_user_rag_runtime,
     runtime_agentic_max_iterations,
     runtime_agentic_rag_enabled,
@@ -527,8 +528,10 @@ def register_handlers(sio):
                 await sio.disconnect(sid)
                 return
             try:
-                user_rag = await get_user_rag_settings(validated_user.get("user_id"))
-                rag_runtime_token = bind_user_rag_runtime(user_rag)
+                user_id = validated_user.get("user_id")
+                user_rag = await get_user_rag_settings(user_id, "project")
+                user_rag_raw = await raw_user_rag_settings(user_id)
+                rag_runtime_token = bind_user_rag_runtime(user_rag, user_rag_raw)
             except Exception:
                 logger.exception("Не удалось загрузить персональные RAG-настройки")
                 user_rag = {}
@@ -637,28 +640,32 @@ def register_handlers(sio):
                         await sio.emit("chat_error", {"error": "MongoDB недоступен."}, room=sid)
                         return
                     raise
-            handled_image = await _handle_chat_image_generation_request(
-                sio,
-                sid,
-                user_message=user_message,
-                conversation_id=conversation_id,
-                project_id=project_id,
-                current_user=validated_user,
-                streaming=streaming,
-                image_gen_preset_id=(data.get("image_gen_preset_id") or None),
-                regenerate=is_regenerate,
-                assistant_message_id=str(data.get("assistant_message_id") or "").strip() or None,
-            )
-            if handled_image:
-                return
+            if not bool(data.get("coding_mode")):
+                handled_image = await _handle_chat_image_generation_request(
+                    sio,
+                    sid,
+                    user_message=user_message,
+                    conversation_id=conversation_id,
+                    project_id=project_id,
+                    current_user=validated_user,
+                    streaming=streaming,
+                    image_gen_preset_id=(data.get("image_gen_preset_id") or None),
+                    regenerate=is_regenerate,
+                    assistant_message_id=str(data.get("assistant_message_id") or "").strip() or None,
+                )
+                if handled_image:
+                    return
 
             orchestrator = get_agent_orchestrator()
             use_agent_mode = orchestrator and orchestrator.get_mode() == "agent"
             use_multi_llm_mode = bool(data.get("model_comparison_enabled", False))
             chat_mode = "model-comparison" if use_multi_llm_mode else "agent" if use_agent_mode else "direct"
             logger.info(
-                "[RAG] chat_message mode=%s effective_strategy=%s payload_rag_strategy=%r settings_rag_strategy=%s agentic_rag_enabled=%s use_kb_rag=%s use_memory_library_rag=%s use_agent_scoped_kb=%s project_id=%s",
+                "[RAG] chat_message mode=%s coding_mode=%s plan_mode=%s workspace_path=%r effective_strategy=%s payload_rag_strategy=%r settings_rag_strategy=%s agentic_rag_enabled=%s use_kb_rag=%s use_memory_library_rag=%s use_agent_scoped_kb=%s project_id=%s",
                 chat_mode,
+                bool(data.get("coding_mode")),
+                bool(data.get("plan_mode")),
+                str(data.get("workspace_path") or "").strip(),
                 effective_rag_strategy,
                 requested_rag_strategy or "",
                 (user_rag or {}).get("rag_strategy") or runtime_rag_strategy(),
@@ -688,7 +695,7 @@ def register_handlers(sio):
                 asyncio.run_coroutine_threadsafe(async_stream_cb(chunk, acc, stream_role), loop)
                 return True
 
-            if use_multi_llm_mode:
+            if use_multi_llm_mode and not bool(data.get("coding_mode")):
                 slot = str(data.get("multi_llm_slot_regenerate") or "").strip()
                 models_subset = [slot] if bool(data.get("regenerate")) and slot else None
                 await _handle_multi_llm(
@@ -714,7 +721,7 @@ def register_handlers(sio):
                     agent_profile=agent_profile,
                 )
                 return
-            if use_agent_mode:
+            if use_agent_mode and not bool(data.get("coding_mode")):
                 await _handle_agent_mode(
                     sio,
                     sid,
@@ -1847,7 +1854,80 @@ async def _handle_direct(
     tool_ids = resolve_chat_tool_ids(data.get("tool_ids") or data.get("mcp_tool_ids"))
     mcp_result = None
     mcp_tool_events: list = []
-    if not canned and tool_ids and current_user:
+    coding_mode = bool(data.get("coding_mode"))
+    plan_mode = bool(data.get("plan_mode"))
+    workspace_path = str(data.get("workspace_path") or "").strip()
+    if not coding_mode and not plan_mode:
+        from backend.coding_agent.loop import message_wants_coding_agent
+
+        if message_wants_coding_agent(user_message):
+            if not workspace_path:
+                from backend.coding_agent.workspace import resolve_workspace_path
+
+                workspace_path = str(resolve_workspace_path(None) or "").strip()
+            if workspace_path:
+                coding_mode = True
+                logger.info(
+                    "Coding agent: auto-enabled (file intent) sid=%s workspace=%s",
+                    sid,
+                    workspace_path,
+                )
+    if coding_mode and not workspace_path:
+        from backend.coding_agent.workspace import resolve_workspace_path
+
+        workspace_path = str(resolve_workspace_path(None) or "").strip()
+    approved_plan = str(data.get("approved_plan") or "").strip() or None
+    coding_result = None
+    coding_tool_events: list = []
+    if not canned and coding_mode and current_user:
+        try:
+            from backend.coding_agent.chat_integration import run_coding_for_chat
+
+            async def _coding_event_cb(payload):
+                coding_tool_events.append(dict(payload))
+                await sio.emit("chat_coding_event", payload, room=sid)
+
+            logger.info(
+                "Coding agent: start sid=%s conversation_id=%s workspace_path=%s plan_mode=%s model_path=%s",
+                sid,
+                conversation_id,
+                workspace_path,
+                plan_mode,
+                eff_model_path,
+            )
+            await sio.emit(
+                "chat_thinking",
+                {
+                    "status": "processing",
+                    "message": "Coding agent: запуск (tools + workspace)…",
+                    "coding_agent": True,
+                },
+                room=sid,
+            )
+            coding_result = await run_coding_for_chat(
+                user_message=user_message,
+                history=history,
+                system_prompt=eff_system_prompt,
+                model_path=eff_model_path,
+                workspace_path=workspace_path,
+                plan_mode=plan_mode,
+                approved_plan=approved_plan,
+                temperature=agent_profile.get("temperature") or 0.7,
+                max_tokens=max(agent_profile.get("max_tokens") or 1024, 4096),
+                enable_thinking=enable_thinking,
+                emit_event=_coding_event_cb,
+            )
+            logger.info(
+                "Coding agent: done sid=%s mode=%s tool_calls_executed=%s iterations=%s plan_mode=%s",
+                sid,
+                getattr(coding_result, "mode", None),
+                getattr(coding_result, "tool_calls_executed", None),
+                getattr(coding_result, "iterations", None),
+                plan_mode,
+            )
+        except Exception:
+            logger.exception("Coding agent loop error")
+    elif not canned and tool_ids and current_user:
         try:
             from backend.mcp.chat_integration import run_mcp_for_chat
 
@@ -1901,6 +1981,17 @@ async def _handle_direct(
         response = canned
         if streaming:
             await sio.emit("chat_chunk", {"chunk": canned, "accumulated": canned}, room=sid)
+    elif coding_result is not None:
+        response = coding_result.content
+        if streaming and response:
+            await sio.emit("chat_chunk", {"chunk": response, "accumulated": response}, room=sid)
+        logger.info(
+            "Coding agent loop: mode=%s tools=%s iterations=%s plan=%s",
+            coding_result.mode,
+            coding_result.tool_calls_executed,
+            coding_result.iterations,
+            coding_result.plan_mode,
+        )
     elif mcp_result is not None:
         response = mcp_result.content
         if streaming and response:
@@ -1943,6 +2034,16 @@ async def _handle_direct(
         payload["document_search"] = document_search_trace
     if mcp_tool_events:
         payload["mcp_tool_calls"] = mcp_tool_events
+    if coding_tool_events:
+        payload["coding_tool_calls"] = coding_tool_events
+        payload["mcp_tool_calls"] = list(mcp_tool_events) + [
+            e for e in coding_tool_events if e.get("type") in ("mcp_tool_start", "mcp_tool_end")
+        ]
+    if coding_result is not None:
+        if getattr(coding_result, "pending_ask_user", None):
+            payload["ask_user"] = coding_result.pending_ask_user
+        if getattr(coding_result, "active_plan", None):
+            payload["active_plan"] = coding_result.active_plan
     await sio.emit("chat_complete", payload, room=sid)
     rag_metrics = await _compute_and_emit_rag_metrics(
         sio,
@@ -1964,6 +2065,9 @@ async def _handle_direct(
         if mcp_tool_events:
             meta = dict(meta or {})
             meta["mcp_tool_calls"] = mcp_tool_events
+        if coding_tool_events:
+            meta = dict(meta or {})
+            meta["coding_tool_calls"] = coding_tool_events
         if mcp_result and getattr(mcp_result, "attachments", None):
             meta = dict(meta or {})
             meta["mcp_attachments"] = mcp_result.attachments

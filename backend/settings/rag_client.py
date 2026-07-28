@@ -282,10 +282,28 @@ class RagClient:
             runtime_reranker_fields,
         )
 
-        # Библиотека вне пер-юзерности: у неё своя модель из ENV svc-rag.
-        is_memory = (settings_source or "user").strip().lower() == "memory"
-        emb_fields = {} if is_memory else runtime_embedding_fields()
-        rr_fields = {} if is_memory else runtime_reranker_fields()
+        src = (settings_source or "user").strip().lower()
+        is_memory = src == "memory"
+        scope = src if src in ("project", "agent") else None
+        if is_memory:
+            from backend.services.memory_rag_env import (
+                get_memory_embedding_fields,
+                get_memory_reranker_fields,
+            )
+
+            emb_fields = get_memory_embedding_fields()
+            rr_fields = get_memory_reranker_fields()
+        else:
+            emb_fields = runtime_embedding_fields(scope)
+            rr_fields = runtime_reranker_fields(scope)
+
+        if strategy is None:
+            from backend.services.user_rag_settings import (
+                runtime_memory_strategy,
+                runtime_rag_strategy,
+            )
+
+            strategy = runtime_memory_strategy() if is_memory else runtime_rag_strategy(scope)
 
         st = (strategy or "").strip().lower()
         raw_mode = st == "raw_cosine"
@@ -312,10 +330,10 @@ class RagClient:
                 from_cache=False,
             )
             return hits
-        if (settings_source or "user").strip().lower() == "memory":
+        if is_memory:
             user_rag = get_memory_rag_retrieval_settings()
         else:
-            user_rag = get_runtime_rag_settings()
+            user_rag = get_runtime_rag_settings(scope)
         _fix = bool(user_rag.get("rag_query_fix_typos", False))
         _multi = bool(user_rag.get("rag_multi_query_enabled", False))
         _hyde = bool(user_rag.get("rag_hyde_enabled", False))

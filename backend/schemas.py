@@ -101,7 +101,9 @@ class DocumentQueryRequest(BaseModel):
 
 
 class RAGSettings(BaseModel):
+    scope: Optional[str] = None
     strategy: Optional[str] = None  # auto | hybrid | vector | lexical | raw_cosine | graph
+    rag_memory_strategy: Optional[str] = None
     agentic_rag_enabled: Optional[bool] = None
     agentic_max_iterations: Optional[int] = None
     # Препроцесс запроса перед поиском в SVC-RAG (доп. вызовы LLM при включении)
@@ -132,6 +134,7 @@ class RAGSettings(BaseModel):
 class RagModelSelectRequest(BaseModel):
     model_type: str  # embedding | reranker
     model_path: str
+    scope: Optional[str] = None
 
 
 class AgentModeRequest(BaseModel):

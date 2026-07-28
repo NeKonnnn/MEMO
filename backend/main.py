@@ -104,13 +104,14 @@ from backend.routes.context_prompts import router as context_prompts_router
 from backend.routes.project_rag import router as project_rag_router
 from backend.routes.model_comparison import router as model_comparison_router
 from backend.routes.mcp import router as mcp_router
+from backend.routes.coding_agent import router as coding_agent_router
 from backend.routes.image_generation import router as image_generation_router
 for _r in (
     system_router, chat_router, models_router, llm_router, llm_providers_router,
     memory_router, voice_router, documents_router, transcription_router,
     rag_router, internal_rag_router, agents_router, context_prompts_router,
     project_rag_router, model_comparison_router,
-    mcp_router, image_generation_router,
+    mcp_router, coding_agent_router, image_generation_router,
 ):
     app.include_router(_r)
 try:

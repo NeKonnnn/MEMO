@@ -18,6 +18,7 @@ import asyncio
 import json
 import os
 import re
+import weakref
 from typing import Any, Dict, List, Optional, Tuple
 
 from .anthropic import AnthropicProvider
@@ -499,7 +500,19 @@ def _host_entry_to_tuple(entry: Any) -> Tuple[Optional[str], Optional[str]]:
 
 
 _registry: Optional[ProviderRegistry] = None
-_registry_lock: asyncio.Lock = asyncio.Lock()
+_registry_locks: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _registry_lock() -> asyncio.Lock:
+    """Lock привязан к текущему event loop (безопасно для ThreadPoolExecutor + asyncio.run)."""
+    loop = asyncio.get_running_loop()
+    lock = _registry_locks.get(loop)
+    if lock is None:
+        lock = asyncio.Lock()
+        _registry_locks[loop] = lock
+    return lock
 
 
 async def get_registry() -> ProviderRegistry:
@@ -510,7 +523,7 @@ async def get_registry() -> ProviderRegistry:
     global _registry
     if _registry is not None:
         return _registry
-    async with _registry_lock:
+    async with _registry_lock():
         if _registry is not None:
             return _registry
         _registry = await _build_from_settings()
@@ -568,7 +581,7 @@ def get_registry_sync_or_none() -> Optional[ProviderRegistry]:
 async def reload_registry() -> ProviderRegistry:
     """Переинициализация (для hot-reload конфига, сейчас не используется)."""
     global _registry
-    async with _registry_lock:
+    async with _registry_lock():
         old = _registry
         if old is not None:
             try:

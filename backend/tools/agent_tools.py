@@ -12,6 +12,7 @@ from langchain_core.tools import tool
 import backend.app_state as state
 from backend.settings.rag_client import RagReindexInProgress
 from backend.agents.document_agent import DocumentAgent
+from backend.services.user_rag_settings import runtime_rag_top_k
 from backend.settings.logging import get_logger
 from backend.tools.tool_context import get_tool_context
 
@@ -153,7 +154,7 @@ def retrieve_rag_context(request: str) -> str:
             },
             ensure_ascii=False,
         )
-    default_k = int(state.get_rag_chat_top_k())
+    default_k = int(runtime_rag_top_k("agent") or state.get_rag_chat_top_k())
     try:
         k = int(payload.get("k") or default_k)
     except (TypeError, ValueError):

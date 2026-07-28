@@ -389,6 +389,57 @@ class McpServerConfig(BaseModel):
     custom_headers: Dict[str, str] = Field(default_factory=dict)
 
 
+class WorkspacePreset(BaseModel):
+    """Преднастроенная папка для coding agent (задаётся в config, выбирается в UI)."""
+
+    id: str
+    label: str
+    path: str
+    host_hint: Optional[str] = None
+
+
+class CodingAgentConfig(BaseModel):
+    """Локальный coding agent (workspace tools, паттерн Odysseus)."""
+
+    enabled: bool = True
+    max_rounds: int = 50
+    max_tool_calls: int = 40
+    bash_timeout_sec: int = 60
+    python_timeout_sec: int = 60
+    allowed_roots: List[str] = Field(default_factory=list)
+    # host-путь (Windows) → путь внутри контейнера Docker
+    path_aliases: Dict[str, str] = Field(default_factory=dict)
+    # Путь по умолчанию, если в UI/проекте не задан workspace
+    default_workspace: Optional[str] = None
+    # Список папок для выбора в UI (без ручного ввода Docker-путей)
+    workspace_presets: List[WorkspacePreset] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def load_from_env(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            data = {}
+        env_enabled = os.getenv("CODING_AGENT_ENABLED")
+        if env_enabled is not None:
+            data["enabled"] = env_enabled.strip().lower() in ("1", "true", "yes", "on")
+        for env_key, field in (
+            ("CODING_AGENT_MAX_ROUNDS", "max_rounds"),
+            ("CODING_AGENT_MAX_TOOL_CALLS", "max_tool_calls"),
+            ("CODING_AGENT_BASH_TIMEOUT_SEC", "bash_timeout_sec"),
+            ("CODING_AGENT_PYTHON_TIMEOUT_SEC", "python_timeout_sec"),
+        ):
+            val = os.getenv(env_key)
+            if val is not None:
+                try:
+                    data[field] = int(val)
+                except ValueError:
+                    pass
+        roots = os.getenv("CODING_AGENT_ALLOWED_ROOTS")
+        if roots is not None:
+            data["allowed_roots"] = [p.strip() for p in roots.split(os.pathsep) if p.strip()]
+        return data
+
+
 class McpPlatformConfig(BaseModel):
     """Глобальные настройки MCP-платформы."""
     enabled: bool = False
@@ -582,6 +633,7 @@ class Settings(BaseModel):
     llm_providers: List[Dict[str, Any]] = Field(default_factory=list)
     default_llm_provider: Optional[str] = None
     mcp: McpPlatformConfig = Field(default_factory=McpPlatformConfig)
+    coding_agent: CodingAgentConfig = Field(default_factory=CodingAgentConfig)
     image_generation: ImageGenerationConfig = Field(default_factory=ImageGenerationConfig)
     class Config:
         """Настройки Pydantic"""

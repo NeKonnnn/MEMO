@@ -21,9 +21,11 @@ from backend.auth.jwt_handler import get_current_user
 from backend.rag_query.semantic_cache import bump_rag_semantic_cache
 from backend.schemas import RAGSettings, RagModelSelectRequest
 from backend.services.user_rag_settings import (
+    SCOPES,
     chunk_params_from_rag_settings,
     default_rag_settings_snapshot,
     get_user_rag_settings,
+    normalize_scope,
     save_user_rag_settings,
     settings_response_dict,
 )
@@ -184,14 +186,18 @@ def _rag_settings_response_dict() -> dict:
 
 
 @router.get("/api/rag/settings")
-async def get_rag_settings(current_user: Annotated[dict, Depends(get_current_user)]):
+async def get_rag_settings(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    scope: Optional[str] = None,
+):
     """Персональные RAG-настройки (project + agent).
 
     Memory RAG (кроме стратегии поиска) — только ConfigMap/env SVC-RAG / SVC-RAG-MODELS.
     """
     user_id = str(current_user.get("user_id") or "").strip()
-    settings_data = await get_user_rag_settings(user_id)
-    return settings_response_dict(settings_data)
+    sc = normalize_scope(scope)
+    settings_data = await get_user_rag_settings(user_id, sc)
+    return {**settings_response_dict(settings_data), "scope": sc}
 
 
 def _build_reindex_status_message(
@@ -347,7 +353,9 @@ async def reset_rag_settings(current_user: Annotated[dict, Depends(get_current_u
                 ),
             }
         )
-        merged = await save_user_rag_settings(user_id, defaults)
+        merged = None
+        for sc in SCOPES:
+            merged = await save_user_rag_settings(user_id, defaults, sc)
         bump_rag_semantic_cache()
         return {"message": "Настройки RAG сброшены", "success": True, **settings_response_dict(merged)}
     except HTTPException:
@@ -410,7 +418,9 @@ async def _collect_owner_agent_kb_document_ids(owner_user_id: str) -> list:
         return []
 
 
-async def _run_background_rechunk_for_user(user_id: str, chunk_params: dict) -> None:
+async def _run_background_rechunk_for_user(
+    user_id: str, chunk_params: dict, scope: Optional[str] = None
+) -> None:
     """Перечанковка только документов пользователя: project + agent KB (owner).
 
     Memory RAG не трогаем — нарезка Memory только из env SVC-RAG.
@@ -425,42 +435,48 @@ async def _run_background_rechunk_for_user(user_id: str, chunk_params: dict) -> 
     # Фон живёт вне запроса — ContextVar пуст, модель берём по user_id явно.
     from backend.services.user_rag_settings import embedding_fields_for_user
 
-    emb = await embedding_fields_for_user(oid)
+    emb = await embedding_fields_for_user(oid, scope)
     logger.info(
-        "[RECHUNK-USER] старт user=%s model=%s strategy=%s chunk_size=%s overlap=%s agent_docs=%s",
+        "[RECHUNK-USER] старт user=%s scope=%s model=%s strategy=%s chunk_size=%s overlap=%s agent_docs=%s",
         oid,
+        scope or "both",
         emb.get("embedding_model"),
         strat,
         cs,
         co,
         len(agent_doc_ids),
     )
+    sc = (scope or "").strip().lower()
+    do_agent = sc in ("", "agent")
+    do_project = sc in ("", "project")
     _mark_user_scoped_reindex(oid, active=True)
     _mark_reindex_started()
     try:
-        try:
-            kb_res = await rag_client.kb_reindex(
-                chunk_size=cs,
-                chunk_overlap=co,
-                chunking_strategy=strat,
-                owner_user_id=oid,
-                document_ids=agent_doc_ids or None,
-                **emb,
-            )
-            logger.info("[RECHUNK-USER] kb готово: %s", kb_res)
-        except Exception:
-            logger.exception("[RECHUNK-USER] kb ошибка")
-        try:
-            proj_res = await rag_client.project_rag_reindex_all(
-                chunk_size=cs,
-                chunk_overlap=co,
-                chunking_strategy=strat,
-                owner_user_id=oid,
-                **emb,
-            )   
-            logger.info("[RECHUNK-USER] projects готово: %s", proj_res)
-        except Exception:
-            logger.exception("[RECHUNK-USER] projects ошибка")
+        if do_agent:
+            try:
+                kb_res = await rag_client.kb_reindex(
+                    chunk_size=cs,
+                    chunk_overlap=co,
+                    chunking_strategy=strat,
+                    owner_user_id=oid,
+                    document_ids=agent_doc_ids or None,
+                    **emb,
+                )
+                logger.info("[RECHUNK-USER] kb готово: %s", kb_res)
+            except Exception:
+                logger.exception("[RECHUNK-USER] kb ошибка")
+        if do_project:
+            try:
+                proj_res = await rag_client.project_rag_reindex_all(
+                    chunk_size=cs,
+                    chunk_overlap=co,
+                    chunking_strategy=strat,
+                    owner_user_id=oid,
+                    **emb,
+                )
+                logger.info("[RECHUNK-USER] projects готово: %s", proj_res)
+            except Exception:
+                logger.exception("[RECHUNK-USER] projects ошибка")
         logger.info(
             "[RECHUNK-USER] задачи поставлены в svc-rag user=%s; "
             "флаг снимется по факту завершения",
@@ -522,9 +538,11 @@ async def _run_background_reindex_after_model_change() -> None:
     )
 
 
-async def _run_background_reindex_for_user(user_id: str, chunk_params: dict) -> None:
+async def _run_background_reindex_for_user(
+    user_id: str, chunk_params: dict, scope: Optional[str] = None
+) -> None:
     """Переиндексация project + agent KB только для пользователя (без Memory)."""
-    await _run_background_rechunk_for_user(user_id, chunk_params)
+    await _run_background_rechunk_for_user(user_id, chunk_params, scope)
 
 
 @router.put("/api/rag/settings")
@@ -578,8 +596,9 @@ async def update_rag_settings(
         and (settings_data.rag_reranker_model_path is None)
     ):
         raise HTTPException(status_code=400, detail="Нет полей для обновления")
+    scope = normalize_scope(settings_data.scope)
     try:
-        before = await get_user_rag_settings(user_id)
+        before = await get_user_rag_settings(user_id, scope)
         _chunk_before = (
             str(before.get("rag_chunking_strategy") or ""),
             int(before.get("rag_chunk_size") or 0),
@@ -588,6 +607,15 @@ async def update_rag_settings(
         updates: dict = {}
         if strat is not None:
             updates["rag_strategy"] = strat
+        if settings_data.rag_memory_strategy is not None:
+            mem_strat = str(settings_data.rag_memory_strategy).strip().lower()
+            if mem_strat and mem_strat not in _VALID_STRATEGIES:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Недопустимая стратегия Библиотеки. Допустимые: {_VALID_STRATEGIES}",
+                )
+            if mem_strat:
+                updates["rag_memory_strategy"] = mem_strat
         if settings_data.agentic_rag_enabled is not None:
             updates["agentic_rag_enabled"] = bool(settings_data.agentic_rag_enabled)
         if settings_data.agentic_max_iterations is not None:
@@ -648,8 +676,8 @@ async def update_rag_settings(
         if not updates:
             raise HTTPException(status_code=400, detail="Нет полей для обновления")
 
-        logger.debug("[RAG-CFG] персональные настройки user=%s: %s", user_id, updates)
-        merged = await save_user_rag_settings(user_id, updates)
+        logger.debug("[RAG-CFG] персональные настройки user=%s scope=%s: %s", user_id, scope, updates)
+        merged = await save_user_rag_settings(user_id, updates, scope)
 
         if "rag_chat_top_k" in updates or "rag_rerank_top_n" in updates:
             bump_rag_semantic_cache()
@@ -670,11 +698,14 @@ async def update_rag_settings(
             and _chunk_after != _chunk_before
         ):
             logger.info(
-                "[RECHUNK-USER] чанкинг изменился user=%s → scoped перечанковка",
+                "[RECHUNK-USER] чанкинг изменился user=%s scope=%s → scoped перечанковка",
                 user_id,
+                scope,
             )
             asyncio.create_task(
-                _run_background_rechunk_for_user(user_id, chunk_params_from_rag_settings(merged))
+                _run_background_rechunk_for_user(
+                    user_id, chunk_params_from_rag_settings(merged), scope
+                )
             )
         return {"message": "Настройки RAG обновлены", "success": True, **settings_response_dict(merged)}
     except HTTPException:
@@ -825,6 +856,7 @@ async def _phoenix_rag_models(model_type: Optional[str] = None) -> list:
 async def list_rag_models(
     current_user: Annotated[dict, Depends(get_current_user)],
     type: str | None = None,
+    scope: Optional[str] = None,
 ):
     """Список моделей эмбеддингов и cross-encoder из SVC-RAG-MODELS."""
     require_service("rag_models")
@@ -853,7 +885,7 @@ async def list_rag_models(
         except Exception:
             logger.exception("Каталог Phoenix недоступен - показываю только локальные")
         user_id = str(current_user.get("user_id") or "").strip()
-        user_rag = await get_user_rag_settings(user_id) if user_id else {}
+        user_rag = await get_user_rag_settings(user_id, normalize_scope(scope)) if user_id else {}
         return _overlay_user_model_current(data, user_rag)
     except Exception as e:
         logger.exception("list_rag_models error")
@@ -861,14 +893,17 @@ async def list_rag_models(
 
 
 @router.get("/api/rag/models/current")
-async def get_rag_models_current(current_user: Annotated[dict, Depends(get_current_user)]):
+async def get_rag_models_current(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    scope: Optional[str] = None,
+):
     require_service("rag_models")
     if not rag_models_client:
         raise HTTPException(status_code=503, detail="RAG-models service недоступен")
     try:
         data = await rag_models_client.get_current()
         user_id = str(current_user.get("user_id") or "").strip()
-        user_rag = await get_user_rag_settings(user_id) if user_id else {}
+        user_rag = await get_user_rag_settings(user_id, normalize_scope(scope)) if user_id else {}
         return _overlay_user_model_current(data, user_rag)
     except Exception as e:
         logger.exception("get_rag_models_current error")
@@ -888,7 +923,9 @@ async def _current_cluster_embedding_dim() -> Optional[int]:
     return None
 
 
-async def _select_phoenix_rag_model(model_type: str, model_path: str, user_id: str):
+async def _select_phoenix_rag_model(
+    model_type: str, model_path: str, user_id: str, scope: Optional[str] = None
+):
     """Персональный выбор Phoenix-модели.
 
     Кластер НЕ переключаем: после B2/B3 модель едет в теле каждого запроса, а
@@ -922,18 +959,20 @@ async def _select_phoenix_rag_model(model_type: str, model_path: str, user_id: s
 
     if model_type == "embedding":
         merged = await save_user_rag_settings(
-            user_id, {"rag_embedding_model_path": model_path}
+            user_id, {"rag_embedding_model_path": model_path}, scope
         )
         if _reindex_on_model_change():
             # Документы пользователя переезжают в таблицу новой размерности;
             # чужие вектора и Библиотека не затрагиваются.
             asyncio.create_task(
                 _run_background_reindex_for_user(
-                    user_id, chunk_params_from_rag_settings(merged)
+                    user_id, chunk_params_from_rag_settings(merged), scope
                 )
             )
     else:
-        await save_user_rag_settings(user_id, {"rag_reranker_model_path": model_path})
+        await save_user_rag_settings(
+            user_id, {"rag_reranker_model_path": model_path}, scope
+        )
     bump_rag_semantic_cache()
     logger.info(
         "[RAG-CFG] персональный выбор Phoenix user=%s type=%s path=%s "
@@ -971,9 +1010,11 @@ async def select_rag_model(
     model_path = str(body.model_path or "").strip()
     if not model_path:
         raise HTTPException(status_code=400, detail="model_path обязателен")
+    scope = normalize_scope(body.scope)
     logger.debug(
-        "[RAG-CFG] Выбор RAG-модели user=%s: type=%s, path=%s",
+        "[RAG-CFG] Выбор RAG-модели user=%s scope=%s: type=%s, path=%s",
         user_id,
+        scope,
         model_type,
         model_path,
     )
@@ -983,7 +1024,7 @@ async def select_rag_model(
             detail="Источник huggingface отключён: выберите local/<папка> из models/rag",
         )
     if model_path.lower().startswith("phoenix/"):
-        return await _select_phoenix_rag_model(model_type, model_path, user_id)
+        return await _select_phoenix_rag_model(model_type, model_path, user_id, scope)
     try:
         await _validate_local_model_path(model_type, model_path)
         # Кластер не трогаем: модель едет в теле запроса, svc-rag-models поднимет
@@ -999,20 +1040,23 @@ async def select_rag_model(
 
         if model_type == "embedding":
             merged = await save_user_rag_settings(
-                user_id, {"rag_embedding_model_path": model_path}
+                user_id, {"rag_embedding_model_path": model_path}, scope
             )
             if _reindex_on_model_change():
                 logger.info(
-                    "[REINDEX-USER] смена embedding user=%s → scoped reindex (без Memory)",
+                    "[REINDEX-USER] смена embedding user=%s scope=%s → scoped reindex (без Memory)",
                     user_id,
+                    scope,
                 )
                 asyncio.create_task(
                     _run_background_reindex_for_user(
-                        user_id, chunk_params_from_rag_settings(merged)
+                        user_id, chunk_params_from_rag_settings(merged), scope
                     )
                 )
         else:
-            await save_user_rag_settings(user_id, {"rag_reranker_model_path": model_path})
+            await save_user_rag_settings(
+                user_id, {"rag_reranker_model_path": model_path}, scope
+            )
         bump_rag_semantic_cache()
         result["message"] = "Модель сохранена в ваших настройках"
         result["reindexed"] = (
@@ -1084,7 +1128,7 @@ async def kb_upload_document(
 
         # Чанкинг: настройки владельца агента (он же контролирует rechunk)
         settings_user = owner_user_id or uploader_id
-        user_rag = await get_user_rag_settings(settings_user) if settings_user else {}
+        user_rag = await get_user_rag_settings(settings_user, "agent") if settings_user else {}
         chunk_params = chunk_params_from_rag_settings(user_rag) if user_rag else get_rag_chunk_index_params()
         strategy = (chunking_strategy or "").strip().lower()
         if strategy and strategy in _VALID_CHUNKING_STRATEGIES | {"universal"}:

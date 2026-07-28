@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import asyncio
+import weakref
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -67,9 +68,18 @@ class LlmSvcProvider(OpenAICompatProvider):
 
     def __init__(self, config: LLMProviderConfig) -> None:
         super().__init__(config)
-        # Сериализация swap: параллельные multi-LLM слоты не должны
-        # затирать друг другу загруженную модель на одном llm-svc.
-        self._switch_lock: asyncio.Lock = asyncio.Lock()
+        # Сериализация swap: lock создаётся лениво per event loop.
+        self._switch_locks: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock]" = (
+            weakref.WeakKeyDictionary()
+        )
+
+    def _switch_lock(self) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        lock = self._switch_locks.get(loop)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._switch_locks[loop] = lock
+        return lock
 
     # ---- internal helpers -------------------------------------------------
 
@@ -121,7 +131,7 @@ class LlmSvcProvider(OpenAICompatProvider):
         if pool_contains_model(health.loaded_models, mid):
             return True
 
-        async with self._switch_lock:
+        async with self._switch_lock():
             health2 = await self.health()
             if pool_contains_model(health2.loaded_models, mid):
                 return True

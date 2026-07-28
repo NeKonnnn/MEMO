@@ -1,0 +1,1775 @@
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import {
+  Box,
+  Typography,
+  TextField,
+  Button,
+  IconButton,
+  Select,
+  MenuItem,
+  FormControl,
+  Checkbox,
+  FormControlLabel,
+  Switch,
+  Tooltip,
+  CircularProgress,
+  List,
+  ListItem,
+  ListItemButton,
+  ListItemText,
+  ListItemIcon,
+  Avatar,
+  Chip,
+  Alert,
+  InputLabel,
+  OutlinedInput,
+  InputAdornment,
+  Popover,
+  alpha,
+} from '@mui/material';
+import type { SxProps, Theme } from '@mui/material';
+import {
+  Add as AddIcon,
+  Close as CloseIcon,
+  Delete as DeleteIcon,
+  Upload as UploadIcon,
+  SmartToy as AgentIcon,
+  Code as CodeIcon,
+  Search as SearchIcon,
+  AttachFile as AttachIcon,
+  Extension as ToolsIcon,
+  ContactSupport as SupportIcon,
+  Settings as SettingsIcon,
+  History as VersionIcon,
+  Save as SaveIcon,
+  Share as ShareIcon,
+  Public as PublicIcon,
+  PublicOff as PublicOffIcon,
+  Description as FileIcon,
+  PictureAsPdf as PdfIcon,
+  TableChart as ExcelIcon,
+  TextSnippet as TxtIcon,
+  Article as DocxIcon,
+  HelpOutline as HelpIcon,
+  AutoAwesome as SparkleIcon,
+  CheckBox as CheckBoxIcon,
+  CheckBoxOutlineBlank as CheckBoxBlankIcon,
+  ExpandMore as ExpandMoreIcon,
+} from '@mui/icons-material';
+import { getApiUrl, API_ENDPOINTS, getAuthFetchHeaders } from '../config/api';
+import { useAuth } from '../contexts/AuthContext';
+import { useAppActions } from '../contexts/AppContext';
+import { applyAgentModelAndSettings } from '../utils/applyAgentServer';
+import {
+  ASTRA_OPEN_AGENT_CONSTRUCTOR,
+  ASTRA_OPEN_AGENT_CONSTRUCTOR_ID_KEY,
+} from '../constants/hotkeys';
+import {
+  DROPDOWN_CHEVRON_SX,
+  getDropdownPopoverPaperSx,
+  DROPDOWN_ITEM_HOVER_BG,
+  getDropdownItemSx,
+  getFormFieldInputSx,
+  FORM_FIELD_TRIGGER_SX,
+  FORM_FIELD_TRIGGER_VALUE_TYPOGRAPHY_SX,
+  SIDEBAR_HIDE_SCROLLBAR_SX,
+} from '../constants/menuStyles';
+import ModelParametersModal, { type ModelParamsState } from './ModelParametersModal';
+import { MODEL_SETTINGS_DEFAULT, type ModelSettingsState } from '../constants/modelSettingsStyles';
+import ShareAgentDialog from './ShareAgentDialog';
+
+// ─── Types ───────────────────────────────────────────────────────────────────
+
+interface KbDocument {
+  id: number;
+  filename: string;
+  created_at: string | null;
+  size: number | null;
+  file_type: string | null;
+}
+
+interface Agent {
+  id: number;
+  name: string;
+  description?: string;
+  system_prompt: string;
+  config?: Record<string, any>;
+  tools?: string[];
+  author_id: string;
+  author_name: string;
+  is_public: boolean;
+  tags?: any[];
+  my_permission?: 'owner' | 'editor' | 'viewer' | null;
+  is_shared_with_me?: boolean;
+}
+
+interface ProviderModelItem {
+  name: string;
+  path: string;
+  display_name?: string;
+  provider_id?: string;
+  llm_host_id?: string;
+}
+
+interface AgentConstructorPanelProps {
+  isDarkMode: boolean;
+  isOpen: boolean;
+}
+
+const CATEGORIES = ['Общий', 'Код', 'Письмо', 'Анализ', 'Исследование', 'Обучение', 'Другое'];
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/** Цвет квадратика-иконки по типу файла. */
+function getFileIconBg(filename: string): string {
+  const ext = filename.split('.').pop()?.toLowerCase() || '';
+  if (ext === 'pdf') return '#e53935';
+  if (['docx', 'doc'].includes(ext)) return '#1976d2';
+  if (['xlsx', 'xls', 'csv'].includes(ext)) return '#43a047';
+  if (ext === 'txt') return '#607d8b';
+  return '#5c6bc0';
+}
+
+/** Подпись типа файла для карточки. */
+function getFileTypeLabel(filename: string): string {
+  const ext = filename.split('.').pop()?.toLowerCase() || '';
+  if (ext === 'pdf') return 'PDF';
+  if (['docx', 'doc'].includes(ext)) return 'Word';
+  if (['xlsx', 'xls', 'csv'].includes(ext)) return 'Excel';
+  if (ext === 'txt') return 'TXT';
+  return 'File';
+}
+
+const fileIconSx = { fontSize: 18, color: 'white' };
+
+function getFileIcon(filename: string) {
+  const ext = filename.split('.').pop()?.toLowerCase() || '';
+  if (ext === 'pdf') return <PdfIcon sx={fileIconSx} />;
+  if (['xlsx', 'xls', 'csv'].includes(ext)) return <ExcelIcon sx={fileIconSx} />;
+  if (ext === 'txt') return <TxtIcon sx={fileIconSx} />;
+  if (['docx', 'doc'].includes(ext)) return <DocxIcon sx={fileIconSx} />;
+  return <FileIcon sx={fileIconSx} />;
+}
+
+function shortFileName(name: string, max = 22): string {
+  if (name.length <= max) return name;
+  const ext = name.includes('.') ? '.' + name.split('.').pop() : '';
+  return name.slice(0, max - ext.length - 3) + '...' + ext;
+}
+
+// ─── Label with tooltip ───────────────────────────────────────────────────────
+
+function FieldLabel({ text, help, required }: { text: string; help?: string; required?: boolean }) {
+  return (
+    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 0.5 }}>
+      <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.85)', fontWeight: 500, fontSize: '0.8rem' }}>
+        {text}{required && <span style={{ color: '#f44336', marginLeft: 2 }}>*</span>}
+      </Typography>
+      {help && (
+        <Tooltip title={help} placement="top" arrow>
+          <HelpIcon sx={{ fontSize: 13, color: 'rgba(255,255,255,0.35)', cursor: 'help' }} />
+        </Tooltip>
+      )}
+    </Box>
+  );
+}
+
+// ─── Section header ───────────────────────────────────────────────────────────
+
+function SectionHeader({ children }: { children: React.ReactNode }) {
+  return (
+    <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.5)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', fontSize: '0.7rem' }}>
+      {children}
+    </Typography>
+  );
+}
+
+// ─── Main component ───────────────────────────────────────────────────────────
+
+export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConstructorPanelProps) {
+  const { token } = useAuth();
+  const { showNotification } = useAppActions();
+  const dropdownItemSx = useMemo(() => getDropdownItemSx(isDarkMode), [isDarkMode]);
+  const formFieldInputSx = useMemo(() => getFormFieldInputSx(isDarkMode), [isDarkMode]);
+
+  /** Красная звёздочка у обязательного поля (MUI по умолчанию не всегда error.main). */
+  const nameFieldSx = useMemo(
+    () =>
+      [formFieldInputSx, { '& .MuiFormLabel-asterisk': { color: '#f44336' } }] as SxProps<Theme>,
+    [formFieldInputSx],
+  );
+
+  /** Категория: как outlined-поле, но без синей обводки/подписи при фокусе (открытии списка). */
+  const categoryFieldSx = useMemo(
+    () =>
+      [
+        formFieldInputSx,
+        {
+          '& .MuiOutlinedInput-root': { cursor: 'pointer' },
+          '& .MuiOutlinedInput-root.Mui-focused fieldset': {
+            borderColor: isDarkMode ? 'rgba(255,255,255,0.23)' : 'rgba(0,0,0,0.23)',
+            borderWidth: '1px',
+          },
+          '& .MuiOutlinedInput-root:hover fieldset': {
+            borderColor: isDarkMode ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.4)',
+          },
+          '& .MuiOutlinedInput-root.Mui-focused:hover fieldset': {
+            borderColor: isDarkMode ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.4)',
+          },
+          '& .MuiInputLabel-root.Mui-focused': {
+            color: isDarkMode ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.6)',
+          },
+          '& .MuiFormLabel-asterisk': { color: '#f44336' },
+        },
+      ] as SxProps<Theme>,
+    [formFieldInputSx, isDarkMode],
+  );
+
+  const categoryOutlinedRef = useRef<HTMLDivElement>(null);
+
+  // Agent list & selection
+  const [agents, setAgents] = useState<Agent[]>([]);
+  const [selectedAgentId, setSelectedAgentId] = useState<number | 'new'>('new');
+  const [isLoadingAgents, setIsLoadingAgents] = useState(false);
+
+  // Form fields
+  const [name, setName] = useState('');
+  const [description, setDescription] = useState('');
+  const [category, setCategory] = useState('Общий');
+  const [instructions, setInstructions] = useState('');
+  const [model, setModel] = useState('');
+  const [availableModels, setAvailableModels] = useState<string[]>([]);
+  /** Каталог моделей с провайдером (id из config, напр. local) для выбора провайдер→модель. */
+  const [providerModels, setProviderModels] = useState<ProviderModelItem[]>([]);
+  const [providerIds, setProviderIds] = useState<string[]>([]);
+
+  // Capabilities
+  const [codeInterpreter, setCodeInterpreter] = useState(false);
+  const [webSearch, setWebSearch] = useState(false);
+
+  // Artifacts
+  const [artifactsEnabled, setArtifactsEnabled] = useState(false);
+  const [shadcnEnabled, setShadcnEnabled] = useState(false);
+  const [userPromptMode, setUserPromptMode] = useState(false);
+
+  // File search (KB)
+  const [fileSearchEnabled, setFileSearchEnabled] = useState(false);
+  const [kbDocuments, setKbDocuments] = useState<KbDocument[]>([]);
+  /** ID документов KB, привязанных к этому агенту (config.kb_document_ids). */
+  const [kbDocumentIds, setKbDocumentIds] = useState<number[]>([]);
+  const [isLoadingKb, setIsLoadingKb] = useState(false);
+  const [isUploadingKb, setIsUploadingKb] = useState(false);
+
+  // Skills attached to agent (config.skill_ids — slugs)
+  const [availableSkills, setAvailableSkills] = useState<Array<{ id: number; slug: string; name: string; description?: string }>>([]);
+  const [skillIds, setSkillIds] = useState<string[]>([]);
+  const [skillsEnabled, setSkillsEnabled] = useState(false);
+
+  // Support contacts
+  const [supportName, setSupportName] = useState('');
+  const [supportEmail, setSupportEmail] = useState('');
+
+  // Saving
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveError, setSaveError] = useState('');
+  const [saveSuccess, setSaveSuccess] = useState(false);
+  const [showModelParamsPanel, setShowModelParamsPanel] = useState(false);
+  const [modelParams, setModelParams] = useState<Partial<ModelParamsState>>({});
+  const [agentModelSettings, setAgentModelSettings] = useState<ModelSettingsState>({ ...MODEL_SETTINGS_DEFAULT });
+  const [agentSearchQuery, setAgentSearchQuery] = useState('');
+  const [agentPopoverAnchor, setAgentPopoverAnchor] = useState<HTMLElement | null>(null);
+  const [categoryPopoverAnchor, setCategoryPopoverAnchor] = useState<HTMLElement | null>(null);
+  const [shareDialogOpen, setShareDialogOpen] = useState(false);
+  const [isPublishing, setIsPublishing] = useState(false);
+
+  const kbFileInputRef = useRef<HTMLInputElement>(null);
+  const selectedAgentIdRef = useRef<number | 'new'>(selectedAgentId);
+  selectedAgentIdRef.current = selectedAgentId;
+  const showNotificationRef = useRef(showNotification);
+  showNotificationRef.current = showNotification;
+  const tokenRef = useRef(token);
+  tokenRef.current = token;
+  /** Чтобы не перезагружать данные на каждый ре-рендер родителя, пока панель открыта. */
+  const bootstrappedOpenRef = useRef(false);
+
+  // ─── Load agents ────────────────────────────────────────────────────────────
+
+  const loadAgents = useCallback(async () => {
+    setIsLoadingAgents(true);
+    try {
+      const headers: HeadersInit = tokenRef.current ? { Authorization: `Bearer ${tokenRef.current}` } : {};
+      const [mineResp, sharedResp] = await Promise.all([
+        fetch(getApiUrl('/api/agents/my/agents'), { headers }),
+        fetch(getApiUrl('/api/agents/my/shared'), { headers }),
+      ]);
+      const mine: Agent[] = mineResp.ok ? ((await mineResp.json()).agents || []) : [];
+      const shared: Agent[] = sharedResp.ok
+        ? ((await sharedResp.json()).agents || []).map((a: Agent) => ({ ...a, is_shared_with_me: true }))
+        : [];
+      setAgents((prev) => {
+        const byId = new Map<number, Agent>();
+        for (const a of mine) byId.set(a.id, { ...a, my_permission: a.my_permission || 'owner' });
+        for (const a of shared) {
+          if (!byId.has(a.id)) byId.set(a.id, a);
+        }
+        // Не затирать агента, открытого из галереи (ещё не в «Мои» / shared)
+        const keepId = selectedAgentIdRef.current;
+        if (typeof keepId === 'number') {
+          const kept = prev.find((a) => a.id === keepId);
+          if (kept && !byId.has(keepId)) byId.set(keepId, kept);
+        }
+        return Array.from(byId.values());
+      });
+    } catch (e) {
+      // silent
+    } finally {
+      setIsLoadingAgents(false);
+    }
+  }, []);
+
+  /** Открыть агента из галереи / по id (подтянуть актуальные данные и роль). */
+  const selectExternalAgent = useCallback(async (agentId: number) => {
+    if (!Number.isFinite(agentId) || agentId <= 0) return;
+    try {
+      const headers: HeadersInit = tokenRef.current
+        ? { Authorization: `Bearer ${tokenRef.current}` }
+        : {};
+      const resp = await fetch(getApiUrl(`/api/agents/${agentId}`), { headers });
+      if (!resp.ok) {
+        showNotificationRef.current('error', 'Не удалось открыть агента в конструкторе');
+        return;
+      }
+      const full = (await resp.json()) as Agent;
+      setAgents((prev) => {
+        const others = prev.filter((a) => a.id !== full.id);
+        return [...others, full];
+      });
+      setSelectedAgentId(full.id);
+    } catch {
+      showNotificationRef.current('error', 'Не удалось открыть агента в конструкторе');
+    }
+  }, []);
+
+  const loadModels = useCallback(async () => {
+    try {
+      const [catalogResp, providersResp] = await Promise.all([
+        fetch(getApiUrl('/api/models/available')),
+        fetch(getApiUrl('/api/llm-providers?include_health=false')),
+      ]);
+      if (catalogResp.ok) {
+        const data = await catalogResp.json();
+        const items: ProviderModelItem[] = (data.models || data || [])
+          .map((m: any) =>
+            typeof m === 'string'
+              ? { name: m, path: m }
+              : {
+                  name: m.name || m.model_id || m.path || '',
+                  path: m.path || m.name || '',
+                  display_name: m.display_name,
+                  provider_id: m.provider_id || m.llm_host_id,
+                  llm_host_id: m.llm_host_id,
+                },
+          )
+          .filter((m: ProviderModelItem) => m.path);
+        setProviderModels(items);
+        // Плоский список путей — совместимость с ModelParametersModal
+        setAvailableModels(items.map((m) => m.path));
+      }
+      if (providersResp.ok) {
+        const pdata = await providersResp.json();
+        const ids: string[] = (pdata.providers || [])
+          .map((p: any) => (p?.id || '').toString().trim())
+          .filter(Boolean);
+        setProviderIds(ids);
+      }
+    } catch (e) {
+      // silent
+    }
+  }, []);
+
+  const loadKbDocuments = useCallback(async () => {
+    setIsLoadingKb(true);
+    try {
+      const url = getApiUrl(API_ENDPOINTS.KB_DOCUMENTS_LIST);
+      const resp = await fetch(url, { headers: getAuthFetchHeaders() });
+      if (!resp.ok) return;
+      const data = await resp.json();
+      const raw = (data.documents || data || []) as Array<Record<string, unknown>>;
+      // Нормализуем id → number, иначе includes() после upload может не совпасть.
+      setKbDocuments(
+        raw.map(d => ({
+          id: Number(d.id),
+          filename: String(d.filename ?? ''),
+          size: d.size != null ? Number(d.size) : null,
+          file_type: d.file_type != null ? String(d.file_type) : null,
+          created_at: d.created_at != null ? String(d.created_at) : null,
+        })).filter(d => Number.isFinite(d.id)),
+      );
+    } catch (e) {
+      // silent
+    } finally {
+      setIsLoadingKb(false);
+    }
+  }, []);
+
+  // Загрузка при открытии панели — один раз на сессию открытия (без зависимости от нестабильных колбэков)
+  useEffect(() => {
+    if (!isOpen) {
+      bootstrappedOpenRef.current = false;
+      return;
+    }
+    if (bootstrappedOpenRef.current) return;
+    bootstrappedOpenRef.current = true;
+
+    void loadModels();
+    void loadKbDocuments();
+    void (async () => {
+      try {
+        const headers: HeadersInit = tokenRef.current
+          ? { Authorization: `Bearer ${tokenRef.current}` }
+          : {};
+        const resp = await fetch(`${getApiUrl(API_ENDPOINTS.SKILLS)}/list?limit=100`, { headers });
+        if (!resp.ok) return;
+        const data = await resp.json();
+        setAvailableSkills(
+          (data.items || [])
+            .filter((s: { is_active?: boolean }) => s.is_active !== false)
+            .map((s: { id: number; slug: string; name: string; description?: string }) => ({
+              id: s.id,
+              slug: s.slug,
+              name: s.name,
+              description: s.description,
+            })),
+        );
+      } catch {
+        /* silent */
+      }
+    })();
+
+    void (async () => {
+      await loadAgents();
+      try {
+        const raw = sessionStorage.getItem(ASTRA_OPEN_AGENT_CONSTRUCTOR_ID_KEY);
+        if (raw) {
+          sessionStorage.removeItem(ASTRA_OPEN_AGENT_CONSTRUCTOR_ID_KEY);
+          const id = Number(raw);
+          if (Number.isFinite(id) && id > 0) {
+            await selectExternalAgent(id);
+          }
+        }
+      } catch {
+        /* */
+      }
+    })();
+  }, [isOpen, loadAgents, loadModels, loadKbDocuments, selectExternalAgent]);
+
+  // Слушаем событие открытия с agentId (галерея / хоткей с detail)
+  useEffect(() => {
+    const onOpen = (e: Event) => {
+      const detail = (e as CustomEvent<{ agentId?: number }>).detail;
+      const id = detail?.agentId;
+      if (typeof id === 'number' && Number.isFinite(id) && id > 0) {
+        void selectExternalAgent(id);
+      }
+    };
+    window.addEventListener(ASTRA_OPEN_AGENT_CONSTRUCTOR, onOpen);
+    return () => window.removeEventListener(ASTRA_OPEN_AGENT_CONSTRUCTOR, onOpen);
+  }, [selectExternalAgent]);
+
+  const agentsRef = useRef(agents);
+  agentsRef.current = agents;
+
+  // ─── Load selected agent into form (только при смене выбранного id) ──────────
+
+  useEffect(() => {
+    if (selectedAgentId === 'new') {
+      resetForm();
+      return;
+    }
+    const agent = agentsRef.current.find((a) => a.id === selectedAgentId);
+    if (!agent) return;
+    setName(agent.name);
+    setDescription(agent.description || '');
+    setInstructions(agent.system_prompt || '');
+    const cfg = agent.config || {};
+    setCategory(cfg.category || 'Общий');
+    setModel(cfg.model || '');
+    setModelParams((cfg.model_params as Partial<ModelParamsState>) || {});
+    setAgentModelSettings(
+      (cfg.model_settings as Partial<ModelSettingsState>)
+        ? { ...MODEL_SETTINGS_DEFAULT, ...(cfg.model_settings as Partial<ModelSettingsState>) }
+        : { ...MODEL_SETTINGS_DEFAULT }
+    );
+    setCodeInterpreter(!!cfg.code_interpreter);
+    setWebSearch(!!cfg.web_search);
+    setArtifactsEnabled(!!cfg.artifacts_enabled);
+    setShadcnEnabled(!!cfg.shadcn_enabled);
+    setUserPromptMode(!!cfg.user_prompt_mode);
+    setFileSearchEnabled(!!cfg.file_search_enabled);
+    setKbDocumentIds(
+      Array.isArray(cfg.kb_document_ids)
+        ? cfg.kb_document_ids.map((x: unknown) => Number(x)).filter((x: number) => Number.isFinite(x))
+        : []
+    );
+    setSkillIds(
+      Array.isArray(cfg.skill_ids)
+        ? cfg.skill_ids.map((x: unknown) => String(x).trim()).filter(Boolean)
+        : Array.isArray(cfg.skills)
+          ? cfg.skills.map((x: unknown) => String(x).trim()).filter(Boolean)
+          : []
+    );
+    setSkillsEnabled(
+      typeof cfg.skills_enabled === 'boolean'
+        ? cfg.skills_enabled
+        : Array.isArray(cfg.skill_ids) && cfg.skill_ids.length > 0
+    );
+    setSupportName(cfg.support_name || '');
+    setSupportEmail(cfg.support_email || '');
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- только смена агента; agents читаем из ref
+  }, [selectedAgentId]);
+
+  function resetForm() {
+    setName('');
+    setDescription('');
+    setCategory('Общий');
+    setInstructions('');
+    setModel(availableModels[0] || '');
+    setModelParams({});
+    setAgentModelSettings({ ...MODEL_SETTINGS_DEFAULT });
+    setCodeInterpreter(false);
+    setWebSearch(false);
+    setArtifactsEnabled(false);
+    setShadcnEnabled(false);
+    setUserPromptMode(false);
+    setFileSearchEnabled(false);
+    setKbDocumentIds([]);
+    setSkillIds([]);
+    setSkillsEnabled(false);
+    setSupportName('');
+    setSupportEmail('');
+  }
+
+  // ─── KB Upload ───────────────────────────────────────────────────────────────
+
+  const handleKbUpload = async (files: FileList) => {
+    if (!files.length) return;
+    // Загрузка в KB агента = поиск по файлам; включаем флаг автоматически.
+    if (!fileSearchEnabled) setFileSearchEnabled(true);
+    setIsUploadingKb(true);
+    const uploadedIds: number[] = [];
+    const errors: string[] = [];
+    const chunkingStrategy =
+      (typeof localStorage !== 'undefined' && localStorage.getItem('rag_chunking_strategy')) ||
+      'hierarchical';
+    for (const file of Array.from(files)) {
+      const formData = new FormData();
+      formData.append('file', file);
+      // Agent KB: применяем стратегию чанкования из настроек RAG
+      formData.append('chunking_strategy', chunkingStrategy);
+      try {
+        const url = getApiUrl(API_ENDPOINTS.KB_DOCUMENTS_UPLOAD);
+        const resp = await fetch(url, {
+          method: 'POST',
+          headers: getAuthFetchHeaders(),
+          body: formData,
+        });
+        const data = (await resp.json().catch(() => ({}))) as Record<string, unknown>;
+        if (!resp.ok) {
+          const detail = data.detail ?? data.error ?? resp.statusText;
+          errors.push(`${file.name}: ${typeof detail === 'string' ? detail : JSON.stringify(detail)}`);
+          continue;
+        }
+        const docId = Number(data.document_id ?? data.id);
+        if (Number.isFinite(docId)) {
+          uploadedIds.push(docId);
+        } else {
+          errors.push(`${file.name}: сервер не вернул document_id`);
+        }
+      } catch (e) {
+        errors.push(`${file.name}: ${e instanceof Error ? e.message : 'ошибка сети'}`);
+      }
+    }
+    setIsUploadingKb(false);
+    if (uploadedIds.length) {
+      setKbDocumentIds(prev => Array.from(new Set([...prev, ...uploadedIds])));
+      showNotification(
+        'success',
+        `Загружено файлов: ${uploadedIds.length}. Сохраните агента, чтобы привязка сохранилась.`,
+      );
+    }
+    if (errors.length) {
+      showNotification('error', errors.slice(0, 3).join('; '));
+    }
+    await loadKbDocuments();
+  };
+
+  const handleKbDelete = async (docId: number) => {
+    try {
+      const url = `${getApiUrl(API_ENDPOINTS.KB_DOCUMENTS_DELETE)}/${docId}`;
+      await fetch(url, { method: 'DELETE' });
+      setKbDocuments(prev => prev.filter(d => d.id !== docId));
+      setKbDocumentIds(prev => prev.filter(id => id !== docId));
+    } catch (e) { /* silent */ }
+  };
+
+  // ─── Save agent ──────────────────────────────────────────────────────────────
+
+  const handleSave = async () => {
+    if (!name.trim()) {
+      setSaveError('Заполните обязательное поле: Имя');
+      return;
+    }
+    setSaveError('');
+    setIsSaving(true);
+    const currentIsPublic =
+      selectedAgentId !== 'new'
+        ? !!(agents.find((a) => a.id === selectedAgentId)?.is_public)
+        : false;
+    const payload = {
+      name: name.trim(),
+      description: description.trim() || undefined,
+      system_prompt: instructions.trim() || 'Системные инструкции не заданы.',
+      is_public: currentIsPublic,
+      tools: [
+        ...(codeInterpreter ? ['code_interpreter'] : []),
+        ...(webSearch ? ['web_search'] : []),
+      ],
+      config: {
+        category,
+        // Модель всегда в формате <provider_id>/<model_id>; локальный провайдер — id «local»
+        model: (() => {
+          let m = model.replace(/^1lm-svc:\/\//i, 'llm-svc://').replace(/\s+/g, '');
+          if (m && !m.startsWith('llm-svc://') && !m.includes('/') && !m.toLowerCase().endsWith('.gguf')) {
+            m = `local/${m}`;
+          }
+          return m;
+        })(),
+        model_params: {
+          ...modelParams,
+          // Провайдер в params — сырой id из /api/llm-providers (local, …)
+          provider: (modelParams as any)?.provider || (model.includes('/') ? model.split('/')[0] : 'local'),
+        },
+        model_settings: agentModelSettings,
+        code_interpreter: codeInterpreter,
+        web_search: webSearch,
+        artifacts_enabled: artifactsEnabled,
+        shadcn_enabled: shadcnEnabled,
+        user_prompt_mode: userPromptMode,
+        file_search_enabled: fileSearchEnabled,
+        kb_document_ids: kbDocumentIds,
+        skill_ids: skillIds,
+        skills_enabled: skillsEnabled,
+        support_name: supportName,
+        support_email: supportEmail,
+      },
+      tag_ids: [],
+      new_tags: [],
+    };
+
+    try {
+      const isEdit = selectedAgentId !== 'new';
+      const url = isEdit
+        ? getApiUrl(`/api/agents/${selectedAgentId}`)
+        : getApiUrl('/api/agents/');
+      const method = isEdit ? 'PUT' : 'POST';
+      const resp = await fetch(url, {
+        method,
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify(payload),
+      });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+        throw new Error(err.detail || resp.statusText);
+      }
+      const result = await resp.json();
+      if (!isEdit && result.agent_id) {
+        setSelectedAgentId(result.agent_id);
+      }
+      const savedId = isEdit ? selectedAgentId : result.agent_id;
+      if (savedId && savedId !== 'new') {
+        try {
+          localStorage.setItem('active_agent_id', String(savedId));
+          localStorage.setItem('active_agent_name', name.trim());
+          localStorage.setItem('active_agent_prompt', instructions.trim() || 'Системные инструкции не заданы.');
+        } catch {
+          /* */
+        }
+        window.dispatchEvent(new CustomEvent('agentSelected'));
+      }
+      setSaveSuccess(true);
+      setTimeout(() => setSaveSuccess(false), 3000);
+      await loadAgents();
+
+      if (token) {
+        const sp = instructions.trim() || 'Системные инструкции не заданы.';
+        const applied = await applyAgentModelAndSettings(token, {
+          system_prompt: sp,
+          model_path: model.trim() || null,
+          model_settings: agentModelSettings as unknown as Record<string, unknown>,
+        });
+        if (applied.ok && model.trim()) {
+          showNotification('success', 'Модель и настройки применены на сервере — ответы в чате пойдут с этой моделью');
+        } else if (applied.ok && !model.trim()) {
+          showNotification('info', 'Промпт и настройки применены; укажите модель в параметрах — пока чат без смены модели');
+        } else if (!applied.ok) {
+          showNotification('warning', `Агент сохранён; не удалось применить на сервер: ${applied.message}`);
+        }
+      }
+    } catch (e: any) {
+      setSaveError(e.message);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  // ─── Publish / unpublish to gallery ──────────────────────────────────────────
+
+  const handleTogglePublish = async () => {
+    if (selectedAgentId === 'new' || typeof selectedAgentId !== 'number') return;
+    const agent = agents.find((a) => a.id === selectedAgentId);
+    if (!agent) return;
+    const nextPublic = !agent.is_public;
+    setIsPublishing(true);
+    try {
+      const resp = await fetch(getApiUrl(`/api/agents/${selectedAgentId}`), {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ is_public: nextPublic }),
+      });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+        throw new Error(err.detail || resp.statusText);
+      }
+      await loadAgents();
+      showNotification(
+        'success',
+        nextPublic
+          ? 'Агент опубликован в галерее'
+          : 'Агент снят с публикации в галерее',
+      );
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      showNotification('error', `Не удалось изменить публикацию: ${msg}`);
+    } finally {
+      setIsPublishing(false);
+    }
+  };
+
+  // ─── Delete agent ────────────────────────────────────────────────────────────
+
+  const handleDelete = async () => {
+    if (selectedAgentId === 'new') return;
+    if (!window.confirm(`Удалить агента «${name}»?`)) return;
+    try {
+      const url = getApiUrl(`/api/agents/${selectedAgentId}`);
+      await fetch(url, {
+        method: 'DELETE',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      setSelectedAgentId('new');
+      resetForm();
+      await loadAgents();
+    } catch (e) { /* silent */ }
+  };
+
+  // ─── "Use agent" — sets system prompt as context ─────────────────────────────
+
+  const handleUseAgent = () => {
+    if (selectedAgentId === 'new') return;
+    const agent = agents.find(a => a.id === selectedAgentId);
+    if (!agent) return;
+    // Store selected agent in localStorage so chat can pick it up
+    localStorage.setItem('active_agent_id', String(agent.id));
+    localStorage.setItem('active_agent_prompt', agent.system_prompt);
+    localStorage.setItem('active_agent_name', agent.name);
+    window.dispatchEvent(new CustomEvent('agentSelected', { detail: agent }));
+  };
+
+  if (!isOpen) return null;
+
+  const agentIdStr = selectedAgentId !== 'new'
+    ? `agent_${String(selectedAgentId).padStart(6, '0')}`
+    : '';
+  const selectedKbDocuments = kbDocuments.filter(doc => kbDocumentIds.includes(doc.id));
+
+  // ─── Роль текущего пользователя для выбранного агента ────────────────────────
+  const selectedAgent = selectedAgentId !== 'new' ? agents.find(a => a.id === selectedAgentId) : null;
+  const selectedRole: 'owner' | 'editor' | 'viewer' =
+    selectedAgentId === 'new' ? 'owner' : (selectedAgent?.my_permission || 'owner');
+  const readOnly = selectedRole === 'viewer';
+  const canEdit = selectedRole === 'owner' || selectedRole === 'editor';
+  const isOwner = selectedRole === 'owner';
+
+  return (
+    <Box
+      sx={{
+        display: 'flex',
+        flexDirection: 'column',
+        height: '100%',
+        overflow: 'hidden',
+        color: 'white',
+      }}
+    >
+      {showModelParamsPanel ? (
+        <ModelParametersModal
+          variant="panel"
+          open={true}
+          onClose={() => setShowModelParamsPanel(false)}
+          currentModel={model}
+          availableModels={availableModels}
+          providerModels={providerModels}
+          providerIds={providerIds}
+          initialParams={Object.keys(modelParams).length ? modelParams : undefined}
+          initialModelSettings={agentModelSettings}
+          onSaveModelSettings={setAgentModelSettings}
+          onSave={(newModel, params) => {
+            setModel(newModel);
+            setModelParams(params ?? {});
+            setShowModelParamsPanel(false);
+          }}
+        />
+      ) : (
+        <>
+      {/* ── Выбор агента ─────────────────────────────────────────────────────── */}
+      <Box sx={{ px: 2, pt: 1.5, pb: 1 }}>
+        {/* Кнопка «Агенты» */}
+        <Box
+          onClick={e => setAgentPopoverAnchor(e.currentTarget)}
+          sx={FORM_FIELD_TRIGGER_SX}
+        >
+          <Typography sx={{ ...FORM_FIELD_TRIGGER_VALUE_TYPOGRAPHY_SX, fontWeight: 600 }}>
+            Агенты
+          </Typography>
+          <ExpandMoreIcon
+            sx={{ ...DROPDOWN_CHEVRON_SX, transform: Boolean(agentPopoverAnchor) ? 'rotate(180deg)' : 'none' }}
+          />
+        </Box>
+
+        {/* Всплывающий список — стиль из constants/menuStyles */}
+        <Popover
+          open={Boolean(agentPopoverAnchor)}
+          anchorEl={agentPopoverAnchor}
+          onClose={() => { setAgentPopoverAnchor(null); setAgentSearchQuery(''); }}
+          anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
+          transformOrigin={{ vertical: 'top', horizontal: 'left' }}
+          slotProps={{
+            paper: { sx: getDropdownPopoverPaperSx(agentPopoverAnchor) },
+          }}
+        >
+          {/* Строка поиска */}
+          <Box
+            sx={{
+              display: 'flex',
+              alignItems: 'center',
+              px: 1.5,
+              py: 0.9,
+              gap: 1,
+              borderBottom: '1px solid rgba(255,255,255,0.07)',
+            }}
+          >
+            <SearchIcon sx={{ color: 'rgba(255,255,255,0.35)', fontSize: 16, flexShrink: 0 }} />
+            <Box
+              component="input"
+              autoFocus
+              placeholder="Поиск агентов по имени"
+              value={agentSearchQuery}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setAgentSearchQuery(e.target.value)}
+              sx={{
+                flex: 1,
+                bgcolor: 'transparent',
+                border: 'none',
+                outline: 'none',
+                color: 'white',
+                fontSize: '0.82rem',
+                '&::placeholder': { color: 'rgba(255,255,255,0.3)' },
+              }}
+            />
+          </Box>
+
+          {/* Список */}
+          <Box
+            sx={{
+              maxHeight: 220,
+              overflowY: 'auto',
+              py: 0.5,
+              ...SIDEBAR_HIDE_SCROLLBAR_SX,
+            }}
+          >
+            {/* «+ Новый агент» */}
+            <Box
+              onClick={() => { setSelectedAgentId('new'); setAgentPopoverAnchor(null); setAgentSearchQuery(''); }}
+              sx={{
+                ...dropdownItemSx,
+                color: selectedAgentId === 'new' ? 'white' : 'rgba(255,255,255,0.5)',
+                fontStyle: 'italic',
+                bgcolor: selectedAgentId === 'new' ? DROPDOWN_ITEM_HOVER_BG : 'transparent',
+              }}
+            >
+              + Новый агент
+            </Box>
+
+            {/* Существующие агенты */}
+            {(agents || [])
+              .filter(a => !agentSearchQuery.trim() || a.name.toLowerCase().includes(agentSearchQuery.toLowerCase()))
+              .map(a => (
+                <Box
+                  key={a.id}
+                  onClick={() => { setSelectedAgentId(a.id); setAgentPopoverAnchor(null); setAgentSearchQuery(''); }}
+                  sx={{
+                    ...dropdownItemSx,
+                    color: 'rgba(255,255,255,0.9)',
+                    fontWeight: selectedAgentId === a.id ? 600 : 400,
+                    bgcolor: selectedAgentId === a.id ? DROPDOWN_ITEM_HOVER_BG : 'transparent',
+                  }}
+                >
+                  {a.name}
+                </Box>
+              ))}
+
+            {/* Ничего не найдено */}
+            {agentSearchQuery.trim() && (agents || []).filter(a => a.name.toLowerCase().includes(agentSearchQuery.toLowerCase())).length === 0 && (
+              <Box sx={{ px: 1.5, py: 1.5, fontSize: '0.78rem', color: 'rgba(255,255,255,0.3)', textAlign: 'center' }}>
+                Не найдено
+              </Box>
+            )}
+          </Box>
+        </Popover>
+      </Box>
+
+      {/* Баннер роли для чужого агента */}
+      {selectedAgentId !== 'new' && !isOwner && (
+        <Box
+          sx={{
+            mx: 2,
+            mb: 1,
+            px: 1.25,
+            py: 0.75,
+            borderRadius: 1,
+            border: '1px solid',
+            borderColor: readOnly ? 'rgba(100,181,246,0.35)' : 'rgba(102,187,106,0.35)',
+            bgcolor: readOnly ? 'rgba(100,181,246,0.08)' : 'rgba(102,187,106,0.08)',
+          }}
+        >
+          <Typography sx={{ fontSize: '0.72rem', color: 'rgba(255,255,255,0.75)' }}>
+            {readOnly
+              ? 'Агент доступен в режиме «Зритель» — просмотр и использование; изменение недоступно.'
+              : 'Агент доступен в режиме «Редактор» — можно изменять; удаление и шаринг — только у владельца.'}
+          </Typography>
+        </Box>
+      )}
+
+      {/* ── Scrollable form ─────────────────────────────────────────────────── */}
+      <Box
+        sx={{
+          flex: 1,
+          overflowY: 'auto',
+          px: 2,
+          py: 1.5,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 1.5,
+          ...(readOnly ? { opacity: 0.75 } : {}),
+          ...(readOnly ? { '& > *': { pointerEvents: 'none' } } : {}),
+          ...SIDEBAR_HIDE_SCROLLBAR_SX,
+        }}
+      >
+
+        {/* Кнопка добавления аватара — по центру, как на скриншоте */}
+        <Box sx={{ display: 'flex', justifyContent: 'center', width: '100%', mb: 1.5 }}>
+          <Avatar
+            sx={{
+              width: 64,
+              height: 64,
+              bgcolor: 'rgba(33,150,243,0.25)',
+              border: '1px dashed rgba(255,255,255,0.25)',
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              '&:hover': { bgcolor: 'rgba(33,150,243,0.35)' },
+            }}
+          >
+            <AddIcon sx={{ fontSize: 32, color: 'rgba(255,255,255,0.5)' }} />
+          </Avatar>
+        </Box>
+
+        {/* Имя и Описание — такие же по размеру, как поля «Имя» и «Электронная почта» в контактах поддержки */}
+        <Box>
+          <TextField
+            value={name}
+            onChange={e => setName(e.target.value)}
+            label="Имя"
+            placeholder="Введите имя агента"
+            variant="outlined"
+            size="small"
+            fullWidth
+            required
+            sx={nameFieldSx}
+            inputProps={{ maxLength: 255 }}
+          />
+          {agentIdStr && (
+            <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.3)', fontSize: '0.68rem', display: 'block', mt: 0.25 }}>
+              {agentIdStr}
+            </Typography>
+          )}
+        </Box>
+
+        <Box>
+          <TextField
+            value={description}
+            onChange={e => setDescription(e.target.value)}
+            label="Описание"
+            placeholder="Необязательно: описание вашего агента"
+            variant="outlined"
+            size="small"
+            fullWidth
+            sx={formFieldInputSx}
+          />
+        </Box>
+
+        {/* Category — outlined с «плавающей» подписью; без синей подсветки при фокусе */}
+        <Box>
+          <FormControl variant="outlined" fullWidth size="small" required sx={categoryFieldSx}>
+            <InputLabel htmlFor="agent-constructor-category">Категория</InputLabel>
+            <OutlinedInput
+              ref={categoryOutlinedRef}
+              id="agent-constructor-category"
+              label="Категория"
+              value={category}
+              readOnly
+              onClick={() => setCategoryPopoverAnchor(categoryOutlinedRef.current)}
+              endAdornment={
+                <InputAdornment position="end">
+                  <ExpandMoreIcon
+                    sx={{ ...DROPDOWN_CHEVRON_SX, transform: Boolean(categoryPopoverAnchor) ? 'rotate(180deg)' : 'none' }}
+                  />
+                </InputAdornment>
+              }
+            />
+          </FormControl>
+          <Popover
+            open={Boolean(categoryPopoverAnchor)}
+            anchorEl={categoryPopoverAnchor}
+            onClose={() => setCategoryPopoverAnchor(null)}
+            anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
+            transformOrigin={{ vertical: 'top', horizontal: 'left' }}
+            slotProps={{
+              paper: { sx: getDropdownPopoverPaperSx(categoryPopoverAnchor) },
+            }}
+          >
+            <Box sx={{ py: 0.5 }}>
+              {CATEGORIES.map(c => (
+                <Box
+                  key={c}
+                  onClick={() => { setCategory(c); setCategoryPopoverAnchor(null); }}
+                  sx={{
+                    ...dropdownItemSx,
+                    color: category === c ? 'white' : 'rgba(255,255,255,0.9)',
+                    fontWeight: category === c ? 600 : 400,
+                    bgcolor: category === c ? DROPDOWN_ITEM_HOVER_BG : 'transparent',
+                  }}
+                >
+                  {c}
+                </Box>
+              ))}
+            </Box>
+          </Popover>
+        </Box>
+
+        {/* Instructions */}
+        <Box sx={{ position: 'relative' }}>
+          <Button
+            size="small"
+            startIcon={<SparkleIcon sx={{ fontSize: '0.8rem !important' }} />}
+            sx={{
+              position: 'absolute',
+              right: 0,
+              top: 0,
+              zIndex: 1,
+              fontSize: '0.7rem',
+              textTransform: 'none',
+              color: 'rgba(255,255,255,0.5)',
+              py: 0,
+              minWidth: 0,
+              '&:hover': { color: 'rgba(255,255,255,0.8)', bgcolor: 'transparent' },
+            }}
+          >
+            Переменные
+          </Button>
+          <TextField
+            value={instructions}
+            onChange={e => setInstructions(e.target.value)}
+            label="Инструкции"
+            placeholder="Системные инструкции, используемые агентом"
+            variant="outlined"
+            size="small"
+            fullWidth
+            multiline
+            minRows={3}
+            maxRows={8}
+            sx={formFieldInputSx}
+          />
+        </Box>
+
+        {/* Model — outlined с «плавающей» подписью; без синей подсветки при фокусе */}
+        <Box>
+          <FormControl variant="outlined" fullWidth size="small" required sx={categoryFieldSx}>
+            <InputLabel htmlFor="agent-constructor-model">Модель</InputLabel>
+            <OutlinedInput
+              id="agent-constructor-model"
+              label="Модель"
+              value={model ? (model.replace('llm-svc://', '').split('/').pop() || model) : ''}
+              readOnly
+              placeholder="Выберите модель"
+              onClick={() => setShowModelParamsPanel(true)}
+              endAdornment={
+                <InputAdornment position="end">
+                  <ExpandMoreIcon sx={DROPDOWN_CHEVRON_SX} />
+                </InputAdornment>
+              }
+            />
+          </FormControl>
+        </Box>
+
+        {/* ── Capabilities ─────────────────────────────────────────────────── */}
+        <Box>
+          <SectionHeader>Возможности</SectionHeader>
+
+          {/* Code interpreter */}
+          <Box sx={{ mt: 1 }}>
+            <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.45)', fontSize: '0.72rem', display: 'block', mb: 0.5 }}>
+              API Интерпретатора кода
+            </Typography>
+            <FormControlLabel
+              control={
+                <Checkbox
+                  checked={codeInterpreter}
+                  onChange={e => setCodeInterpreter(e.target.checked)}
+                  size="small"
+                  sx={{ color: 'rgba(255,255,255,0.4)', '&.Mui-checked': { color: '#2196f3' }, p: 0.5 }}
+                />
+              }
+              label={
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                  <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.75)', fontSize: '0.78rem' }}>Выполнить код</Typography>
+                  <Tooltip title="Выполнять Python-код в изолированной среде" arrow>
+                    <HelpIcon sx={{ fontSize: 12, color: 'rgba(255,255,255,0.25)' }} />
+                  </Tooltip>
+                </Box>
+              }
+              sx={{ ml: 0, '& .MuiFormControlLabel-label': { ml: 0.5 } }}
+            />
+
+            {codeInterpreter && (
+              <Button
+                size="small"
+                startIcon={<UploadIcon sx={{ fontSize: '0.85rem !important' }} />}
+                fullWidth
+                sx={{
+                  mt: 0.5,
+                  fontSize: '0.72rem',
+                  textTransform: 'none',
+                  color: 'rgba(255,255,255,0.6)',
+                  border: '1px dashed rgba(255,255,255,0.2)',
+                  py: 0.75,
+                  justifyContent: 'flex-start',
+                  '&:hover': { bgcolor: 'rgba(255,255,255,0.06)', borderColor: 'rgba(255,255,255,0.35)' },
+                }}
+              >
+                Загрузить для Интерпретатора кода
+              </Button>
+            )}
+          </Box>
+
+          {/* Web search */}
+          <Box>
+            <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.45)', fontSize: '0.72rem', display: 'block', mb: 0.5 }}>
+              Веб-поиск
+            </Typography>
+            <FormControlLabel
+              control={
+                <Checkbox
+                  checked={webSearch}
+                  onChange={e => setWebSearch(e.target.checked)}
+                  size="small"
+                  sx={{ color: 'rgba(255,255,255,0.4)', '&.Mui-checked': { color: '#2196f3' }, p: 0.5 }}
+                />
+              }
+              label={
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                  <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.75)', fontSize: '0.78rem' }}>Веб-поиск</Typography>
+                  <Tooltip title="Поиск актуальной информации в интернете" arrow>
+                    <HelpIcon sx={{ fontSize: 12, color: 'rgba(255,255,255,0.25)' }} />
+                  </Tooltip>
+                </Box>
+              }
+              sx={{ ml: 0, '& .MuiFormControlLabel-label': { ml: 0.5 } }}
+            />
+          </Box>
+
+          {/* File context — тот же upload, что и «Документы агента» */}
+          <Box>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 0.75 }}>
+              <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.45)', fontSize: '0.72rem' }}>
+                Контекст файла
+              </Typography>
+              <Tooltip title="Файл добавляется в документы этого агента (не в общую библиотеку). После загрузки сохраните агента." arrow>
+                <HelpIcon sx={{ fontSize: 12, color: 'rgba(255,255,255,0.25)' }} />
+              </Tooltip>
+            </Box>
+            <Button
+              size="small"
+              startIcon={isUploadingKb ? <CircularProgress size={13} sx={{ color: 'inherit' }} /> : <AttachIcon sx={{ fontSize: '0.85rem !important' }} />}
+              fullWidth
+              disabled={isUploadingKb || readOnly}
+              onClick={() => kbFileInputRef.current?.click()}
+              sx={{
+                fontSize: '0.72rem',
+                textTransform: 'none',
+                color: 'rgba(255,255,255,0.6)',
+                border: '1px dashed rgba(255,255,255,0.2)',
+                py: 0.75,
+                justifyContent: 'flex-start',
+                '&:hover': { bgcolor: 'rgba(255,255,255,0.06)', borderColor: 'rgba(255,255,255,0.35)' },
+                '&:disabled': { color: 'rgba(255,255,255,0.3)', borderColor: 'rgba(255,255,255,0.1)' },
+              }}
+            >
+              {isUploadingKb ? 'Загрузка...' : 'Загрузить файл контекста'}
+            </Button>
+          </Box>
+        </Box>
+
+        {/* ── Artifacts ────────────────────────────────────────────────────── */}
+        <Box>
+          <SectionHeader>Артефакты</SectionHeader>
+          <Box sx={{ mt: 1, display: 'flex', flexDirection: 'column', gap: 0.5 }}>
+            {[
+              { label: 'Включить артефакты', help: 'Артефакты — отдельно отображаемый контент (код, таблицы)', val: artifactsEnabled, set: setArtifactsEnabled },
+              { label: 'Включить компоненты shadcn/ui', help: 'Разрешить использование shadcn/ui компонентов', val: shadcnEnabled, set: setShadcnEnabled },
+              { label: 'Режим пользовательского промта', help: 'Расширенный пользовательский режим', val: userPromptMode, set: setUserPromptMode },
+            ].map(({ label, help, val, set }) => (
+              <Box key={label} sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                  <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.78rem' }}>{label}</Typography>
+                  <Tooltip title={help} arrow>
+                    <HelpIcon sx={{ fontSize: 12, color: 'rgba(255,255,255,0.25)' }} />
+                  </Tooltip>
+                </Box>
+                <Switch
+                  checked={val}
+                  onChange={e => set(e.target.checked)}
+                  size="small"
+                  sx={{
+                    '& .MuiSwitch-switchBase.Mui-checked': { color: '#2196f3' },
+                    '& .MuiSwitch-switchBase.Mui-checked + .MuiSwitch-track': { bgcolor: 'rgba(33,150,243,0.5)' },
+                    '& .MuiSwitch-track': { bgcolor: 'rgba(255,255,255,0.2)' },
+                  }}
+                />
+              </Box>
+            ))}
+          </Box>
+        </Box>
+
+        {/* ── Skills ───────────────────────────────────────────────────────── */}
+        <Box sx={{ minWidth: 0 }}>
+          <SectionHeader>Skills</SectionHeader>
+          <FormControlLabel
+            control={
+              <Checkbox
+                size="small"
+                checked={skillsEnabled}
+                onChange={(e) => setSkillsEnabled(e.target.checked)}
+                sx={{ color: 'rgba(255,255,255,0.4)', '&.Mui-checked': { color: '#2196f3' }, p: 0.5 }}
+              />
+            }
+            label={
+              <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.75)', fontSize: '0.78rem' }}>
+                Включить skills для агента
+              </Typography>
+            }
+            sx={{ m: 0, mb: 1 }}
+          />
+          <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.45)', display: 'block', mb: 1 }}>
+            Allowlist: пустой список = все доступные. Manual `$` и always-apply работают независимо.
+          </Typography>
+          {!skillsEnabled ? (
+            <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.35)' }}>
+              Skills выключены для этого агента
+            </Typography>
+          ) : availableSkills.length === 0 ? (
+            <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.35)' }}>
+              Нет доступных skills
+            </Typography>
+          ) : (
+            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.25, maxHeight: 160, overflow: 'auto' }}>
+              {availableSkills.map((sk) => (
+                <FormControlLabel
+                  key={sk.id}
+                  control={
+                    <Checkbox
+                      size="small"
+                      checked={skillIds.includes(sk.slug)}
+                      onChange={(e) => {
+                        setSkillIds((prev) =>
+                          e.target.checked
+                            ? [...prev.filter((x) => x !== sk.slug), sk.slug]
+                            : prev.filter((x) => x !== sk.slug),
+                        );
+                      }}
+                      sx={{ color: 'rgba(255,255,255,0.4)', '&.Mui-checked': { color: '#2196f3' }, p: 0.5 }}
+                    />
+                  }
+                  label={
+                    <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.75)', fontSize: '0.78rem' }}>
+                      {sk.name}{' '}
+                      <Box component="span" sx={{ opacity: 0.5 }}>
+                        (${sk.slug})
+                      </Box>
+                    </Typography>
+                  }
+                  sx={{ m: 0 }}
+                />
+              ))}
+            </Box>
+          )}
+        </Box>
+
+        {/* ── File Search (KB) ─────────────────────────────────────────────── */}
+        <Box sx={{ minWidth: 0 }}>
+          <SectionHeader>Документы агента</SectionHeader>
+
+          <Box sx={{ mt: 1, minWidth: 0 }}>
+            <FormControlLabel
+              control={
+                <Checkbox
+                  checked={fileSearchEnabled}
+                  onChange={e => setFileSearchEnabled(e.target.checked)}
+                  size="small"
+                  sx={{ color: 'rgba(255,255,255,0.4)', '&.Mui-checked': { color: '#2196f3' }, p: 0.5 }}
+                />
+              }
+              label={
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                  <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.75)', fontSize: '0.78rem' }}>
+                    Искать по документам агента
+                  </Typography>
+                  <Tooltip
+                    title="Файлы привязаны к этому агенту (не общая библиотека и не документы проекта). В чате поиск включается при выбранном агенте с этим флагом. Параметры индексации — в «RAG» → «Проекты и агенты»."
+                    arrow
+                  >
+                    <HelpIcon sx={{ fontSize: 12, color: 'rgba(255,255,255,0.25)' }} />
+                  </Tooltip>
+                </Box>
+              }
+              sx={{ ml: 0, '& .MuiFormControlLabel-label': { ml: 0.5 } }}
+            />
+
+            {/* KB files list — сетка по 2 карточки в ряд, цвет по типу файла */}
+            {isLoadingKb ? (
+              <Box sx={{ display: 'flex', justifyContent: 'center', py: 1 }}>
+                <CircularProgress size={16} sx={{ color: 'rgba(255,255,255,0.4)' }} />
+              </Box>
+            ) : fileSearchEnabled && selectedKbDocuments.length > 0 ? (
+              <Box
+                sx={{
+                  mt: 0.5,
+                  mb: 1,
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+                  gap: 0.75,
+                  minWidth: 0,
+                  width: '100%',
+                }}
+              >
+                {selectedKbDocuments.map(doc => (
+                  <Box
+                    key={doc.id}
+                    sx={{
+                      position: 'relative',
+                      borderRadius: 1,
+                      bgcolor: '#2a2d3a',
+                      border: '1px solid rgba(255,255,255,0.08)',
+                      p: 0.5,
+                      minWidth: 0,
+                      display: 'flex',
+                      flexDirection: 'column',
+                      justifyContent: 'center',
+                    }}
+                  >
+                    {/* Крестик удаления */}
+                    <IconButton
+                      size="small"
+                      onClick={() => handleKbDelete(doc.id)}
+                      sx={{
+                        position: 'absolute',
+                        top: 3,
+                        right: 3,
+                        p: 0.2,
+                        color: 'rgba(255,255,255,0.45)',
+                        '&:hover': { color: '#ef5350', bgcolor: 'rgba(239,83,80,0.12)' },
+                      }}
+                    >
+                      <CloseIcon sx={{ fontSize: 11 }} />
+                    </IconButton>
+
+                    {/* Иконка + имя в строку */}
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, minWidth: 0, pr: 2 }}>
+                      {/* Цветной квадратик с иконкой */}
+                      <Box
+                        sx={{
+                          width: 32,
+                          height: 32,
+                          borderRadius: 1,
+                          bgcolor: getFileIconBg(doc.filename),
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          flexShrink: 0,
+                        }}
+                      >
+                        {getFileIcon(doc.filename)}
+                      </Box>
+
+                      {/* Имя + тип */}
+                      <Box sx={{ minWidth: 0, flex: 1 }}>
+                        <Tooltip
+                          title={doc.filename}
+                          placement="top"
+                          slotProps={{
+                            tooltip: {
+                              sx: {
+                                bgcolor: 'rgba(42, 45, 58, 0.98)',
+                                color: '#fff',
+                                borderRadius: 3,
+                                border: '1px solid rgba(255,255,255,0.12)',
+                                fontSize: '0.75rem',
+                                fontWeight: 500,
+                                py: 0.75,
+                                px: 1.25,
+                                boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+                              },
+                            },
+                          }}
+                        >
+                          <Typography
+                            variant="caption"
+                            noWrap
+                            component="span"
+                            sx={{ color: 'white', fontSize: '0.68rem', display: 'block', fontWeight: 500, lineHeight: 1.3 }}
+                          >
+                            {shortFileName(doc.filename, 16)}
+                          </Typography>
+                        </Tooltip>
+                        <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.45)', fontSize: '0.62rem', lineHeight: 1.2 }}>
+                          {getFileTypeLabel(doc.filename)}
+                        </Typography>
+                      </Box>
+                    </Box>
+                  </Box>
+                ))}
+              </Box>
+            ) : null}
+
+            {/* Upload button */}
+            <input
+              ref={kbFileInputRef}
+              type="file"
+              multiple
+              accept=".pdf,.docx,.doc,.docm,.xlsx,.xls,.xlsm,.txt,.csv,.md,.log,.rtf"
+              style={{ display: 'none' }}
+              onChange={e => { if (e.target.files) handleKbUpload(e.target.files); e.target.value = ''; }}
+            />
+            <Button
+              size="small"
+              startIcon={isUploadingKb ? <CircularProgress size={13} sx={{ color: 'inherit' }} /> : <UploadIcon sx={{ fontSize: '0.85rem !important' }} />}
+              fullWidth
+              disabled={isUploadingKb || readOnly}
+              onClick={() => kbFileInputRef.current?.click()}
+              sx={{
+                mt: 0.5,
+                fontSize: '0.72rem',
+                textTransform: 'none',
+                color: 'rgba(255,255,255,0.6)',
+                border: '1px dashed rgba(255,255,255,0.2)',
+                py: 0.75,
+                justifyContent: 'flex-start',
+                '&:hover': { bgcolor: 'rgba(255,255,255,0.06)', borderColor: 'rgba(255,255,255,0.35)' },
+                '&:disabled': { color: 'rgba(255,255,255,0.3)', borderColor: 'rgba(255,255,255,0.1)' },
+              }}
+            >
+              {isUploadingKb ? 'Загрузка...' : 'Загрузить для поиска по файлам'}
+            </Button>
+          </Box>
+        </Box>
+
+        {/* ── Tools and Actions ────────────────────────────────────────────── */}
+        <Box>
+          <SectionHeader>Tools and Actions</SectionHeader>
+          <Box sx={{ mt: 1, display: 'flex', gap: 1 }}>
+            <Button
+              size="small"
+              startIcon={<ToolsIcon sx={{ fontSize: '0.85rem !important' }} />}
+              sx={{
+                flex: 1,
+                fontSize: '0.72rem',
+                textTransform: 'none',
+                color: 'rgba(255,255,255,0.6)',
+                border: '1px solid rgba(255,255,255,0.15)',
+                py: 0.75,
+                '&:hover': { bgcolor: 'rgba(255,255,255,0.06)', borderColor: 'rgba(255,255,255,0.3)' },
+              }}
+            >
+              Добавить инструменты
+            </Button>
+            <Button
+              size="small"
+              startIcon={<SparkleIcon sx={{ fontSize: '0.85rem !important' }} />}
+              sx={{
+                flex: 1,
+                fontSize: '0.72rem',
+                textTransform: 'none',
+                color: 'rgba(255,255,255,0.6)',
+                border: '1px solid rgba(255,255,255,0.15)',
+                py: 0.75,
+                '&:hover': { bgcolor: 'rgba(255,255,255,0.06)', borderColor: 'rgba(255,255,255,0.3)' },
+              }}
+            >
+              Добавить действия
+            </Button>
+          </Box>
+        </Box>
+
+        {/* ── Author Contacts ──────────────────────────────────────────────── */}
+        <Box>
+          <SectionHeader>Контакты автора</SectionHeader>
+          <Box sx={{ mt: 1, display: 'flex', flexDirection: 'column', gap: 1 }}>
+            <Box>
+              <TextField
+                value={supportName}
+                onChange={e => setSupportName(e.target.value)}
+                label="Имя"
+                placeholder="Имя контактного лица"
+                variant="outlined"
+                size="small"
+                fullWidth
+                sx={formFieldInputSx}
+              />
+            </Box>
+            <Box>
+              <TextField
+                value={supportEmail}
+                onChange={e => setSupportEmail(e.target.value)}
+                label="Электронная почта"
+                placeholder="support@example.com"
+                variant="outlined"
+                size="small"
+                fullWidth
+                type="email"
+                sx={formFieldInputSx}
+              />
+            </Box>
+          </Box>
+        </Box>
+
+        {/* Spacer */}
+        <Box sx={{ pb: 1 }} />
+      </Box>
+
+      {/* ── Footer buttons ──────────────────────────────────────────────────── */}
+      <Box sx={{ px: 2, py: 1.5, display: 'flex', flexDirection: 'column', gap: 1 }}>
+
+        {/* Errors / Success */}
+        {saveError && (
+          <Typography variant="caption" sx={{ color: '#ef5350', fontSize: '0.72rem', textAlign: 'center' }}>
+            {saveError}
+          </Typography>
+        )}
+        {saveSuccess && (
+          <Box sx={{ textAlign: 'center' }}>
+            <Typography variant="caption" sx={{ color: '#66bb6a', fontSize: '0.72rem', display: 'block' }}>
+              Агент успешно сохранён
+            </Typography>
+            <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.5)', fontSize: '0.65rem', display: 'block', mt: 0.25 }}>
+              Данные сохранены в базу приложения (PostgreSQL, таблица agents). Агент отображается в блоке «Агенты» выше — выберите его для редактирования или нажмите «Использовать в чате».
+            </Typography>
+          </Box>
+        )}
+
+        {/* Advanced + Version */}
+        <Box sx={{ display: 'flex', gap: 1 }}>
+          <Button
+            size="small"
+            startIcon={<SettingsIcon sx={{ fontSize: '0.85rem !important' }} />}
+            fullWidth
+            sx={{
+              fontSize: '0.72rem',
+              textTransform: 'none',
+              color: 'rgba(255,255,255,0.5)',
+              border: '1px solid rgba(255,255,255,0.12)',
+              py: 0.6,
+              '&:hover': { bgcolor: 'rgba(255,255,255,0.06)' },
+            }}
+          >
+            Расширенные
+          </Button>
+          <Button
+            size="small"
+            startIcon={<VersionIcon sx={{ fontSize: '0.85rem !important' }} />}
+            fullWidth
+            sx={{
+              fontSize: '0.72rem',
+              textTransform: 'none',
+              color: 'rgba(255,255,255,0.5)',
+              border: '1px solid rgba(255,255,255,0.12)',
+              py: 0.6,
+              '&:hover': { bgcolor: 'rgba(255,255,255,0.06)' },
+            }}
+          >
+            Версия
+          </Button>
+        </Box>
+
+        {/* Share + Publish + Delete + Save */}
+        <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+          {selectedAgentId !== 'new' && isOwner && (
+            <Tooltip title="Поделиться агентом">
+              <IconButton
+                size="small"
+                onClick={() => setShareDialogOpen(true)}
+                sx={{
+                  color: 'rgba(255,255,255,0.4)',
+                  border: '1px solid rgba(255,255,255,0.12)',
+                  borderRadius: 1,
+                  p: 0.75,
+                  '&:hover': { color: '#64b5f6', borderColor: 'rgba(100,181,246,0.4)', bgcolor: 'rgba(100,181,246,0.08)' },
+                }}
+              >
+                <ShareIcon sx={{ fontSize: '1rem' }} />
+              </IconButton>
+            </Tooltip>
+          )}
+          {selectedAgentId !== 'new' && isOwner && (
+            <Tooltip
+              title={
+                selectedAgent?.is_public
+                  ? 'Снять с публикации в галерее'
+                  : 'Опубликовать агента в галерее'
+              }
+            >
+              <span>
+                <Button
+                  size="small"
+                  disabled={isPublishing}
+                  startIcon={
+                    isPublishing ? (
+                      <CircularProgress size={12} sx={{ color: 'inherit' }} />
+                    ) : selectedAgent?.is_public ? (
+                      <PublicOffIcon sx={{ fontSize: '0.9rem !important' }} />
+                    ) : (
+                      <PublicIcon sx={{ fontSize: '0.9rem !important' }} />
+                    )
+                  }
+                  onClick={() => void handleTogglePublish()}
+                  sx={{
+                    textTransform: 'none',
+                    fontSize: '0.72rem',
+                    fontWeight: 600,
+                    color: selectedAgent?.is_public ? '#81c784' : 'rgba(255,255,255,0.75)',
+                    border: `1px solid ${selectedAgent?.is_public ? 'rgba(129,199,132,0.45)' : 'rgba(255,255,255,0.12)'}`,
+                    bgcolor: selectedAgent?.is_public ? 'rgba(129,199,132,0.12)' : 'transparent',
+                    py: 0.55,
+                    px: 1,
+                    whiteSpace: 'nowrap',
+                    '&:hover': {
+                      bgcolor: selectedAgent?.is_public
+                        ? 'rgba(129,199,132,0.2)'
+                        : 'rgba(255,255,255,0.06)',
+                    },
+                    '&:disabled': { color: 'rgba(255,255,255,0.35)' },
+                  }}
+                >
+                  {selectedAgent?.is_public ? 'В галерее' : 'Опубликовать в галерее'}
+                </Button>
+              </span>
+            </Tooltip>
+          )}
+          {selectedAgentId !== 'new' && isOwner && (
+            <Tooltip title="Удалить агента">
+              <IconButton
+                size="small"
+                onClick={handleDelete}
+                sx={{
+                  color: 'rgba(255,255,255,0.4)',
+                  border: '1px solid rgba(255,255,255,0.12)',
+                  borderRadius: 1,
+                  p: 0.75,
+                  '&:hover': { color: '#ef5350', borderColor: 'rgba(239,83,80,0.4)', bgcolor: 'rgba(239,83,80,0.08)' },
+                }}
+              >
+                <DeleteIcon sx={{ fontSize: '1rem' }} />
+              </IconButton>
+            </Tooltip>
+          )}
+          {canEdit ? (
+            <Button
+              fullWidth
+              variant="contained"
+              startIcon={isSaving ? <CircularProgress size={14} sx={{ color: 'white' }} /> : <SaveIcon sx={{ fontSize: '0.9rem !important' }} />}
+              onClick={handleSave}
+              disabled={isSaving}
+              sx={{
+                bgcolor: '#2e7d32',
+                textTransform: 'none',
+                fontWeight: 600,
+                fontSize: '0.82rem',
+                py: 0.9,
+                flex: '1 1 120px',
+                '&:hover': { bgcolor: '#388e3c' },
+                '&:disabled': { bgcolor: 'rgba(46,125,50,0.4)', color: 'rgba(255,255,255,0.5)' },
+              }}
+            >
+              {isSaving ? 'Сохраняю...' : 'Сохранить'}
+            </Button>
+          ) : (
+            <Button
+              fullWidth
+              variant="outlined"
+              startIcon={<AgentIcon sx={{ fontSize: '0.9rem !important' }} />}
+              onClick={handleUseAgent}
+              sx={{
+                textTransform: 'none',
+                fontWeight: 600,
+                fontSize: '0.82rem',
+                py: 0.9,
+                flex: '1 1 120px',
+                color: 'rgba(255,255,255,0.85)',
+                borderColor: 'rgba(255,255,255,0.25)',
+                '&:hover': { borderColor: 'rgba(255,255,255,0.5)', bgcolor: 'rgba(255,255,255,0.06)' },
+              }}
+            >
+              Использовать в чате
+            </Button>
+          )}
+        </Box>
+      </Box>
+        </>
+      )}
+
+      {selectedAgentId !== 'new' && (
+        <ShareAgentDialog
+          open={shareDialogOpen}
+          onClose={() => setShareDialogOpen(false)}
+          agentId={typeof selectedAgentId === 'number' ? selectedAgentId : 0}
+          agentName={agents.find((a) => a.id === selectedAgentId)?.name || name || 'Агент'}
+          isDarkMode={isDarkMode}
+        />
+      )}
+    </Box>
+  );
+}
