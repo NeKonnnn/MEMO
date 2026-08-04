@@ -60,6 +60,7 @@ import {
 import type { Project } from '../contexts/AppContext';
 import { getProjectIconGlyphSx } from '../constants/menuStyles';
 import ProjectRagLibraryInline from './ProjectRagLibraryInline';
+import RAGSettings from './settings/RAGSettings';
 
 const iconOptions = [
   { name: 'folder', icon: FolderIcon },
@@ -126,6 +127,7 @@ export default function EditProjectModal({ open, onClose, project, onSave }: Edi
   const [instructions, setInstructions] = useState('');
   const [workspacePath, setWorkspacePath] = useState('');
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [showRagSettingsPanel, setShowRagSettingsPanel] = useState(false);
   const [showIconPicker, setShowIconPicker] = useState(false);
   const [iconTab, setIconTab] = useState(0);
   const iconPickerRef = useRef<HTMLDivElement>(null);
@@ -141,6 +143,7 @@ export default function EditProjectModal({ open, onClose, project, onSave }: Edi
       setInstructions(project.instructions || '');
       setWorkspacePath(project.workspacePath || '');
       setShowAdvanced(false);
+      setShowRagSettingsPanel(false);
     }
   }, [open, project]);
 
@@ -159,6 +162,7 @@ export default function EditProjectModal({ open, onClose, project, onSave }: Edi
   const handleClose = () => {
     setShowIconPicker(false);
     setShowAdvanced(false);
+    setShowRagSettingsPanel(false);
     onClose();
   };
 
@@ -232,9 +236,24 @@ export default function EditProjectModal({ open, onClose, project, onSave }: Edi
         sx: {
           backgroundColor: theme.palette.mode === 'dark' ? '#1e1e1e' : '#ffffff',
           borderRadius: 2,
+          ...(showRagSettingsPanel
+            ? { height: 'min(90vh, 820px)', display: 'flex', flexDirection: 'column' }
+            : {}),
         },
       }}
     >
+      {showRagSettingsPanel ? (
+        <Box sx={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+          <RAGSettings
+            variant="panel"
+            lockedScope="project"
+            isDarkMode={theme.palette.mode === 'dark'}
+            panelTitle="Настройки РАГ для проектов"
+            onClose={() => setShowRagSettingsPanel(false)}
+          />
+        </Box>
+      ) : (
+        <>
       <DialogTitle
         sx={{
           display: 'flex',
@@ -385,7 +404,23 @@ export default function EditProjectModal({ open, onClose, project, onSave }: Edi
           </Box>
         )}
 
-        {/* Расширенные настройки */}
+        {/* RAG-настройки проекта (scope=project) */}
+        <Box sx={{ mb: 2 }}>
+          <Button
+            fullWidth
+            onClick={() => setShowRagSettingsPanel(true)}
+            endIcon={<ExpandMoreIcon />}
+            sx={{
+              justifyContent: 'space-between',
+              textTransform: 'none',
+              color: 'text.primary',
+            }}
+          >
+            Настройки РАГ для проектов
+          </Button>
+        </Box>
+
+        {/* Память / инструкции / workspace */}
         <Box sx={{ mb: 2 }}>
           <Button
             fullWidth
@@ -397,7 +432,7 @@ export default function EditProjectModal({ open, onClose, project, onSave }: Edi
               color: 'text.primary',
             }}
           >
-            Расширенные настройки
+            Память и инструкции
           </Button>
 
           <Collapse in={showAdvanced}>
@@ -528,6 +563,8 @@ export default function EditProjectModal({ open, onClose, project, onSave }: Edi
           Сохранить
         </Button>
       </DialogActions>
+        </>
+      )}
     </Dialog>
   );
 }

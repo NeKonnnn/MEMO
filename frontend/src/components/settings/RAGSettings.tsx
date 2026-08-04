@@ -23,7 +23,9 @@ import {
   HelpOutline as HelpOutlineIcon,
   ExpandMore as ExpandMoreIcon,
   Restore as RestoreIcon,
+  ArrowBack as ArrowBackIcon,
 } from '@mui/icons-material';
+import { getSidebarPanelBackground } from '../../constants/sidebarPanelColor';
 import { useAppActions } from '../../contexts/AppContext';
 import { getApiUrl, getAuthFetchHeaders } from '../../config/api';
 import {
@@ -113,22 +115,40 @@ function normalizeChunkingStrategy(raw: string | null): ChunkingStrategy {
 
 interface RAGSettingsProps {
   isDarkMode?: boolean;
+  /**
+   * Зафиксированный скоуп (без переключателя «Настройки для»).
+   * Используется в конструкторе агента (scope=agent) и в проектах (scope=project).
+   */
+  lockedScope?: 'project' | 'agent';
+  /** page — страница настроек; panel — подменю в сайдбаре/модалке. */
+  variant?: 'page' | 'panel';
+  /** Кнопка «Назад» в режиме panel. */
+  onClose?: () => void;
+  /** Заголовок панели (по умолчанию зависит от lockedScope). */
+  panelTitle?: string;
 }
 
-export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsProps = {}) {
+export default function RAGSettings({
+  isDarkMode: isDarkModeProp,
+  lockedScope,
+  variant = 'page',
+  onClose,
+  panelTitle,
+}: RAGSettingsProps = {}) {
   const theme = useTheme();
-  const isDarkMode = isDarkModeProp ?? theme.palette.mode === 'dark';
+  const isPanel = variant === 'panel';
+  const isDarkMode = isDarkModeProp ?? (isPanel ? true : theme.palette.mode === 'dark');
   const { user } = useAuth();
   const ragUserId = user?.user_id || user?.username || '';
   const dropdownItemSx = useMemo(() => getDropdownItemSx(isDarkMode), [isDarkMode]);
   const dropdownTriggerSx = useMemo(() => getDropdownTriggerButtonSx(isDarkMode), [isDarkMode]);
   const dropdownTriggerTextSx = useMemo(() => getDropdownTriggerTextSx(isDarkMode), [isDarkMode]);
   const dropdownChevronSx = useMemo(() => getDropdownChevronSx(isDarkMode), [isDarkMode]);
+  const triggerMinWidth = isPanel ? 0 : 280;
   const [selectedStrategy, setSelectedStrategy] = useState<RAGStrategy>('auto');
   const [isLoading, setIsLoading] = useState(false);
   const [strategyPopoverAnchor, setStrategyPopoverAnchor] = useState<HTMLElement | null>(null);
   const [chunkingPopoverAnchor, setChunkingPopoverAnchor] = useState<HTMLElement | null>(null);
-  const [scopePopoverAnchor, setScopePopoverAnchor] = useState<HTMLElement | null>(null);
   const [agenticRagEnabled, setAgenticRagEnabled] = useState(true);
   const [ragQueryFixTypos, setRagQueryFixTypos] = useState(false);
   const [ragMultiQueryEnabled, setRagMultiQueryEnabled] = useState(false);
@@ -144,21 +164,31 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
   const [strategyInfoExpanded, setStrategyInfoExpanded] = useState(true);
   const [chunkingInfoExpanded, setChunkingInfoExpanded] = useState(true);
   /** Для каждого стора показываются и сохраняются настройки: проекты | агенты */
-  const [projectsAgentsScope, setProjectsAgentsScope] = useState<'project' | 'agent'>('project');
+  const [projectsAgentsScope, setProjectsAgentsScope] = useState<'project' | 'agent'>(
+    lockedScope ?? 'project'
+  );
   const isInitializedRef = useRef(false);
   const skipNextRagSaveToastRef = useRef(false);
   const { showNotification } = useAppActions();
 
-  // Перечитываем при смене пользователя И при переключении "Проекты / Агенты"
-  // у сторов свои чанкование, модели, промпт и параметры выдачи.
+  // Синхронизация lockedScope (если проп изменился)
   useEffect(() => {
+    if (lockedScope) {
+      setProjectsAgentsScope(lockedScope);
+    }
+  }, [lockedScope]);
+
+  // Перечитываем при смене пользователя / скоупа (только в panel — страница Settings
+  // показывает лишь библиотеку памяти).
+  useEffect(() => {
+    if (!isPanel) return;
     isInitializedRef.current = false;
     void loadRAGSettings();
-  }, [ragUserId, projectsAgentsScope]);
+  }, [ragUserId, projectsAgentsScope, isPanel]);
 
   // Автосохранение настроек RAG после первичной загрузки.
   useEffect(() => {
-    if (!isInitializedRef.current) return;
+    if (!isPanel || !isInitializedRef.current) return;
 
     // Кэш стратегии на пользователя — SocketContext читает localStorage.
     if (typeof localStorage !== 'undefined') {
@@ -171,6 +201,7 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
 
     return () => clearTimeout(timeoutId);
   }, [
+    isPanel,
     selectedStrategy,
     agenticRagEnabled,
     ragQueryFixTypos,
@@ -442,15 +473,47 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
     }
   };
 
-  return (
-    <Box sx={{ p: 3 }}>
-      <MemoryRagLibrarySection variant="prominent" />
+  const panelCardSx = isPanel
+    ? isDarkMode
+      ? {
+          mb: 2,
+          bgcolor: 'rgba(255,255,255,0.04)',
+          color: 'rgba(255,255,255,0.9)',
+          border: '1px solid rgba(255,255,255,0.08)',
+          boxShadow: 'none',
+          '& .MuiTypography-root': { color: 'inherit' },
+          '& .MuiTypography-colorTextSecondary, & .MuiFormHelperText-root': {
+            color: 'rgba(255,255,255,0.5) !important',
+          },
+          '& .MuiDivider-root': { borderColor: 'rgba(255,255,255,0.08)' },
+          '& .MuiInputBase-root': { color: 'rgba(255,255,255,0.9)' },
+          '& .MuiInputLabel-root': { color: 'rgba(255,255,255,0.55)' },
+          '& .MuiOutlinedInput-notchedOutline': { borderColor: 'rgba(255,255,255,0.2)' },
+        }
+      : { mb: 2, boxShadow: 'none', border: '1px solid', borderColor: 'divider' }
+    : { mb: 3 };
 
-      <Card sx={{ mb: 3 }}>
-        <CardContent>
-          <Typography variant="h6" gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-            <SearchIcon color="primary" />
-            Проекты и агенты
+  // Страница «Настройки → RAG»: только библиотека памяти.
+  // Карточки project/agent перенесены в конструктор агента и модалки проекта.
+  if (!isPanel) {
+    return (
+      <Box sx={{ p: 3 }}>
+        <MemoryRagLibrarySection variant="prominent" />
+      </Box>
+    );
+  }
+
+  const settingsBody = (
+    <>
+      <Card sx={panelCardSx}>
+        <CardContent sx={{ px: 1.5, py: 1.5, '&:last-child': { pb: 1.5 } }}>
+          <Typography
+            variant="subtitle1"
+            gutterBottom
+            sx={{ display: 'flex', alignItems: 'center', gap: 1, fontWeight: 600, fontSize: '0.95rem' }}
+          >
+            <SearchIcon color="primary" sx={{ fontSize: '1.1rem' }} />
+            Индексация и поиск
             <Tooltip
               title="Персональные настройки индексации и поиска для документов проекта и документов агента. Стратегия поиска также применяется к общей библиотеке."
               arrow
@@ -474,132 +537,39 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
           </Typography>
 
           <List sx={{ p: 0 }}>
-            <ListItem
-              sx={{
-                px: 0,
-                py: 2,
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-              }}
-            >
-              <ListItemText
-                primary={
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-                    Настройки для
-                    <Tooltip
-                      title="Выберите, для какого источника показывать подсказки: документы проекта или документы агента."
-                      arrow
-                    >
-                      <IconButton
-                        size="small"
-                        sx={{
-                          p: 0,
-                          ml: 0.5,
-                          opacity: 0.7,
-                          '&:hover': {
-                            opacity: 1,
-                            '& .MuiSvgIcon-root': {
-                              color: 'primary.main',
-                            },
-                          },
-                        }}
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        <HelpOutlineIcon fontSize="small" color="action" />
-                      </IconButton>
-                    </Tooltip>
-                  </Box>
-                }
-                primaryTypographyProps={{
-                  variant: 'body1',
-                  fontWeight: 500,
-                }}
-              />
-              <Box sx={{ minWidth: 280 }}>
-                <Box
-                  onClick={(e) => setScopePopoverAnchor(e.currentTarget)}
-                  sx={dropdownTriggerSx}
-                >
-                  <Typography sx={dropdownTriggerTextSx}>
-                    {projectsAgentsScope === 'project' ? 'Проекты' : 'Агенты'}
-                  </Typography>
-                  <ExpandMoreIcon
-                    sx={{
-                      ...dropdownChevronSx,
-                      transform: scopePopoverAnchor ? 'rotate(180deg)' : 'none',
-                    }}
-                  />
-                </Box>
-                <Popover
-                  open={Boolean(scopePopoverAnchor)}
-                  anchorEl={scopePopoverAnchor}
-                  onClose={() => setScopePopoverAnchor(null)}
-                  anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
-                  transformOrigin={{ vertical: 'top', horizontal: 'left' }}
-                  slotProps={{ paper: { sx: getDropdownPopoverPaperSx(scopePopoverAnchor, isDarkMode) } }}
-                >
-                  <Box sx={{ py: 0.5 }}>
-                    {(
-                      [
-                        { value: 'project' as const, label: 'Проекты' },
-                        { value: 'agent' as const, label: 'Агенты' },
-                      ]
-                    ).map((option) => (
-                      <Box
-                        key={option.value}
-                        onClick={() => {
-                          setProjectsAgentsScope(option.value);
-                          setScopePopoverAnchor(null);
-                        }}
-                        sx={{
-                          ...dropdownItemSx,
-                          ...getDropdownItemStateSx(isDarkMode, projectsAgentsScope === option.value),
-                        }}
-                      >
-                        {option.label}
-                      </Box>
-                    ))}
-                  </Box>
-                </Popover>
-              </Box>
-            </ListItem>
-
-            <Divider />
-
             <ListItem sx={{ px: 0, py: 0.5, display: 'block' }}>
               <Box sx={{ display: 'flex', flexDirection: 'column' }}>
-                <Box sx={RAG_MODEL_SELECTOR_ROW_SX}>
+                <Box sx={{ ...RAG_MODEL_SELECTOR_ROW_SX, flexDirection: 'column', alignItems: 'stretch' }}>
                   {ragModelRowLabel(
                     'Модель эмбеддингов',
                     projectsAgentsScope === 'project'
                       ? 'Для документов проекта. Общая библиотека использует свою модель (задаётся администратором) и этим выбором не затрагивается.'
                       : 'Для документов агента. Общая библиотека использует свою модель (задаётся администратором) и этим выбором не затрагивается.'
                   )}
-                  <Box sx={{ flexShrink: 0, width: { xs: '100%', sm: 'auto' } }}>
+                  <Box sx={{ flexShrink: 0, width: '100%' }}>
                     <RagModelSelector
                       kind="embedding"
                       scope={projectsAgentsScope}
-                      isDarkMode={theme.palette.mode === 'dark'}
+                      isDarkMode={isDarkMode}
                       disabled={isLoading}
-                      triggerMaxWidth={280}
+                      triggerMaxWidth={null}
                     />
                   </Box>
                 </Box>
-                <Box sx={RAG_MODEL_SELECTOR_ROW_SX}>
+                <Box sx={{ ...RAG_MODEL_SELECTOR_ROW_SX, flexDirection: 'column', alignItems: 'stretch' }}>
                   {ragModelRowLabel(
                     'Cross-encoder (реранкер)',
                     projectsAgentsScope === 'project'
                       ? 'Переупорядочивает найденные чанки после первичного поиска для документов проекта.'
                       : 'Переупорядочивает найденные чанки после первичного поиска для документов агента.'
                   )}
-                  <Box sx={{ flexShrink: 0, width: { xs: '100%', sm: 'auto' } }}>
+                  <Box sx={{ flexShrink: 0, width: '100%' }}>
                     <RagModelSelector
                       kind="reranker"
                       scope={projectsAgentsScope}
-                      isDarkMode={theme.palette.mode === 'dark'}
+                      isDarkMode={isDarkMode}
                       disabled={isLoading}
-                      triggerMaxWidth={280}
+                      triggerMaxWidth={null}
                     />
                   </Box>
                 </Box>
@@ -613,8 +583,10 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
                 px: 0,
                 py: 2,
                 display: 'flex',
+                flexDirection: isPanel ? 'column' : 'row',
                 justifyContent: 'space-between',
-                alignItems: 'center',
+                alignItems: isPanel ? 'stretch' : 'center',
+                gap: isPanel ? 1 : 0,
               }}
             >
               <ListItemText
@@ -663,7 +635,7 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
                   color: 'text.secondary',
                 }}
               />
-              <Box sx={{ minWidth: 280 }}>
+              <Box sx={{ minWidth: triggerMinWidth, width: isPanel ? '100%' : undefined, maxWidth: isPanel ? '100%' : undefined }}>
                 <Box
                   onClick={(e) => !isLoading && setStrategyPopoverAnchor(e.currentTarget)}
                   sx={{
@@ -766,8 +738,10 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
                 px: 0,
                 py: 2,
                 display: 'flex',
+                flexDirection: isPanel ? 'column' : 'row',
                 justifyContent: 'space-between',
-                alignItems: 'center',
+                alignItems: isPanel ? 'stretch' : 'center',
+                gap: isPanel ? 1 : 0,
               }}
             >
               <ListItemText
@@ -816,7 +790,7 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
                   color: 'text.secondary',
                 }}
               />
-              <Box sx={{ minWidth: 280 }}>
+              <Box sx={{ minWidth: triggerMinWidth, width: isPanel ? '100%' : undefined, maxWidth: isPanel ? '100%' : undefined }}>
                 <Box
                   onClick={(e) => !isLoading && setChunkingPopoverAnchor(e.currentTarget)}
                   sx={{
@@ -1132,13 +1106,17 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
         </CardContent>
       </Card>
 
-      <Card sx={{ mb: 3 }}>
-        <CardContent>
-          <Typography variant="h6" gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-            <SearchIcon color="primary" />
+      <Card sx={panelCardSx}>
+        <CardContent sx={{ px: 1.5, py: 1.5, '&:last-child': { pb: 1.5 } }}>
+          <Typography
+            variant="subtitle1"
+            gutterBottom
+            sx={{ display: 'flex', alignItems: 'center', gap: 1, fontWeight: 600, fontSize: '0.95rem' }}
+          >
+            <SearchIcon color="primary" sx={{ fontSize: '1.1rem' }} />
             Методы улучшения запросов
           </Typography>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 2, fontSize: '0.75rem' }}>
             {projectsAgentsScope === 'project'
               ? 'В основном для документов проекта. У общей библиотеки свои серверные параметры (кроме стратегии поиска выше).'
               : 'В основном для документов агента. У общей библиотеки свои серверные параметры (кроме стратегии поиска выше).'}
@@ -1441,7 +1419,59 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
           </List>
         </CardContent>
       </Card>
-    </Box>
+    </>
   );
+
+  if (isPanel) {
+    const resolvedTitle =
+      panelTitle ??
+      (lockedScope === 'project' ? 'Настройки РАГ для проектов' : 'Настройки РАГ для агента');
+    const panelBg = isDarkMode ? getSidebarPanelBackground() : undefined;
+    const headerBorder = isDarkMode ? '1px solid rgba(255,255,255,0.08)' : '1px solid rgba(0,0,0,0.08)';
+    const headerColor = isDarkMode ? 'white' : 'text.primary';
+    const backBtnColor = isDarkMode ? 'rgba(255,255,255,0.7)' : 'text.secondary';
+    const backBtnHover = isDarkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.04)';
+
+    return (
+      <Box
+        sx={{
+          display: 'flex',
+          flexDirection: 'column',
+          height: '100%',
+          overflow: 'hidden',
+          background: panelBg,
+          color: isDarkMode ? 'white' : 'text.primary',
+        }}
+      >
+        <Box
+          sx={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 1,
+            px: 2,
+            py: 1.5,
+            borderBottom: headerBorder,
+            flexShrink: 0,
+          }}
+        >
+          <IconButton
+            size="small"
+            onClick={onClose}
+            sx={{ color: backBtnColor, '&:hover': { bgcolor: backBtnHover } }}
+          >
+            <ArrowBackIcon />
+          </IconButton>
+          <Typography variant="h6" sx={{ color: headerColor, fontSize: '1rem', fontWeight: 600 }}>
+            {resolvedTitle}
+          </Typography>
+        </Box>
+        <Box sx={{ px: 1.5, py: 1.5, flex: 1, minHeight: 0, overflow: 'auto' }}>
+          {settingsBody}
+        </Box>
+      </Box>
+    );
+  }
+
+  return null;
 }
 

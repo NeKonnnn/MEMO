@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import ProjectRagLibraryInline from './ProjectRagLibraryInline';
 import WorkspacePicker from './WorkspacePicker';
+import RAGSettings from './settings/RAGSettings';
 import {
   Dialog,
   DialogTitle,
@@ -162,6 +163,7 @@ export default function NewProjectModal({
   const [workspacePath, setWorkspacePath] = useState('');
   const [showIconPicker, setShowIconPicker] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [showRagSettingsPanel, setShowRagSettingsPanel] = useState(false);
   const [iconTab, setIconTab] = useState(0);
   const [ragDraftProjectId, setRagDraftProjectId] = useState<string | null>(null);
   const createCompletedRef = useRef(false);
@@ -202,6 +204,7 @@ export default function NewProjectModal({
     setWorkspacePath('');
     setShowIconPicker(false);
     setShowAdvanced(false);
+    setShowRagSettingsPanel(false);
     setIconTab(0);
     setRagDraftProjectId(null);
   };
@@ -316,9 +319,24 @@ export default function NewProjectModal({
           backgroundColor: theme.palette.mode === 'dark' ? '#1e1e1e' : '#ffffff',
           borderRadius: 2,
           minHeight: '500px',
+          ...(showRagSettingsPanel
+            ? { height: 'min(90vh, 820px)', display: 'flex', flexDirection: 'column' }
+            : {}),
         },
       }}
     >
+      {showRagSettingsPanel ? (
+        <Box sx={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+          <RAGSettings
+            variant="panel"
+            lockedScope="project"
+            isDarkMode={theme.palette.mode === 'dark'}
+            panelTitle="Настройки РАГ для проектов"
+            onClose={() => setShowRagSettingsPanel(false)}
+          />
+        </Box>
+      ) : (
+        <>
       <DialogTitle
         sx={{
           display: 'flex',
@@ -504,7 +522,23 @@ export default function NewProjectModal({
           />
         </Box>
 
-        {/* Расширенные настройки */}
+        {/* RAG-настройки проекта (scope=project) */}
+        <Box sx={{ mb: 2 }}>
+          <Button
+            fullWidth
+            onClick={() => setShowRagSettingsPanel(true)}
+            endIcon={<ExpandMoreIcon />}
+            sx={{
+              justifyContent: 'space-between',
+              textTransform: 'none',
+              color: 'text.primary',
+            }}
+          >
+            Настройки РАГ для проектов
+          </Button>
+        </Box>
+
+        {/* Память / инструкции / workspace */}
         <Box sx={{ mb: 2 }}>
           <Button
             fullWidth
@@ -516,7 +550,7 @@ export default function NewProjectModal({
               color: 'text.primary',
             }}
           >
-            Расширенные настройки
+            Память и инструкции
           </Button>
 
           <Collapse in={showAdvanced}>
@@ -624,6 +658,8 @@ export default function NewProjectModal({
           Создать проект
         </Button>
       </DialogActions>
+        </>
+      )}
     </Dialog>
   );
 }

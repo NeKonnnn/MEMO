@@ -39,7 +39,7 @@ interface RagModelSelectorProps {
   kind: RagModelKind;
   isDarkMode: boolean;
   disabled?: boolean;
-  triggerMaxWidth?: number;
+  triggerMaxWidth?: number | null;
   onModelSelect?: (modelPath: string) => void;
   /** Для каждого стора выбирается модель: проекты | агенты. У них свои модели. */
   scope?: 'project' | 'agent';

@@ -80,6 +80,7 @@ import ShareAgentDialog from './ShareAgentDialog';
 import { fetchMcpServers } from '../mcp/api';
 import type { McpServerConfigPublic } from '../mcp/types';
 import { persistAgentMcpConfig } from '../utils/applyAgentMcp';
+import RAGSettings from './settings/RAGSettings';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -284,6 +285,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
   const [saveError, setSaveError] = useState('');
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [showModelParamsPanel, setShowModelParamsPanel] = useState(false);
+  const [showAgentRagSettingsPanel, setShowAgentRagSettingsPanel] = useState(false);
   const [modelParams, setModelParams] = useState<Partial<ModelParamsState>>({});
   const [agentModelSettings, setAgentModelSettings] = useState<ModelSettingsState>({ ...MODEL_SETTINGS_DEFAULT });
   const [agentSearchQuery, setAgentSearchQuery] = useState('');
@@ -879,6 +881,13 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
             setShowModelParamsPanel(false);
           }}
         />
+      ) : showAgentRagSettingsPanel ? (
+        <RAGSettings
+          variant="panel"
+          lockedScope="agent"
+          isDarkMode={true}
+          onClose={() => setShowAgentRagSettingsPanel(false)}
+        />
       ) : (
         <>
       {/* ── Выбор агента ─────────────────────────────────────────────────────── */}
@@ -1165,10 +1174,10 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
         {/* Model — outlined с «плавающей» подписью; без синей подсветки при фокусе */}
         <Box>
           <FormControl variant="outlined" fullWidth size="small" required sx={categoryFieldSx}>
-            <InputLabel htmlFor="agent-constructor-model">Модель</InputLabel>
+            <InputLabel htmlFor="agent-constructor-model">Модель LLM</InputLabel>
             <OutlinedInput
               id="agent-constructor-model"
-              label="Модель"
+              label="Модель LLM"
               value={model ? (model.replace('llm-svc://', '').split('/').pop() || model) : ''}
               readOnly
               placeholder="Выберите модель"
@@ -1514,10 +1523,10 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
               label={
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
                   <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.75)', fontSize: '0.78rem' }}>
-                    Искать по документам агента
+                    Искать по файлам агента
                   </Typography>
                   <Tooltip
-                    title="Файлы привязаны к этому агенту (не общая библиотека и не документы проекта). В чате поиск включается при выбранном агенте с этим флагом. Параметры индексации — в «RAG» → «Проекты и агенты»."
+                    title="Файлы привязаны к этому агенту (не общая библиотека и не документы проекта). В чате поиск включается при выбранном агенте с этим флагом. Параметры индексации — в «Настройки РАГ для агента»."
                     arrow
                   >
                     <HelpIcon sx={{ fontSize: 12, color: 'rgba(255,255,255,0.25)' }} />
@@ -1644,6 +1653,26 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
             />
             <Button
               size="small"
+              startIcon={<SettingsIcon sx={{ fontSize: '0.85rem !important' }} />}
+              fullWidth
+              disabled={readOnly}
+              onClick={() => setShowAgentRagSettingsPanel(true)}
+              sx={{
+                mt: 0.5,
+                fontSize: '0.72rem',
+                textTransform: 'none',
+                color: 'rgba(255,255,255,0.6)',
+                border: '1px solid rgba(255,255,255,0.15)',
+                py: 0.75,
+                justifyContent: 'flex-start',
+                '&:hover': { bgcolor: 'rgba(255,255,255,0.06)', borderColor: 'rgba(255,255,255,0.35)' },
+                '&:disabled': { color: 'rgba(255,255,255,0.3)', borderColor: 'rgba(255,255,255,0.1)' },
+              }}
+            >
+              Настройки РАГ для агента
+            </Button>
+            <Button
+              size="small"
               startIcon={isUploadingKb ? <CircularProgress size={13} sx={{ color: 'inherit' }} /> : <UploadIcon sx={{ fontSize: '0.85rem !important' }} />}
               fullWidth
               disabled={isUploadingKb || readOnly}
@@ -1660,7 +1689,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
                 '&:disabled': { color: 'rgba(255,255,255,0.3)', borderColor: 'rgba(255,255,255,0.1)' },
               }}
             >
-              {isUploadingKb ? 'Загрузка...' : 'Загрузить для поиска по файлам'}
+              {isUploadingKb ? 'Загрузка...' : 'Добавить файлы'}
             </Button>
           </Box>
         </Box>
