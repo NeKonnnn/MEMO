@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
+import WorkspacePicker from './WorkspacePicker';
 import {
   Dialog,
   DialogTitle,
@@ -123,6 +124,7 @@ export default function EditProjectModal({ open, onClose, project, onSave }: Edi
   const [selectedColor, setSelectedColor] = useState('#ffffff');
   const [memory, setMemory] = useState<'default' | 'project-only'>('default');
   const [instructions, setInstructions] = useState('');
+  const [workspacePath, setWorkspacePath] = useState('');
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [showIconPicker, setShowIconPicker] = useState(false);
   const [iconTab, setIconTab] = useState(0);
@@ -137,6 +139,7 @@ export default function EditProjectModal({ open, onClose, project, onSave }: Edi
       setSelectedColor(project.iconColor || '#ffffff');
       setMemory(project.memory || 'default');
       setInstructions(project.instructions || '');
+      setWorkspacePath(project.workspacePath || '');
       setShowAdvanced(false);
     }
   }, [open, project]);
@@ -168,6 +171,7 @@ export default function EditProjectModal({ open, onClose, project, onSave }: Edi
       iconColor: selectedColor,
       memory,
       instructions: instructions.trim(),
+      workspacePath: workspacePath.trim() || undefined,
     });
     handleClose();
   };
@@ -489,6 +493,17 @@ export default function EditProjectModal({ open, onClose, project, onSave }: Edi
                       color: theme.palette.mode === 'dark' ? 'white' : 'text.primary',
                     },
                   }}
+                />
+              </Box>
+              <Box sx={{ mb: 2 }}>
+                <Typography variant="body2" fontWeight="500" sx={{ mb: 1 }}>
+                  Workspace (coding agent)
+                </Typography>
+                <WorkspacePicker
+                  value={workspacePath}
+                  onChange={setWorkspacePath}
+                  isDarkMode={theme.palette.mode === 'dark'}
+                  showGlobalDefault
                 />
               </Box>
             </Box>

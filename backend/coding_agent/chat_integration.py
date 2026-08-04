@@ -11,6 +11,7 @@ from backend.coding_agent.loop import (
     get_coding_agent_loop,
 )
 from backend.coding_agent.workspace import validate_workspace
+from backend.llm_providers.routing import thinking_request_extra
 from backend.mcp.resolvers import build_chat_messages
 from backend.settings.config import get_settings
 from backend.settings.logging import get_logger
@@ -79,7 +80,7 @@ async def run_coding_for_chat(
         history=history,
         system_prompt=eff_system,
     )
-    request_extra = {"enable_thinking": enable_thinking} if enable_thinking else None
+    request_extra = thinking_request_extra(bool(enable_thinking))
     loop = get_coding_agent_loop()
     return await loop.run(
         messages=messages,

@@ -39,6 +39,7 @@ def _pick_service_url(urls: dict, docker_key: str, port_key: str) -> str:
 
 
 _URLS_CORS_KEYS: Tuple[str, ...] = (
+    # GPB naming
     "frontend_port",
     "frontend_port_ipv4",
     "frontend_port_2",
@@ -49,6 +50,11 @@ _URLS_CORS_KEYS: Tuple[str, ...] = (
     "backend_port_ipv4",
     "backend_port_2",
     "backend_port_2_ipv4",
+    # memo_new_api naming
+    "frontend_port_1",
+    "frontend_port_1_ipv4",
+    "backend_port_1",
+    "backend_port_1_ipv4",
 )
 
 
@@ -93,6 +99,132 @@ def _apply_urls_section(data: dict) -> dict:
             cors["allowed_origins"] = merged
     out["cors"] = cors
     out.pop("urls", None)
+    return out
+
+
+def _embedding_gateway_from_providers(data: dict) -> Tuple[str, str]:
+    """base_url и api_key_env для эмбеддингов из rag_models.providers."""
+    section = data.get("rag_models") or {}
+    providers = section.get("providers") or []
+    preferred = (
+        os.environ.get("RAG_MODELS_PROVIDER") or section.get("provider") or "PHOENIX"
+    )
+    preferred_ids = [str(preferred).strip(), "PHOENIX", "CORSUR"]
+    seen: set[str] = set()
+    for pid in preferred_ids:
+        key = pid.lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        for entry in providers:
+            if str(entry.get("id", "")).lower() == key:
+                base = str(entry.get("base_url") or "").strip().rstrip("/")
+                if base:
+                    api_key_env = str(entry.get("api_key_env") or "").strip()
+                    return base, api_key_env
+    for entry in providers:
+        base = str(entry.get("base_url") or "").strip().rstrip("/")
+        if base:
+            return base, str(entry.get("api_key_env") or "").strip()
+    return "", ""
+
+
+def _normalize_base_url(url: str) -> str:
+    """Адрес для сравнения: без хвостового слеша и без дефолтного порта."""
+    u = str(url or "").strip().rstrip("/").lower()
+    for scheme, port in (("https://", ":443"), ("http://", ":80")):
+        if u.startswith(scheme) and u.endswith(port):
+            return u[: -len(port)]
+    return u
+
+def _provider_entry_by_base_url(data: dict, url: str) -> dict:
+    """Запись из rag_models.providers, чей base_url совпадает с переданным."""
+    target = _normalize_base_url(url)
+    if not target:
+        return {}
+    for entry in (data.get("rag_models") or {}).get("providers") or []:
+        if _normalize_base_url(str(entry.get("base_url") or "")) == target:
+            return entry
+    return {}
+
+def _is_chat_only_llm_gateway(data: dict, url: str) -> bool:
+    """Шлюз объявлен chat-only в rag_models.providers (```chat_only: true```).
+
+    Раньше здесь была подстрока ```llm.corsur``` в имени хоста. Из-за неё ЛЮБОЙ
+    адрес в этом домене молча уезжал на другого провайдера — включая новый
+    шлюз, который эмбеддинги как раз обслуживает. Признак должен приходить
+    из конфига, а не из имени хоста.
+    """
+    return bool(_provider_entry_by_base_url(data, url).get("chat_only"))
+
+
+def _apply_rag_models_client_env(data: dict) -> dict:
+    """env RAG_MODELS_CLIENT** / RAG_MODELS_SERVICE_URL перекрывают yml."""
+    out = dict(data)
+    rmc = dict(out.get("rag_models_client") or {})
+    env_base = _env_str("RAG_MODELS_CLIENT_BASE_URL") or _env_str("RAG_MODELS_SERVICE_URL")
+    env_key = _env_str("RAG_MODELS_CLIENT_API_KEY_ENV")
+    if env_base:
+        rmc["base_url"] = env_base.rstrip("/")
+        print(
+            f"[CFG-DEBUG] rag_models_client.base_url <- env {env_base!r}",
+            flush=True,
+        )
+    if env_key is not None:
+        rmc["api_key_env"] = env_key
+        print(
+            f"[CFG-DEBUG] rag_models_client.api_key_env <- env {env_key!r}",
+            flush=True,
+        )
+    env_batch = _env_str("RAG_MODELS_CLIENT_EMBED_BATCH_SIZE")
+    if env_batch is not None:
+        try:
+            rmc["embed_batch_size"] = max(1, int(env_batch))
+            print(
+                f"[CFG-DEBUG] rag_models_client.embed_batch_size <- env {env_batch!r}",
+                flush=True,
+            )
+        except ValueError:
+            pass
+    env_conc = _env_str("RAG_MODELS_CLIENT_EMBED_CONCURRENCY")
+    if env_conc is not None:
+        try:
+            rmc["embed_concurrency"] = max(1, int(env_conc))
+            print(
+                f"[CFG-DEBUG] rag_models_client.embed_concurrency <- env {env_conc!r}",
+                flush=True,
+            )
+        except ValueError:
+            pass
+    out["rag_models_client"] = rmc
+    return out
+
+
+def _sanitize_rag_models_client_url(data: dict) -> dict:
+    """Не направлять эмбеддинги на chat-шлюз помеченный chat-only (там 404 на /v1/embeddings)."""
+    out = dict(data)
+    rmc = dict(out.get("rag_models_client") or {})
+    llm = dict(out.get("llm_service") or {})
+    base = str(rmc.get("base_url") or "").strip().rstrip("/")
+    # Совпадение с llm_service.base_url больше НЕ считаем ошибкой: единый шлюз
+    # (litellm/bifrost) обслуживает и chat, и эмбеддинги с одного адреса.
+    fixup = bool(base and _is_chat_only_llm_gateway(out, base))
+    if fixup:
+        emb_base, emb_key = _embedding_gateway_from_providers(out)
+        if emb_base and emb_base != base:
+            print(
+                f"[CFG-DEBUG] rag_models_client.base_url {base!r} -> {emb_base!r} "
+                "(chat-шлюз не обслуживает /v1/embeddings)",
+                flush=True,
+            )
+            rmc["base_url"] = emb_base
+            if not str(rmc.get("api_key_env") or "").strip() and emb_key:
+                rmc["api_key_env"] = emb_key
+    elif not str(rmc.get("api_key_env") or "").strip():
+        _, emb_key = _embedding_gateway_from_providers(out)
+        if emb_key:
+            rmc["api_key_env"] = emb_key
+    out["rag_models_client"] = rmc
     return out
 
 
@@ -212,8 +344,15 @@ class LoggingConfig(BaseModel):
 class RagModelsClientConfig(BaseModel):
     base_url: str = Field(...)
     timeout: float = Field(...)
-    # Сколько чанков отправлять за один POST /v1/embed (меньше → меньше пик RAM на svc-rag-models)
+    # Сколько чанков отправлять за один POST /v1/embeddings (меньше → меньше пик RAM)
     embed_batch_size: int = int(os.environ.get("RAG_MODELS_CLIENT_EMBED_BATCH_SIZE", "24"))
+    # Сколько POST /embeddings одновременно при индексации (1 = последовательно).
+    # K8s: RAG_MODELS_CLIENT_EMBED_CONCURRENCY
+    embed_concurrency: int = int(os.environ.get("RAG_MODELS_CLIENT_EMBED_CONCURRENCY", "4"))
+    # OpenAI-совместимый шлюз (llm.corsur): тот же ключ, что у backend LLM
+    api_key_env: str = Field(default="")
+    embedding_model: str = Field(default="")
+    reranker_model: str = Field(default="")
 
 
 class RagModelsProviderEntry(BaseModel):
@@ -224,6 +363,30 @@ class RagModelsProviderEntry(BaseModel):
     base_url: str = ""
     api_key_env: str = ""
     timeout: float = 300.0
+    embed_path: str = "/v1/embeddings"
+    rerank_path: str = "/v1/rerank"
+    # true - шлюз обслуживает только chat/completions и 404-ит на эмбеддингах.
+    # Тогда эмбеддинги уводятся на другого провайдера.
+    # ВНИМАНИЕ: имя поля должно совпадать с ключом в yml и с чтением в
+    # _is_chat_only_llm_gateway (:150). Раньше здесь было ```cant_only``` —
+    # опечатка, из-за неё ```chat_only: true``` молча отбрасывался pydantic,
+    # и CORSUR можно было выбрать эмбеддером, получая 404 на /v1/embeddings.
+    chat_only: bool = False
+    # Формат тела запроса эмбеддингов:
+    #   "openai"              - {"model", "input"} на embed_path (по умолчанию);
+    #   "bifrost-passthrough" - {"model", "messages", "texts", "input", "kind"}
+    #                           на /v1/chat/completions. Нужен, когда на шлюзе
+    #                           опубликован только chat-маршрут, а эмбеддер за ним
+    #                           достаётся через x-bf-passthrough-extra-params.
+    embed_payload_style: str = "openai"
+    # Формат тела запроса реранков:
+    #   "openai"              - {"model", "query", "documents", "top_n"} на rerank_path (по умолчанию);
+    #   "bifrost-passthrough" - {"model", "query", "documents", "top_n"} на /v1/rerank. Нужен, когда на шлюзе
+    #                           опубликован только rerank-маршрут, а реранкер за ним
+    #                           достаётся через x-bf-passthrough-extra-params.
+    rerank_payload_style: str = "openai"
+    # Доп. заголовки провайдера, например x-bf-passthrough-extra-params: "true".
+    extra_headers: Dict[str, str] = Field(default_factory=dict)
     # id моделей НЕ хардкодим в yml - приходят из выбора в UI (POST /v1/schema/models-provider).
     # Значения здесь - только стартовый дефолт до первого выбора.
     embedding_model: str = ""
@@ -269,18 +432,14 @@ class RagServiceConfig(BaseModel):
     # Диверсификация применяется только после weighted RRF и не использует
     # cosine-пороги (RRF и cosine имеют разные шкалы).
     hybrid_diversify_results: bool = os.environ.get("RAG_HYBRID_DIVERSIFY_RESULTS", "true").lower() == "true"
-    hybrid_max_chunks_per_document: int = int(os.environ.get("RAG_HYBRID_MAX_CHUNKS_PER_DOCUMENT", "2"))
+    # 0 = выключить лимит (не вытеснять чанки одного большого документа).
+    # Раньше дефолт 2 резал большие DOCX до 2 фрагментов → ложные «Не знаю».
+    hybrid_max_chunks_per_document: int = int(os.environ.get("RAG_HYBRID_MAX_CHUNKS_PER_DOCUMENT", "0"))
 
     # Диверсификация чистого vector-поиска: максимум N чанков одного документа
-    # в выдаче (0 = выключить и вернуть сырой top-k). Защита от «затопления»
-    # выдачи одним документом с сотнями тематически однородных чанков.
-    # Дефолт 6 = половина от k=12: связный блок информации до 6 чанков
-    # (~6000 симв; стыки перекрыты overlap'ом) сохраняется целиком, но минимум
-    # половина слотов гарантированно достаётся остальным документам.
-    # Если документов-кандидатов мало, срезанные чанки ДОБИРАЮТСЯ обратно
-    # до k (см. min_results в diversify_hybrid_rrf_hits).
+    # в выдаче (0 = выключить и вернуть сырой top-k).
     vector_max_chunks_per_document: int = int(
-        os.environ.get("RAG_VECTOR_MAX_CHUNKS_PER_DOCUMENT", "6")
+        os.environ.get("RAG_VECTOR_MAX_CHUNKS_PER_DOCUMENT", "0")
     )
 
     # Реранкинг через SVC-RAG-MODELS
@@ -310,6 +469,21 @@ class RagServiceConfig(BaseModel):
     enable_graph_rag: bool = os.environ.get("RAG_ENABLE_GRAPH", "true").lower() == "true"
     # Разрешить LLM-as-a-Judge в POST /search (доп. вызов llm-service; только при eval_llm_judge=true в теле)
     eval_llm_judge_allowed: bool = os.environ.get("RAG_EVAL_LLM_JUDGE_ALLOWED", "false").lower() == "true"
+
+    # ANN-индекс pgvector: hnsw (дефолт) | ivfflat. Свап через env без смены dim/стратегий.
+    # RAG_VECTOR_INDEX_METHOD=hnsw|ivfflat
+    vector_index_method: str = (
+        os.environ.get("RAG_VECTOR_INDEX_METHOD", "hnsw") or "hnsw"
+    ).strip().lower()
+    # IVFFlat: число списков при CREATE INDEX; probes — на каждый поиск (SET ivfflat.probes).
+    vector_ivfflat_lists: int = int(os.environ.get("RAG_VECTOR_IVFFLAT_LISTS", "100"))
+    vector_ivfflat_probes: int = int(os.environ.get("RAG_VECTOR_IVFFLAT_PROBES", "10"))
+    # HNSW: параметры построения и поиска.
+    vector_hnsw_m: int = int(os.environ.get("RAG_VECTOR_HNSW_M", "16"))
+    vector_hnsw_ef_construction: int = int(
+        os.environ.get("RAG_VECTOR_HNSW_EF_CONSTRUCTION", "64")
+    )
+    vector_hnsw_ef_search: int = int(os.environ.get("RAG_VECTOR_HNSW_EF_SEARCH", "40"))
 
 
 class LLMServiceConfig(BaseModel):
@@ -364,6 +538,8 @@ class Settings(BaseModel):
             with open(config_path, "r", encoding="utf-8") as f:
                 data = yaml.safe_load(f) or {}
             data = _apply_urls_section(data)
+            data = _apply_rag_models_client_env(data)
+            data = _sanitize_rag_models_client_url(data)
             data = _apply_postgres_env_overrides(data)
             data = _apply_backend_service_env(data)
             data = _apply_rag_env_overrides(data)
@@ -398,8 +574,10 @@ def get_settings_diagnostics(settings_obj: Optional[Settings] = None) -> Dict[st
         },
         "rag_models": {
             "base_url": cfg.rag_models_client.base_url,
+            "api_key_env": cfg.rag_models_client.api_key_env or None,
             "timeout": cfg.rag_models_client.timeout,
             "embed_batch_size": cfg.rag_models_client.embed_batch_size,
+            "embed_concurrency": cfg.rag_models_client.embed_concurrency,
             "provider": cfg.rag_models.provider,
             "providers_configured": [p.id for p in cfg.rag_models.providers],
         },
@@ -427,6 +605,12 @@ def get_settings_diagnostics(settings_obj: Optional[Settings] = None) -> Dict[st
             "enabled": cfg.rag.enabled,
             "use_hybrid_search": cfg.rag.use_hybrid_search,
             "enable_graph_rag": cfg.rag.enable_graph_rag,
+            "vector_index_method": cfg.rag.vector_index_method,
+            "vector_ivfflat_lists": cfg.rag.vector_ivfflat_lists,
+            "vector_ivfflat_probes": cfg.rag.vector_ivfflat_probes,
+            "vector_hnsw_m": cfg.rag.vector_hnsw_m,
+            "vector_hnsw_ef_construction": cfg.rag.vector_hnsw_ef_construction,
+            "vector_hnsw_ef_search": cfg.rag.vector_hnsw_ef_search,
         },
     }
 

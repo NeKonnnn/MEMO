@@ -31,6 +31,7 @@ from backend.settings.cef_logger.cef_logger import (
     log_cef_int003_llm_request,
     log_cef_int006_llm_api_failure,
 )
+from backend.llm_providers.routing import is_thinking_requested
 
 from .base import (
     LLMProvider,
@@ -610,7 +611,7 @@ class OpenAICompatProvider(LLMProvider):
         logger.info(
             "[%s] chat flags: enable_thinking=%r payload_keys=%s",
             self.id,
-            payload.get("enable_thinking"),
+            is_thinking_requested(request_extra),
             sorted(list(payload.keys())),
         )
         logger.info("[%s] POST /v1/chat/completions model=%r", self.id, model)
@@ -621,7 +622,7 @@ class OpenAICompatProvider(LLMProvider):
             max_tokens=max_tokens,
             request_extra=request_extra,
         )
-        thinking_requested = bool((request_extra or {}).get("enable_thinking"))
+        thinking_requested = is_thinking_requested(request_extra)
         cleaned = result.content
         if not thinking_requested and "<think>" in cleaned.lower():
             return _strip_think_tags(cleaned)
@@ -651,7 +652,7 @@ class OpenAICompatProvider(LLMProvider):
         logger.info(
             "[%s] stream enable_thinking=%r model=%r url=%s/v1/chat/completions",
             self.id,
-            payload.get("enable_thinking"),
+            is_thinking_requested(request_extra),
             model,
             self.base_url,
         )
@@ -660,7 +661,7 @@ class OpenAICompatProvider(LLMProvider):
         stream_timeout = httpx.Timeout(300.0, connect=10.0, read=300.0, write=10.0)
         accumulated = ""
         reasoning_accumulated = ""
-        thinking_requested = bool(payload.get("enable_thinking"))
+        thinking_requested = is_thinking_requested(request_extra)
         logged_delta_shape = False
         logger.info("[%s] POST /v1/chat/completions stream=True model=%r", self.id, model)
         cef_rid = uuid.uuid4().hex

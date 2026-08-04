@@ -6,21 +6,69 @@ import asyncio
 import concurrent.futures
 from typing import Any, Callable, Dict, List, Optional
 
-from backend.llm_providers.routing import build_chat_messages
+import httpx
+
+from backend.llm_providers.routing import build_chat_messages, format_llm_http_error
 from backend.settings.logging import get_logger
 
 log = get_logger(__name__)
 
 
+def _invoke_stream_callback(cb: Callable[..., Any], chunk: str, acc: str, stream_role: str = "content") -> bool:
+    try:
+        return bool(cb(chunk, acc, stream_role))
+    except TypeError:
+        return bool(cb(chunk, acc))
+
+
 def _run_async(coro):
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                return pool.submit(asyncio.run, coro).result()
-        return loop.run_until_complete(coro)
+        asyncio.get_running_loop()
     except RuntimeError:
         return asyncio.run(coro)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, coro).result()
+
+
+# Имена моделей, которые чат обслуживать не могут. Совпадают с подсказками
+# RAG-каталога (backend/routes/rag.py::_rag_model_kind) — если менять, менять там же.
+_NON_CHAT_NAME_HINTS = (
+    "embed",
+    "rerank",
+    "frida",
+    "cross-encoder",
+    "crossencoder",
+    "bge-",
+    "e5-",
+    "gte-",
+    "labse",
+    "minilm",
+)
+
+
+def _pick_chat_model(models: Any, *, provider_id: str) -> str:
+    """Первая ЧАТОВАЯ модель провайдера.
+
+    Раньше здесь стояло ``models[0]`` — на CORSUR первым в каталоге идёт
+    ``embed/FRIDA``, поэтому служебные вызовы без явной модели уходили
+    чат-запросом на эмбеддер и получали 422 (01.08: текст ошибки попадал в индекс).
+    """
+    ids = [str(getattr(m, "model_id", "") or "").strip() for m in (models or [])]
+    ids = [m for m in ids if m]
+    if not ids:
+        return ""
+    for model_id in ids:
+        low = model_id.lower()
+        if not any(hint in low for hint in _NON_CHAT_NAME_HINTS):
+            return model_id
+    log.warning(
+        "[LLM] у провайдера %s нет модели, похожей на чатовую (каталог: %s) — "
+        "беру %r, вероятен отказ провайдера",
+        provider_id,
+        ids[:8],
+        ids[0],
+    )
+    return ids[0]
 
 
 def sync_chat_via_registry(
@@ -34,58 +82,84 @@ def sync_chat_via_registry(
     temperature: float = 0.7,
     system_prompt: Optional[str] = None,
     enable_thinking: bool = False,
+    service_call: bool = False,
 ) -> Optional[str]:
-    """Синхронный LLM-вызов через ProviderRegistry (planner / aggregator)."""
+    """Синхронный LLM-вызов через ProviderRegistry (planner / aggregator).
+
+    ``service_call=True`` — служебный вызов (опечатки, multi-query, HyDE,
+    суммаризация, judge): код читает ответ, а не человек. При необходимости
+    отключается мышление и поднимается нижняя граница ``max_tokens``.
+    """
 
     async def _call():
         from backend.llm_providers import get_registry
+        from backend.llm_providers.routing import (
+            service_call_request_extra,
+            service_min_max_tokens,
+            thinking_request_extra,
+        )
 
         try:
             from backend.app_state import get_current_model_path
         except Exception:
-            get_current_model_path = lambda: None  # type: ignore
+            log.exception("Ошибка операции")
+
+            def get_current_model_path():
+                return None
 
         registry = await get_registry()
         effective_path = (model_path or get_current_model_path() or "").strip()
         provider, model_id = registry.resolve(effective_path)
         if not model_id:
             models = await provider.list_models()
-            model_id = models[0].model_id if models else ""
+            model_id = _pick_chat_model(models, provider_id=getattr(provider, "id", "?"))
         if not model_id:
             return None
 
         messages = build_chat_messages(prompt, history=history, system_prompt=system_prompt)
 
-        req_extra = {"enable_thinking": enable_thinking} if enable_thinking else None
+        # UI «Быстрый»/«Мышление»: явно шлём флаг (раньше при False extra не передавался).
+        req_extra = thinking_request_extra(bool(enable_thinking))
+        eff_max_tokens = max_tokens
+        if service_call and not enable_thinking:
+            extra = service_call_request_extra()
+            req_extra = extra if extra else None
+            eff_max_tokens = max(int(max_tokens or 0), service_min_max_tokens())
+            log.debug(
+                "[LLM] служебный вызов: отключение мышления=%s, max_tokens %s -> %s",
+                bool(extra),
+                max_tokens,
+                eff_max_tokens,
+            )
 
         if streaming and stream_callback:
-            acc = ""
-            async for chunk in provider.stream_chat(
+
+            def _cb(chunk: str, acc: str, stream_role: str = "content") -> bool:
+                return _invoke_stream_callback(stream_callback, chunk, acc, stream_role)
+
+            return await provider.stream_chat(
                 messages,
                 model_id,
+                callback=_cb,
                 temperature=temperature,
-                max_tokens=max_tokens,
+                max_tokens=eff_max_tokens,
                 request_extra=req_extra,
-            ):
-                if chunk:
-                    acc += chunk
-                    cont = stream_callback(chunk, acc, "content")
-                    if cont is False:
-                        return acc or None
-            return acc or None
+            )
 
         return await provider.chat(
             messages,
             model_id,
             temperature=temperature,
-            max_tokens=max_tokens,
+            max_tokens=eff_max_tokens,
             request_extra=req_extra,
         )
 
     try:
         return _run_async(_call())
-    except Exception as exc:
-        log.error("sync_chat_via_registry failed: %s", exc, exc_info=True)
+    except httpx.HTTPStatusError:
+        raise
+    except Exception:
+        log.exception("sync_chat_via_registry failed")
         return None
 
 

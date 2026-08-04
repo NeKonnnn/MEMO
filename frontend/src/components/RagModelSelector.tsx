@@ -41,11 +41,25 @@ interface RagModelSelectorProps {
   disabled?: boolean;
   triggerMaxWidth?: number;
   onModelSelect?: (modelPath: string) => void;
+  /** Для каждого стора выбирается модель: проекты | агенты. У них свои модели. */
+  scope?: 'project' | 'agent';
 }
 
 const SOURCE_LABELS: Record<string, string> = {
-  local: 'local-rag',
-  phoenix: 'phoenix',
+  local: 'Локальные',
+  corsur: 'CORSUR',
+  phoenix: 'PHOENIX',
+  phoenix_embeddings: 'PHOENIX_Embeddings',
+};
+
+/** Порядок вкладок: локальные (наш rag-models) первыми, затем внешние шлюзы. */
+const SOURCE_ORDER = ['Локальные', 'CORSUR', 'PHOENIX', 'PHOENIX_Embeddings'];
+
+const ALLOWED_SOURCES = new Set(['local', 'corsur', 'phoenix', 'phoenix_embeddings']);
+
+const sourceRank = (label: string) => {
+  const i = SOURCE_ORDER.indexOf(label);
+  return i < 0 ? SOURCE_ORDER.length : i;
 };
 
 const LEFT_PANEL_W = 185;
@@ -57,6 +71,7 @@ export default function RagModelSelector({
   disabled = false,
   triggerMaxWidth = 220,
   onModelSelect,
+  scope = 'project',
 }: RagModelSelectorProps) {
   const [models, setModels] = useState<RagModelRow[]>([]);
   const [selectedPath, setSelectedPath] = useState('');
@@ -81,30 +96,36 @@ export default function RagModelSelector({
   const loadModels = useCallback(async () => {
     try {
       setLoadingModels(true);
-      const response = await fetch(getApiUrl(`/api/rag/models?type=${kind}`), {
-        headers: getAuthFetchHeaders(),
-      });
+      const response = await fetch(getApiUrl(`/api/rag/models?type=${kind}&scope=${scope}`), 
+      { headers: getAuthFetchHeaders() },
+    );
       if (!response.ok) return;
       const data = await response.json();
       const rows: RagModelRow[] = (data?.models?.[kind] ?? []).filter(
-        (m: RagModelRow) =>
-          m.source === 'local' ||
-          m.source === 'phoenix' ||
-          String(m.path || '').startsWith('local/') ||
-          String(m.path || '').startsWith('phoenix/'),
+        (m: RagModelRow) => Boolean(m.path) && ALLOWED_SOURCES.has(String(m.source || '').toLowerCase()),
       );
       setModels(rows);
-      setOffline(true);
+      // offline=true в ответе rag-models = только локальные веса; для UI — подсказка.
+      setOffline(
+        Boolean(data?.offline) ||
+          (rows.length > 0 &&
+            rows.every((m) => String(m.source || '').toLowerCase() === 'local')),
+      );
       const current = data?.current?.[kind];
+      const clusterDefault = data?.cluster_default?.[kind];
       if (current?.path) {
         setSelectedPath(current.path);
+      } else if (clusterDefault?.path) {
+        setSelectedPath(String(clusterDefault.path));
       }
     } catch {
       // сервис может быть недоступен
     } finally {
       setLoadingModels(false);
     }
-  }, [kind]);
+    // scope в зависимостях: при переключении "Проекты / Агенты" подсветка
+    // выбранной модели должна перечитаться - у сторов свои модели.
+  }, [kind, scope]);
 
   useEffect(() => {
     loadModels();
@@ -122,12 +143,16 @@ export default function RagModelSelector({
   const sources = useMemo(() => {
     const map = new Map<string, RagModelRow[]>();
     for (const m of models) {
-      const label = SOURCE_LABELS[m.source] || m.source || 'local';
+      const src = String(m.source || '').toLowerCase();
+      if (!ALLOWED_SOURCES.has(src)) continue;
+      const label = SOURCE_LABELS[src] || m.source;
       const bucket = map.get(label);
       if (bucket) bucket.push(m);
       else map.set(label, [m]);
     }
-    return Array.from(map.entries()).map(([label, items]) => ({ label, items }));
+    return Array.from(map.entries()).map(([label, items]) => ({ label, items })).sort(
+      (a, b) => sourceRank(a.label) - sourceRank(b.label),
+    );
   }, [models]);
 
   const filteredModels = useMemo(() => {
@@ -177,7 +202,7 @@ export default function RagModelSelector({
       const response = await fetch(getApiUrl('/api/rag/models/select'), {
         method: 'POST',
         headers: getAuthFetchHeaders({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify({ model_type: kind, model_path: modelPath }),
+        body: JSON.stringify({ model_type: kind, model_path: modelPath, scope }),
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {

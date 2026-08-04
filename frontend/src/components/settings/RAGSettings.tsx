@@ -85,8 +85,7 @@ type RAGStrategy = 'auto' | 'hybrid' | 'vector' | 'graph' | 'lexical';
 type ChunkingStrategy = 'hierarchical' | 'fixed' | 'markdown' | 'separators' | 'semantic';
 const RAG_STRATEGY_STORAGE_KEY = 'rag_strategy';
 const RAG_CHUNKING_STORAGE_KEY = 'rag_chunking_strategy';
-const DEFAULT_RAG_SYSTEM_PROMPT =
-  'Используй только предоставленный контекст. Если ответа нет в тексте, скажи «Не знаю». Не придумывай факты.';
+const DEFAULT_RAG_SYSTEM_PROMPT = '';
 
 function ragStorageKey(base: string, userId?: string | null): string {
   const uid = (userId || '').trim().toLowerCase();
@@ -144,16 +143,18 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
   const [ragSystemPrompt, setRagSystemPrompt] = useState(DEFAULT_RAG_SYSTEM_PROMPT);
   const [strategyInfoExpanded, setStrategyInfoExpanded] = useState(true);
   const [chunkingInfoExpanded, setChunkingInfoExpanded] = useState(true);
-  /** UI-фокус карточки: проекты | агенты (параметры пока общий набор в API). */
+  /** Для каждого стора показываются и сохраняются настройки: проекты | агенты */
   const [projectsAgentsScope, setProjectsAgentsScope] = useState<'project' | 'agent'>('project');
   const isInitializedRef = useRef(false);
   const skipNextRagSaveToastRef = useRef(false);
   const { showNotification } = useAppActions();
 
+  // Перечитываем при смене пользователя И при переключении "Проекты / Агенты"
+  // у сторов свои чанкование, модели, промпт и параметры выдачи.
   useEffect(() => {
     isInitializedRef.current = false;
     void loadRAGSettings();
-  }, [ragUserId]);
+  }, [ragUserId, projectsAgentsScope]);
 
   // Автосохранение настроек RAG после первичной загрузки.
   useEffect(() => {
@@ -184,12 +185,15 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
     ragRerankTopN,
     ragSystemPrompt,
     ragUserId,
+    // projectsAgentsScope сознательно НЕ в зависимостях: смену скоупа обрабатывает
+    // эффект загрузки выше, а здесь она вызвала бы запись значений старого стора
+    // в новый. Актуальный скоуп saveRAGSettings берёт из замыкания рендера.
   ]);
 
   const loadRAGSettings = async () => {
     try {
       setIsLoading(true);
-      const response = await fetch(getApiUrl('/api/rag/settings'), {
+      const response = await fetch(getApiUrl(`/api/rag/settings?scope=${projectsAgentsScope}`), {
         headers: getAuthFetchHeaders(),
       });
       if (response.ok) {
@@ -240,7 +244,10 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
         if (typeof data.rag_rerank_top_n === 'number' && Number.isFinite(data.rag_rerank_top_n)) {
           setRagRerankTopN(Math.max(1, Math.min(64, Math.round(data.rag_rerank_top_n))));
         }
-        if (typeof data.rag_system_prompt === 'string' && data.rag_system_prompt.trim()) {
+        if (typeof data.rag_system_prompt === 'string') {
+          // Пустая строка — валидное значение (мягкие правила). Раньше
+          // `trim()` отбрасывал '', и после очистки поле снова заполнялось
+          // предыдущим промптом при reload / смене скоупа / гонке с autosave.
           setRagSystemPrompt(data.rag_system_prompt);
         }
       } else if (response.status === 404) {
@@ -260,6 +267,7 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
         method: 'PUT',
         headers: getAuthFetchHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({
+          scope: projectsAgentsScope,
           strategy: selectedStrategy,
           agentic_rag_enabled: agenticRagEnabled,
           rag_query_fix_typos: ragQueryFixTypos,
@@ -571,6 +579,7 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
                   <Box sx={{ flexShrink: 0, width: { xs: '100%', sm: 'auto' } }}>
                     <RagModelSelector
                       kind="embedding"
+                      scope={projectsAgentsScope}
                       isDarkMode={theme.palette.mode === 'dark'}
                       disabled={isLoading}
                       triggerMaxWidth={280}
@@ -587,6 +596,7 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
                   <Box sx={{ flexShrink: 0, width: { xs: '100%', sm: 'auto' } }}>
                     <RagModelSelector
                       kind="reranker"
+                      scope={projectsAgentsScope}
                       isDarkMode={theme.palette.mode === 'dark'}
                       disabled={isLoading}
                       triggerMaxWidth={280}
@@ -639,7 +649,11 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
                     </Tooltip>
                   </Box>
                 }
-                secondary="Также влияет на общую библиотеку."
+                secondary={
+                  projectsAgentsScope === 'project'
+                    ? 'Только для документов проекта. У библиотеки стратегия своя.'
+                    : 'Только для документов агента. У библиотеки стратегия своя.'
+                }
                 primaryTypographyProps={{
                   variant: 'body1',
                   fontWeight: 500,
@@ -1046,7 +1060,7 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
                       <Box sx={MODEL_SETTINGS_LABEL_WRAPPER_SX} component="span">
                         Порог схожести
                         <Tooltip
-                          title="Минимальный порог схожести для включения чанка в результат поиска. 0 — без фильтрации, выше — строже отбор. Диапазон 0–1."
+                          title="Минимальный порог схожести (0..1) для project/agent RAG. 0 — без фильтрации. Для Библиотеки (memory) порог задаётся в ConfigMap: RAG_MEMORY_SIMILARITY_THRESHOLD."
                           arrow
                         >
                           <IconButton
@@ -1101,8 +1115,8 @@ export default function RAGSettings({ isDarkMode: isDarkModeProp }: RAGSettingsP
                 onChange={(e) => setRagSystemPrompt(e.target.value)}
                 helperText={
                   projectsAgentsScope === 'project'
-                    ? 'Для документов проекта. Общая библиотека использует свой серверный промпт.'
-                    : 'Для документов агента. Общая библиотека использует свой серверный промпт.'
+                    ? 'Для документов проекта. Пусто — мягкие правила без принудительного «Не знаю». Библиотека берёт промпт из RAG_MEMORY_SYSTEM_PROMPT (ConfigMap).'
+                    : 'Для документов агента. Пусто — мягкие правила без принудительного «Не знаю». Библиотека берёт промпт из RAG_MEMORY_SYSTEM_PROMPT (ConfigMap).'
                 }
                 InputLabelProps={{ shrink: true }}
                 sx={MODEL_SETTINGS_INPUT_SX}

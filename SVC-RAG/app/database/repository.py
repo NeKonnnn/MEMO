@@ -236,6 +236,9 @@ class VectorRepository:
         """
         params.append(limit)
         async with await self.db.acquire() as conn:
+            from app.database.embedding_schema import apply_ann_search_settings
+
+            await apply_ann_search_settings(conn)
             rows = await conn.fetch(q, *params)
         result = []
         for row in rows:

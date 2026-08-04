@@ -1041,7 +1041,9 @@ class LLMService:
     def _thinking_request_extra(enable_thinking: Optional[bool]) -> Optional[Dict[str, Any]]:
         if enable_thinking is None:
             return None
-        return {"enable_thinking": bool(enable_thinking)}
+        from backend.llm_providers.routing import thinking_request_extra
+
+        return thinking_request_extra(bool(enable_thinking))
 
     async def generate_response(
         self,
@@ -1265,7 +1267,9 @@ class LLMService:
                     reasoning = _normalize_reasoning_payload(
                         message.get("reasoning_content") or message.get("reasoning")
                     ).strip()
-                    thinking_requested = bool((req_extra or {}).get("enable_thinking"))
+                    from backend.llm_providers.routing import is_thinking_requested
+
+                    thinking_requested = is_thinking_requested(req_extra)
                     if thinking_requested and reasoning and "<think>" not in content:
                         content = f"<think>{reasoning}</think>\n\n{content}"
                     # Быстрый режим: если модель встроила <think> в content — убираем.
@@ -1324,12 +1328,16 @@ class LLMService:
                 for k, v in request_extra.items():
                     if v is not None:
                         payload[k] = v
-            thinking_requested = bool(payload.get("enable_thinking"))
+            from backend.llm_providers.routing import is_thinking_requested
+
+            thinking_requested = is_thinking_requested(request_extra) or bool(
+                payload.get("enable_thinking")
+            )
             logger.info(
                 "[_stream_generation] POST /v1/chat/completions host=%r model=%r enable_thinking=%r",
                 host_id,
                 payload.get("model"),
-                payload.get("enable_thinking"),
+                thinking_requested,
             )
             headers = {**self.client._get_headers(), "Accept": "text/event-stream"}
             stream_read_timeout = 300.0

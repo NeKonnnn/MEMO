@@ -151,6 +151,7 @@ export interface Project {
   iconColor?: string;
   memory: 'default' | 'project-only';
   instructions: string;
+  workspacePath?: string;
   createdAt: string;
   updatedAt: string;
 }

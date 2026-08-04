@@ -470,24 +470,38 @@ def ask_agent(
     system_prompt=None,
     temperature=None,
     enable_thinking=None,
+    service_call=False,
 ):
     """
     Единая точка LLM для legacy callers.
+
+    ``service_call=True`` — ответ читает код, а не человек (исправление опечаток,
+    multi-query, HyDE, суммаризация при индексации, judge). Для таких вызовов
+    выключается мышление: reasoning-модель иначе тратит весь бюджет токенов на
+    рассуждение.
 
     - CORSUR / Phoenix / llm-svc в ``llm_providers`` → ProviderRegistry
     - ``llm-svc://…``, vision (images) → ``ask_agent_llm_svc`` / ``generate_response``
     - MCP agent loop всегда идёт через registry отдельно (не через эту функцию)
     """
     from backend.llm_providers.routing import (
+        format_llm_http_error,
         registry_response_usable,
+        service_min_max_tokens,
         should_use_llm_svc_direct,
     )
+    import httpx
 
     eff_max_tokens = max_tokens or (model_settings.get("output_tokens") if model_settings else 1024)
     eff_temperature = float(temperature if temperature is not None else (model_settings.get("temperature") or 0.7))
     eff_system_prompt = merge_context_prompt_into_system(
         system_prompt, model_path=model_path, custom_prompt_id=custom_prompt_id
     )
+    # Служебные вызовы: гасим мышление и поднимаем min max_tokens (страховка 01.08).
+    eff_enable_thinking = bool(enable_thinking)
+    if service_call and not eff_enable_thinking:
+        eff_enable_thinking = False
+        eff_max_tokens = max(int(eff_max_tokens or 0), service_min_max_tokens())
 
     if not should_use_llm_svc_direct(model_path=model_path, images=images):
         try:
@@ -502,11 +516,16 @@ def ask_agent(
                 max_tokens=eff_max_tokens,
                 temperature=eff_temperature,
                 system_prompt=eff_system_prompt,
-                enable_thinking=bool(enable_thinking),
+                enable_thinking=eff_enable_thinking,
+                service_call=bool(service_call),
             )
             if registry_response_usable(registry_response):
                 logger.debug("ask_agent: ProviderRegistry model_path=%s", model_path)
                 return registry_response
+            return "Не удалось получить ответ от модели. Проверьте доступность провайдера."
+        except httpx.HTTPStatusError as exc:
+            logger.warning("ask_agent: ProviderRegistry HTTP %s", exc.response.status_code)
+            return format_llm_http_error(exc)
         except Exception as exc:
             logger.debug("ask_agent: ProviderRegistry failed, fallback llm-svc: %s", exc)
 
@@ -515,7 +534,9 @@ def ask_agent(
         
         # Если не указано количество токенов, берем из настроек
         if max_tokens is None:
-            max_tokens = model_settings.get("output_tokens")
+            max_tokens = eff_max_tokens
+        else:
+            max_tokens = eff_max_tokens
         if temperature is None:
             temperature = float(model_settings.get("temperature") or 0.7)
         
@@ -532,7 +553,7 @@ def ask_agent(
                 images=images,
                 system_prompt=eff_system_prompt,
                 temperature=temperature,
-                enable_thinking=enable_thinking,
+                enable_thinking=False if service_call else enable_thinking,
             )
             
             # Проверяем, не была ли генерация отменена

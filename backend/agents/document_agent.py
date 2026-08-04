@@ -5,16 +5,27 @@ Global documents store больше не используется.
 
 from typing import Any, Dict, List, Optional, Tuple
 
-import backend.app_state as state
 from backend.app_state import get_rag_chat_top_k
+from backend.rag_query.context_budget import rag_context_max_chars
 from backend.rag_query.post_generation import maybe_replace_ungrounded
-from backend.rag_query.prompts import RAG_STRICT_NOT_FOUND_MESSAGE, merge_strict_rag_system_prompt
+from backend.rag_query.prompts import (
+    RAG_STRICT_NOT_FOUND_MESSAGE,
+    merge_strict_rag_system_prompt,
+)
+from backend.rag_query.relevance import scores_to_relevance_percents
 from backend.realtime.rag_evidence import (
     RAG_NO_RELEVANT_CONTEXT_MESSAGE,
     build_rag_id_to_filename,
     filter_rag_hits_by_score,
     rag_document_label,
-    rag_guard_env,
+)
+from backend.services.memory_rag_env import (
+    get_memory_similarity_threshold,
+    get_memory_system_prompt,
+)
+from backend.services.user_rag_settings import (
+    runtime_rag_system_prompt,
+    runtime_rag_similarity_threshold,
 )
 from backend.settings.logging import get_logger
 
@@ -29,18 +40,26 @@ class DocumentAgent(BaseAgent):
     """Агент для поиска по KB и библиотеке памяти (не global store)."""
 
     def __init__(self):
-        super().__init__(name="document", description="Агент для поиска и анализа документов")
+        super().__init__(
+            name="document", description="Агент для поиска и анализа документов"
+        )
         self.capabilities = ["document_search", "text_analysis", "content_extraction"]
 
-    async def process_message(self, message: str, context: Dict[str, Any] = None) -> str:
+    async def process_message(
+        self, message: str, context: Dict[str, Any] = None
+    ) -> str:
         """Обработка запросов по документам"""
         try:
-            request_strategy = str((context or {}).get("rag_strategy") or "").strip().lower()
+            request_strategy = (
+                str((context or {}).get("rag_strategy") or "").strip().lower()
+            )
             try:
                 import backend.main as main_module
 
                 rag_client = getattr(main_module, "rag_client", None)
-                current_rag_strategy = request_strategy or getattr(main_module, "current_rag_strategy", "auto")
+                current_rag_strategy = request_strategy or getattr(
+                    main_module, "current_rag_strategy", "auto"
+                )
             except Exception:
                 logger.exception("Ошибка операции")
                 rag_client = None
@@ -49,46 +68,94 @@ class DocumentAgent(BaseAgent):
                 return "Сервис поиска по документам (SVC-RAG) недоступен. Пожалуйста, убедитесь, что система инициализирована."
 
             logger.info("[DocumentAgent] Поиск в KB + memory: %s", message)
-            min_sim, _ = rag_guard_env()
             k = get_rag_chat_top_k()
             hits: List[Hit] = []
             id_map: Dict[Any, str] = {}
+            scopes_used: List[str] = []
 
             try:
-                kb_hits = await rag_client.kb_search(message, k=k, strategy=current_rag_strategy) or []
+                kb_hits = (
+                    await rag_client.kb_search(
+                        message, k=k, strategy=current_rag_strategy
+                    )
+                    or []
+                )
+                kb_hits = filter_rag_hits_by_score(
+                    kb_hits, runtime_rag_similarity_threshold("agent")
+                )
+                if kb_hits:
+                    scopes_used.append("agent")
                 hits.extend(kb_hits)
-                id_map.update(build_rag_id_to_filename(list(await rag_client.kb_list_documents() or [])))
+                id_map.update(
+                    build_rag_id_to_filename(
+                        list(await rag_client.kb_list_documents() or [])
+                    )
+                )
             except Exception:
                 logger.exception("DocumentAgent kb_search")
 
             try:
-                mem_hits = await rag_client.memory_rag_search(message, k=k, strategy=current_rag_strategy) or []
+                mem_hits = (
+                    await rag_client.memory_rag_search(
+                        message, k=k, strategy=current_rag_strategy
+                    )
+                    or []
+                )
+                mem_hits = filter_rag_hits_by_score(
+                    mem_hits, get_memory_similarity_threshold()
+                )
+                if mem_hits:
+                    scopes_used.append("memory")
                 hits.extend(mem_hits)
-                id_map.update(build_rag_id_to_filename(list(await rag_client.memory_rag_list_documents() or [])))
+                id_map.update(
+                    build_rag_id_to_filename(
+                        list(await rag_client.memory_rag_list_documents() or [])
+                    )
+                )
             except Exception:
                 logger.exception("DocumentAgent memory_rag_search")
 
-            hits = filter_rag_hits_by_score(hits, min_sim)
-            hits.sort(key=lambda h: float(h[1]) if h and len(h) > 1 else 0.0, reverse=True)
+            hits.sort(
+                key=lambda h: float(h[1]) if h and len(h) > 1 else 0.0, reverse=True
+            )
             hits = hits[:k]
             if not hits:
                 return RAG_NO_RELEVANT_CONTEXT_MESSAGE
 
             logger.info("[DocumentAgent] Найдено фрагментов: %s", len(hits))
+            pcts = scores_to_relevance_percents([h[1] for h in hits])
+            # Номер чанка и релевантность — только в лог: в CONTEXT они не нужны,
+            # модель копирует эту разметку в ответ пользователю.
+            logger.debug(
+                "[DocumentAgent] чанки: %s",
+                [
+                    (rag_document_label(d, id_map), ci, f"{p}%")
+                    for (_c, _s, d, ci), p in zip(hits, pcts)
+                ],
+            )
             context_parts = []
-            for i, (content, score, doc_id, chunk_idx) in enumerate(hits, 1):
+            total = 0
+            budget = rag_context_max_chars("project")
+            for i, (content, _score, doc_id, chunk_idx) in enumerate(hits, 1):
                 title = rag_document_label(doc_id, id_map)
-                context_parts.append(
-                    f"Фрагмент {i} (документ «{title}», чанк {chunk_idx}, релевантность: {score:.2f}):\n{content}\n"
-                )
+                frag = f"Фрагмент {i} (документ «{title}»): {content}\n"
+                if total + len(frag) > budget:
+                    break
+                context_parts.append(frag)
+                total += len(frag)
             document_context = "\n".join(context_parts)
             from backend.agent_llm_svc import ask_agent
 
             prompt = f"CONTEXT:\n\n{document_context}\n\nВопрос пользователя: {message}\n\nОтвет:"
             selected_model = context.get("selected_model") if context else None
             logger.info("Отправляем запрос к LLM с контекстом документов...")
+            rag_override = (
+                runtime_rag_system_prompt(scopes_used)
+                or get_memory_system_prompt()
+                or None
+            )
             system_prompt = merge_strict_rag_system_prompt(
-                None, rag_override=getattr(state, "rag_system_prompt", None)
+                None, rag_override=rag_override
             )
             if selected_model:
                 logger.info("DocumentAgent использует модель: %s", selected_model)
@@ -107,7 +174,9 @@ class DocumentAgent(BaseAgent):
                     streaming=False,
                     system_prompt=system_prompt,
                 )
-            response = await maybe_replace_ungrounded(prompt[:20000], response, RAG_STRICT_NOT_FOUND_MESSAGE)
+            response = await maybe_replace_ungrounded(
+                prompt[:20000], response, RAG_STRICT_NOT_FOUND_MESSAGE
+            )
             logger.info("Получен ответ от LLM, длина: %s символов", len(response))
             return response
         except Exception as e:

@@ -5,8 +5,12 @@ export interface RagReindexStatusPayload {
   any_reindexing: boolean;
   agent_has_kb: boolean;
   project_has_documents: boolean;
+  memory_rag_enabled: boolean;
   message: string;
 }
+
+export const MEMORY_RAG_DISABLED_HINT =
+  'Поиск по общей библиотеке отключен администратором';
 
 export const RAG_REINDEX_BLOCK_PLACEHOLDER =
   'Идёт перечанковка документов — дождитесь завершения';

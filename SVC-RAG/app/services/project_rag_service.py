@@ -23,6 +23,7 @@ from app.services.chunker import (
 from app.services.document_parser import parse_document
 from app.services.retrieval_pipeline import RetrievalTrace, run_retrieval_pipeline
 from app.services.hierarchical_indexing import index_document_hierarchically
+from app.services.stage_timer import StageTimer
 
 logger = get_logger(__name__)
 
@@ -136,8 +137,11 @@ class ProjectRagService:
         model: Optional[str] = None,
         provider: Optional[str] = None,
     ) -> Dict[str, Any]:
-        parsed = await parse_document(file_data, filename)
+        timer = StageTimer("INDEX", store="project", file=filename, project_id=project_id)
+        with timer.stage("parse"):
+            parsed = await parse_document(file_data, filename)
         if not parsed:
+            timer.log(logger)
             return {
                 "ok": False,
                 "error": "Не удалось извлечь текст или формат не поддерживается",
@@ -146,12 +150,14 @@ class ProjectRagService:
 
         text = parsed.get("text", "")
         if not text.strip():
+            timer.log(logger)
             return {"ok": False, "error": "Документ пустой", "document_id": None}
 
         # Модель выбираем ДО создания документа: иначе при ошибке сохранения
         # в БД останется документ без единого вектора.
         try:
-            prof, repo = await self._route(model, provider)
+            with timer.stage("route_embed_model"):
+                prof, repo = await self._route(model, provider)
         except Exception as e:
             logger.error(
                 "[INDEX project] не удалось выбрать модель (provider=%s model=%s): %s",
@@ -159,6 +165,7 @@ class ProjectRagService:
                 model,
                 e,
             )
+            timer.log(logger)
             return {
                 "ok": False,
                 "error": f"Модель эмбеддинга: {e}",
@@ -188,32 +195,38 @@ class ProjectRagService:
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow(),
         )
-        doc_id = await self.doc_repo.create_document(project_id, doc)
+        with timer.stage("insert_document"):
+            doc_id = await self.doc_repo.create_document(project_id, doc)
         if doc_id is None:
+            timer.log(logger)
             return {"ok": False, "error": "Ошибка сохранения документа в БД", "document_id": None}
 
         if (chunking_strategy or "").strip().lower() == "hierarchical":
             try:
-                count = await index_document_hierarchically(
-                    text,
-                    doc_id,
-                    filename=filename,
-                    vector_repo=repo,
-                    rag_client=prof.client,
-                    chunk_size=chunk_size,
-                    chunk_overlap=chunk_overlap,
-                    model=prof.model,
-                )
+                with timer.stage("hierarchical_embed_insert"):
+                    count = await index_document_hierarchically(
+                        text,
+                        doc_id,
+                        filename=filename,
+                        vector_repo=repo,
+                        rag_client=prof.client,
+                        chunk_size=chunk_size,
+                        chunk_overlap=chunk_overlap,
+                        model=prof.model,
+                    )
             except Exception as e:
                 logger.error("project_rag иерархическая индексация не удалась: %s", e)
                 await self.doc_repo.delete_document(doc_id)
+                timer.log(logger)
                 return {
                     "ok": False,
                     "error": f"Иерархическая индексация: {e}",
                     "document_id": None,
                 }
-            self._mark_bm25_dirty(project_id)
-            await self._rebuild_graph_for_document(doc_id, vector_repo=repo)
+            with timer.stage("bm25"):
+                self._mark_bm25_dirty(project_id)
+            with timer.stage("graph"):
+                await self._rebuild_graph_for_document(doc_id, vector_repo=repo)
             eff_size, eff_overlap = resolve_chunk_params(chunk_size, chunk_overlap)
             logger.info(
                 "[INDEX project] '%s' (project=%s, id=%s, owner=%s, uploader=%s): strategy=hierarchical size=%s overlap=%s "
@@ -229,6 +242,9 @@ class ProjectRagService:
                 count,
                 prof.label,
             )
+            timer.meta["doc_id"] = doc_id
+            timer.meta["chunks"] = count
+            timer.log(logger)
             return {
                 "ok": True,
                 "document_id": doc_id,
@@ -237,22 +253,26 @@ class ProjectRagService:
                 "project_id": project_id,
             }
 
-        chunks_with_meta = split_into_chunks_with_meta(
-            text,
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-            chunking_strategy=chunking_strategy,
-        )
+        with timer.stage("chunk"):
+            chunks_with_meta = split_into_chunks_with_meta(
+                text,
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+                chunking_strategy=chunking_strategy,
+            )
         if not chunks_with_meta:
             await self.doc_repo.delete_document(doc_id)
+            timer.log(logger)
             return {"ok": False, "error": "Не удалось нарезать чанки", "document_id": None}
         chunks = [c for c, _m in chunks_with_meta]
 
         try:
-            embeddings = await prof.embed(chunks, kind="document")
+            with timer.stage("embed"):
+                embeddings = await prof.embed(chunks, kind="document")
         except Exception as e:
             logger.error("Ошибка эмбеддингов project_rag: %s", e)
             await self.doc_repo.delete_document(doc_id)
+            timer.log(logger)
             return {"ok": False, "error": f"Ошибка эмбеддингов: {e}", "document_id": None}
 
         vectors = []
@@ -269,15 +289,18 @@ class ProjectRagService:
                 )
             )
 
-        created = await repo.create_vectors_batch(vectors)
-        self._mark_bm25_dirty(project_id)
+        with timer.stage("insert"):
+            created = await repo.create_vectors_batch(vectors)
+        with timer.stage("bm25"):
+            self._mark_bm25_dirty(project_id)
         if self.graph_repo:
             try:
-                await self.graph_repo.rebuild_document_graph(
-                    store_type="project",
-                    document_id=doc_id,
-                    chunks=[(v.chunk_index, v.content) for v in vectors],
-                )
+                with timer.stage("graph"):
+                    await self.graph_repo.rebuild_document_graph(
+                        store_type="project",
+                        document_id=doc_id,
+                        chunks=[(v.chunk_index, v.content) for v in vectors],
+                    )
             except Exception as e:
                 logger.warning("project graph индекс не собран для документа %s: %s", doc_id, e)
         eff_size, eff_overlap = resolve_chunk_params(chunk_size, chunk_overlap)
@@ -296,6 +319,9 @@ class ProjectRagService:
             created,
             prof.label,
         )
+        timer.meta["doc_id"] = doc_id
+        timer.meta["chunks"] = created
+        timer.log(logger)
         return {
             "ok": True,
             "document_id": doc_id,
@@ -596,8 +622,8 @@ class ProjectRagService:
         return_trace: bool = False,
         model: Optional[str] = None,
         provider: Optional[str] = None,
-        reranker_model: Optional[str] = None,
-        reranker_provider: Optional[str] = None,
+        rerank_model: Optional[str] = None,
+        rerank_provider: Optional[str] = None,
     ) -> Union[
         List[Tuple[str, float, Optional[int], Optional[int]]],
         Tuple[List[Tuple[str, float, Optional[int], Optional[int]]], RetrievalTrace],
@@ -607,7 +633,7 @@ class ProjectRagService:
         prof, repo = await self._route(model, provider)
         from app.services.embed_routing import rerank_client_for
 
-        rr_client = rerank_client_for(self.rag_client, reranker_provider, reranker_model)
+        rr_client = rerank_client_for(self.rag_client, rerank_provider, rerank_model)
 
         async def _vectors(emb, lim):
             return await repo.similarity_search(
@@ -650,13 +676,14 @@ class ProjectRagService:
             vector_query=vector_query,
             k=k,
             document_id=document_id,
+            document_ids=None,
             use_reranking=use_reranking,
             strategy=strategy,
             filters=filters,
             rag_client=prof.client,
             embed_model=prof.model,
             rerank_client=rr_client,
-            rerank_model=reranker_model,
+            rerank_model=rerank_model,
             graph_repo=self.graph_repo,
             cfg=cfg,
             search_vectors=_vectors,
@@ -687,6 +714,32 @@ class ProjectRagService:
             }
             for d in docs
         ]
+
+    async def get_document_chunks(
+        self,
+        project_id: str,
+        document_id: int,
+        start: int = 0,
+        limit: int = 3,
+    ) -> Optional[List[Tuple[str, int, int]]]:
+        """Чанки документа проекта по порядку (начало — для оглавления/структуры).
+
+        Возвращает None, если документа нет или он чужого проекта;
+        иначе список (content, document_id, chunk_index).
+        """
+        doc = await self.doc_repo.get_document(document_id)
+        if not doc:
+            return None
+        if str(doc.get("project_id") or "") != str(project_id or ""):
+            return None
+        vectors = await self.vector_repo.get_vectors_by_document(document_id)
+        if not vectors:
+            return []
+        vectors = sorted(
+            vectors, key=lambda v: (1 if v.chunk_index < 0 else 0, v.chunk_index)
+        )
+        selected = vectors[start : start + limit]
+        return [(v.content, v.document_id, v.chunk_index) for v in selected]
 
     async def delete_document(self, document_id: int) -> Dict[str, Any]:
         """Удаляет документ; возвращает minio-ключи для очистки бэкендом."""

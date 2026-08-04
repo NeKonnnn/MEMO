@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from app.core.config import get_settings
+from app.core.http_verify import resolve_httpx_verify
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +100,9 @@ async def _call_ocr_service(image_bytes: bytes, filename: str, languages: str = 
 
     try:
         req_timeout = httpx.Timeout(timeout, connect=10.0, read=timeout, write=10.0)
-        async with httpx.AsyncClient(timeout=req_timeout) as client:
+        async with httpx.AsyncClient(
+            timeout=req_timeout, verify=resolve_httpx_verify()
+        ) as client:
             resp = await client.post(
                 f"{ocr_url}/v1/ocr", files=files, data=data, headers={"Accept": "application/json"}
             )

@@ -106,7 +106,9 @@ class SplitRagClient:
         return await self.embed_client.embed_single(text, model=model, kind=kind)
 
     async def rerank(self, query, passages, top_k=20, model=None):
-        return await self.rerank_client.rerank(query, passages, top_k=top_k, model=model)
+        return await self.rerank_client.rerank(
+            query, passages, top_k=top_k, model=model
+        )
 
     async def health(self) -> bool:
         # embed-часть первична: без эмбеддингов RAG нежизнеспособен,
@@ -114,12 +116,9 @@ class SplitRagClient:
         return await self.embed_client.health()
 
 def _provider_entry(provider_id: str):
-    from app.core.config import get_settings
+    from app.services.embed_routing import _provider_entry as lookup
 
-    for entry in getattr(get_settings().rag_models, "providers", None) or []:
-        if entry.id == provider_id:
-            return entry
-    return None
+    return lookup(provider_id)
 
 def _client_for(model_type: str):
     from app.core.config import get_settings
@@ -144,8 +143,11 @@ def _client_for(model_type: str):
         api_key_env=entry.api_key_env or None,
         embedding_model=choice["model"] if model_type == "embedding" else None,
         reranker_model=choice["model"] if model_type == "reranker" else None,
+        embed_path=entry.embed_path,
+        rerank_path=entry.rerank_path,
         timeout=entry.timeout,
         embed_batch_size=get_settings().rag_models_client.embed_batch_size,
+        embed_concurrency=get_settings().rag_models_client.embed_concurrency,
     )
 
 def _make_rag_client():
@@ -219,6 +221,7 @@ async def ensure_embedding_dim(embedding_dim: int) -> dict:
 
     dim = int(embedding_dim)
     settings = get_settings()
+
     destructive = (
         os.getenv("RAG_ALLOW_DESTRUCTIVE_MIGRATION", "").strip().lower()
         in ("1", "true", "yes", "on")
@@ -250,6 +253,7 @@ async def ensure_embedding_dim(embedding_dim: int) -> dict:
             "migrated": False,
             "cleared_rows": 0,
         }
+
     settings.postgresql.embedding_dim = dim
     for repo in (_kb_vector_repo, _mem_vector_repo, _proj_vector_repo):
         if repo is not None:
@@ -268,11 +272,20 @@ async def ensure_memory_chunk_consistency() -> None:
         normalize_chunking_strategy,
         resolve_chunk_params,
     )
-    from app.services.memory_rag_service import _memory_chunk_params
+    from app.services.memory_rag_service import (
+        _memory_chunk_params,
+        memory_embedding_choice,
+    )
 
     cs_env, co_env, strat_env = _memory_chunk_params()
     cs, co = resolve_chunk_params(cs_env, co_env)
     strat = normalize_chunking_strategy(strat_env)
+    # Смена модели инвалидирует вектора так же, как смена нарезки: они уедут
+    # в таблицу другой размерности, а старые новой моделью не видны.
+    emb_provider, emb_model = memory_embedding_choice()
+    # Пустая строка = кластерная модель. Важно совпасть с DEFAULT '' в колонке,
+    # иначе первый же рестарт после миграции запустит лишнюю переиндексацию.
+    emb_key = f"{emb_provider}/{emb_model}" if emb_model else ""
 
     pg = await get_db()
     async with await pg.acquire() as conn:
@@ -287,50 +300,68 @@ async def ensure_memory_chunk_consistency() -> None:
             )
             """
         )
+        # Добавляющая миграция для инсталляций, где таблица уже есть.
+        await conn.execute(
+            "ALTER TABLE memory_chunk_state "
+            "ADD COLUMN IF NOT EXISTS embedding_key TEXT NOT NULL DEFAULT ''"
+        )
         row = await conn.fetchrow(
-            "SELECT strategy, chunk_size, chunk_overlap FROM memory_chunk_state WHERE id = 1"
+            "SELECT strategy, chunk_size, chunk_overlap, embedding_key "
+            "FROM memory_chunk_state WHERE id = 1"
         )
         if row is None:
             await conn.execute(
-                "INSERT INTO memory_chunk_state (id, strategy, chunk_size, chunk_overlap) "
-                "VALUES (1, $1, $2, $3)",
+                "INSERT INTO memory_chunk_state "
+                "(id, strategy, chunk_size, chunk_overlap, embedding_key) "
+                "VALUES (1, $1, $2, $3, $4)",
                 strat,
                 cs,
                 co,
+                emb_key,
             )
             logger.info(
-                "[MEMORY-CHUNK] настройки нарезки Библиотеки зафиксированы: %s/%s/%s",
+                "[MEMORY-CHUNK] настройки Библиотеки зафиксированы: %s/%s/%s, модель=%s",
                 strat,
                 cs,
                 co,
+                emb_key or "кластерная",
             )
             return
-        if (row["strategy"], int(row["chunk_size"]), int(row["chunk_overlap"])) == (
-            strat,
-            cs,
-            co,
-        ):
+        if (
+            row["strategy"],
+            int(row["chunk_size"]),
+            int(row["chunk_overlap"]),
+            str(row["embedding_key"] or ""),
+        ) == (strat, cs, co, emb_key):
             return
         await conn.execute(
             "UPDATE memory_chunk_state SET strategy=$1, chunk_size=$2, "
-            "chunk_overlap=$3, updated_at=now() WHERE id=1",
+            "chunk_overlap=$3, embedding_key=$4, updated_at=now() WHERE id=1",
             strat,
             cs,
             co,
+            emb_key,
         )
     logger.warning(
-        "[MEMORY-CHUNK] нарезка Библиотеки изменилась (%s/%s/%s -> %s/%s/%s) — автоперенарезка",
+        "[MEMORY-CHUNK] настройки Библиотеки изменились (%s/%s/%s модель=%s -> "
+        "%s/%s/%s модель=%s) — автопереиндексация",
         row["strategy"],
         row["chunk_size"],
         row["chunk_overlap"],
+        str(row["embedding_key"] or "") or "кластерная",
         strat,
         cs,
         co,
+        emb_key or "кластерная",
     )
     svc = await get_memory_rag_service()
     from app.api.endpoints.memory_rag import _memory_reindex_bg
 
-    asyncio.create_task(_memory_reindex_bg(svc, None, None, None))
+    # Модель передаём явно: _memory_reindex_bg → reindex_all → reindex_document,
+    # иначе документы лягут в таблицу кластерной размерности.
+    asyncio.create_task(
+        _memory_reindex_bg(svc, None, None, None, emb_model, emb_provider)
+    )
 
 def get_current_rag_client():
     """Текущий клиент моделей RAG (None до первого обращения к сервисам)."""
@@ -363,8 +394,11 @@ async def set_rag_models_provider(
     target = (provider or "").strip()
     section = get_settings().rag_models
     known = ["native"] + [e.id for e in section.providers]
-    if target not in known:
+    known_lower = {k.lower(): k for k in known}
+    canonical = known_lower.get(target.lower())
+    if canonical is None:
         raise ValueError(f"Неизвестный провайдер '{target}'. Доступны: {known}")
+    target = canonical
 
     _init_model_choice_from_config()
     _model_choice[mt] = {

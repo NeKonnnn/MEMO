@@ -170,8 +170,8 @@ async def kb_search(
         return_trace=True,
         model=body.embedding_model,
         provider=body.embedding_provider,
-        reranker_model=body.reranker_model,
-        reranker_provider=body.reranker_provider,
+        rerank_model=body.reranker_model,
+        rerank_provider=body.reranker_provider,
         **eval_search_kwargs_from_body(body),
     )
     results, trace = payload

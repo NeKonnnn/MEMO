@@ -49,6 +49,7 @@ import {
   Upload as UploadIcon,
   Square as SquareIcon,
   HubOutlined as GearMenuMcpIcon,
+  Code as GearMenuCodingIcon,
   SmartToyOutlined as GearMenuAgentsIcon,
   ChevronLeft as ChevronLeftIcon,
   ChevronRight as ChevronRightIcon,
@@ -91,6 +92,8 @@ import ImageGenerationPlaceholder from '../components/ImageGenerationPlaceholder
 import { incrementTabNotification } from '../utils/tabNotifications';
 import ChatGearAgentsPanel from '../components/ChatGearAgentsPanel';
 import ChatGearMcpPanel from '../components/ChatGearMcpPanel';
+import ChatGearCodingPanel from '../components/ChatGearCodingPanel';
+import { enableCodingFromGearPanel } from '../coding/selectionStorage';
 import ChatGearSkillsPanel from '../components/ChatGearSkillsPanel';
 import VoiceChatDialog from '../components/VoiceChatDialog';
 import AgentConstructorPanel from '../components/AgentConstructorPanel';
@@ -105,7 +108,10 @@ import type { MessageExportFormat } from '../utils/exportMessageContent';
 import type { MessageFeedback } from '../constants/messageFeedback';
 import { useMyAgentSelection, useOrchestratorAgentsAnyActive } from '../hooks/useChatInputAgentIndicators';
 import { useRagReindexStatus } from '../hooks/useRagReindexStatus';
-import { RAG_REINDEX_BLOCK_PLACEHOLDER } from '../utils/ragReindexBlock';
+import {
+  MEMORY_RAG_DISABLED_HINT,
+  RAG_REINDEX_BLOCK_PLACEHOLDER,
+} from '../utils/ragReindexBlock';
 import { useChatContextUsage } from '../hooks/useChatContextUsage';
 import { useChatInputMcpIndicators } from '../mcp/hooks/useChatInputMcpIndicators';
 import { useMcpStreamingTools } from '../mcp/hooks/useMcpStreamingTools';
@@ -170,6 +176,7 @@ import {
   MODEL_THINKING_MODE_STORAGE_KEY,
   ModelThinkingMode,
 } from '../utils/modelThinking';
+import { applyAgentMcpToChat, applyStoredAgentMcpToChat } from '../utils/applyAgentMcp';
 import SidebarRailMenuGlyph from '../components/SidebarRailMenuGlyph';
 import {
   SidebarRailTranscribeIcon,
@@ -1523,9 +1530,9 @@ export default function UnifiedChatPage({
   const [showDocumentDialog, setShowDocumentDialog] = useState(false);
   const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
   /** Раскрытый подпункт меню «Инструменты» (колонка справа, как в LeChat). */
-  const [gearToolsPanel, setGearToolsPanel] = useState<'main' | 'agents' | 'skills' | 'mcp' | 'model-mode'>('main');
+  const [gearToolsPanel, setGearToolsPanel] = useState<'main' | 'agents' | 'skills' | 'mcp' | 'coding' | 'model-mode'>('main');
   const gearSubPanelOpen =
-    gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp';
+    gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding';
   const [modelThinkingMode, setModelThinkingMode] = useState<ModelThinkingMode>(() => {
     const saved = (localStorage.getItem(MODEL_THINKING_MODE_STORAGE_KEY) || 'fast') as ModelThinkingMode;
     return saved === 'auto' || saved === 'thinking' || saved === 'fast' ? saved : 'fast';
@@ -1590,6 +1597,7 @@ export default function UnifiedChatPage({
     shouldBlockRagSend: shouldBlockRagSendForChat,
     blockMessage: ragReindexBlockMessage,
     status: ragReindexStatus,
+    memoryRagEnabled,
   } = useRagReindexStatus();
 
   // Состояние для режима "Поделиться"
@@ -1685,6 +1693,11 @@ export default function UnifiedChatPage({
   );
 
   const memoryReindexing = Boolean(ragReindexStatus?.memory?.reindexing);
+  // Библиотека выключена на сервере (RAG_MEMORY_ENABLED=0) - тумблер не должен нажиматься
+  const libraryDisabled = memoryReindexing || !memoryRagEnabled;
+  const libraryDisabledHint = !memoryRagEnabled
+    ? MEMORY_RAG_DISABLED_HINT
+    : ragReindexBlockMessage || RAG_REINDEX_BLOCK_PLACEHOLDER;
 
   const hasActiveChatStreaming = useMemo(
     () =>
@@ -1783,6 +1796,25 @@ export default function UnifiedChatPage({
   // Сбрасываем поле ввода при переключении между чатами, чтобы черновик не "дублировался"
   useEffect(() => {
     setInputMessage('');
+  }, [state.currentChatId]);
+
+  // MCP из карточки активного агента → выбор серверов для текущего чата
+  useEffect(() => {
+    applyStoredAgentMcpToChat(state.currentChatId);
+  }, [state.currentChatId]);
+
+  useEffect(() => {
+    const onAgentSelected = (e: Event) => {
+      const detail = (e as CustomEvent<{ config?: Record<string, unknown> } | null>).detail;
+      if (detail === null) return;
+      if (detail?.config) {
+        applyAgentMcpToChat(state.currentChatId, detail.config);
+      } else {
+        applyStoredAgentMcpToChat(state.currentChatId);
+      }
+    };
+    window.addEventListener('agentSelected', onAgentSelected);
+    return () => window.removeEventListener('agentSelected', onAgentSelected);
   }, [state.currentChatId]);
 
   const ensureModelSelectedForSend = useCallback((): boolean => {
@@ -4647,7 +4679,7 @@ export default function UnifiedChatPage({
                        gearToolsPaperHeightPx < CHAT_GEAR_MENU_PAPER_MAX_HEIGHT_PX ? 'auto' : 'hidden',
                    }
                  : { maxHeight: CHAT_GEAR_MENU_PAPER_MAX_HEIGHT, overflowY: 'auto' }),
-              ...((gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp')
+                ...((gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding')
                 ? CHAT_GEAR_SCROLL_AREA_NO_VISIBLE_SCROLLBAR_SX
                 : {}),
              },
@@ -4659,15 +4691,15 @@ export default function UnifiedChatPage({
              display: 'flex',
              flexDirection: 'row',
              alignItems: 'stretch',
-            gap: gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' ? `${CHAT_GEAR_MENU_PANELS_GAP_PX}px` : 0,
+            gap: gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding' ? `${CHAT_GEAR_MENU_PANELS_GAP_PX}px` : 0,
              width:
-              (gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp') && gearToolsMenuWidthPx != null
+             (gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding') && gearToolsMenuWidthPx != null
                  ? `${gearToolsMenuWidthPx}px`
-                : gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp'
+                : gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding'
                    ? CHAT_GEAR_MENU_EXPANDED_WIDTH_PX
                    : CHAT_GEAR_MENU_PANEL_WIDTH_PX,
              maxWidth:
-              (gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp') && gearToolsMenuWidthPx != null
+             (gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding') && gearToolsMenuWidthPx != null
                  ? `${gearToolsMenuWidthPx}px`
                  : 'min(96vw, 580px)',
              minHeight: gearToolsPaperHeightPx != null ? `${gearToolsPaperHeightPx}px` : undefined,
@@ -4681,7 +4713,7 @@ export default function UnifiedChatPage({
              sx={{
                ...dropdownPanelSx,
                width:
-                gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp'
+               gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding'
                   ? CHAT_GEAR_MENU_LEFT_RAIL_WIDTH_PX
                   : '100%',
                flexShrink: 0,
@@ -4787,6 +4819,44 @@ export default function UnifiedChatPage({
               />
             </Box>
             <Box
+              onClick={() => {
+                setGearToolsPanel((p) => {
+                  const next = p === 'coding' ? 'main' : 'coding';
+                  if (next === 'coding') {
+                    enableCodingFromGearPanel(state.currentChatId);
+                  }
+                  return next;
+                });
+              }}
+              sx={{
+                ...dropdownItemSx,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 1,
+                color: isDarkMode ? 'white' : '#333',
+                bgcolor:
+                  gearToolsPanel === 'coding'
+                    ? isDarkMode
+                      ? DROPDOWN_ITEM_HOVER_BG_DARK
+                      : DROPDOWN_ITEM_HOVER_BG_LIGHT
+                    : 'transparent',
+              }}
+            >
+              <GearMenuCodingIcon
+                sx={{ fontSize: 18, color: isDarkMode ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.6)', flexShrink: 0 }}
+              />
+              <Typography sx={{ flex: 1, minWidth: 0, fontSize: MENU_ACTION_TEXT_SIZE, whiteSpace: 'nowrap' }}>
+                Coding
+              </Typography>
+              <ChevronRightIcon
+                sx={{
+                  ...DROPDOWN_CHEVRON_SX,
+                  flexShrink: 0,
+                  transform: gearToolsPanel === 'coding' ? 'rotate(90deg)' : 'none',
+                }}
+              />
+            </Box>
+            <Box
               onClick={() => setGearToolsPanel((p) => (p === 'model-mode' ? 'main' : 'model-mode'))}
               sx={{
                 ...dropdownItemSx,
@@ -4817,17 +4887,13 @@ export default function UnifiedChatPage({
               />
             </Box>
              <Tooltip
-               title={
-                 memoryReindexing
-                   ? ragReindexBlockMessage || RAG_REINDEX_BLOCK_PLACEHOLDER
-                   : ''
-               }
-               disableHoverListener={!memoryReindexing}
+               title={libraryDisabled ? libraryDisabledHint : ''}
+               disableHoverListener={!libraryDisabled}
              >
                <span style={{ display: 'block' }}>
                  <Box
                    onClick={() => {
-                     if (memoryReindexing) return;
+                     if (libraryDisabled) return;
                      toggleKbRag();
                      handleMenuClose();
                    }}
@@ -4837,8 +4903,8 @@ export default function UnifiedChatPage({
                      alignItems: 'center',
                      gap: 1,
                      color: isDarkMode ? 'white' : '#333',
-                     opacity: memoryReindexing ? 0.5 : 1,
-                     cursor: memoryReindexing ? 'not-allowed' : 'pointer',
+                     opacity: libraryDisabled ? 0.5 : 1,
+                     cursor: libraryDisabled ? 'not-allowed' : 'pointer',
                    }}
                  >
                    <KbIcon sx={{ fontSize: 18, color: isDarkMode ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.6)', flexShrink: 0 }} />
@@ -4867,7 +4933,7 @@ export default function UnifiedChatPage({
                </Typography>
              </Box>
            </Box>
-          {gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' ? (
+          {gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding' ? (
              <Box
                sx={{
                  ...dropdownPanelSx,
@@ -4890,6 +4956,12 @@ export default function UnifiedChatPage({
                 <ChatGearSkillsPanel isDarkMode={isDarkMode} />
               ) : gearToolsPanel === 'mcp' ? (
                 <ChatGearMcpPanel isDarkMode={isDarkMode} chatId={currentChat?.id} />
+              ) : gearToolsPanel === 'coding' ? (
+                <ChatGearCodingPanel
+                  isDarkMode={isDarkMode}
+                  chatId={currentChat?.id}
+                  projectId={currentChat?.projectId}
+                />
               ) : (
                 <Box sx={{ p: 1, display: 'flex', flexDirection: 'column', gap: 0.5, overflowY: 'auto' }}>
                   {([

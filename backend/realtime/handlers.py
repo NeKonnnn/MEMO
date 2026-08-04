@@ -8,6 +8,7 @@ socket_handlers.py - все @sio.event обработчики Socket.IO
 import asyncio
 import concurrent.futures
 import contextvars
+import time
 from datetime import datetime
 from typing import Any, Dict, Optional
 
@@ -32,10 +33,12 @@ from backend.auth.jwt_handler import decode_token, decode_token_signature_only
 from backend.llm_providers import split_model_path
 from backend.rag_query.post_generation import maybe_replace_ungrounded
 from backend.rag_query.prompts import RAG_STRICT_NOT_FOUND_MESSAGE, merge_strict_rag_system_prompt
+from backend.rag_query.stage_timer import StageTimer
 from backend.realtime.helpers import (
     _is_structure_query,
     _resolve_agent_chat_params,
     _terminal_chat_inference_banner,
+    agent_mcp_tool_ids,
     kb_search_agent_documents,
 )
 from backend.services.user_feedback_context import (
@@ -53,6 +56,7 @@ from backend.services.user_rag_settings import (
     reset_user_rag_runtime,
     runtime_agentic_max_iterations,
     runtime_agentic_rag_enabled,
+    runtime_memory_strategy,
     runtime_rag_strategy,
     runtime_rag_system_prompt,
 )
@@ -65,6 +69,9 @@ from backend.realtime.rag_evidence import (
     rag_reindex_blocks_active_sources,
     resolve_active_rag_sources,
 )
+from backend.rag_query.context_budget import rag_context_max_chars
+from backend.rag_query.relevance import scores_to_relevance_percents
+from backend.services.memory_rag_env import get_memory_similarity_threshold
 from backend.settings.cef_logger.cef_audit_context import cef_socket_remote_from_environ
 from backend.settings.logging import get_logger
 from backend.settings.logging.errors import logged_suppress
@@ -572,6 +579,10 @@ def register_handlers(sio):
             agent_profile = await enrich_agent_profile_with_user_settings(
                 agent_profile, validated_user.get("user_id") if validated_user else None
             )
+            if not (data.get("tool_ids") or data.get("mcp_tool_ids")):
+                _agent_mcp = agent_mcp_tool_ids(agent_profile if isinstance(agent_profile, dict) else {})
+                if _agent_mcp:
+                    data["tool_ids"] = _agent_mcp
             agent_kb_enabled = bool(agent_profile.get("file_search_enabled"))
             agent_kb_doc_ids = agent_profile.get("kb_document_ids") or []
             use_agent_scoped_kb = (
@@ -668,7 +679,12 @@ def register_handlers(sio):
                 str(data.get("workspace_path") or "").strip(),
                 effective_rag_strategy,
                 requested_rag_strategy or "",
-                (user_rag or {}).get("rag_strategy") or runtime_rag_strategy(),
+                "project=%s agent=%s memory=%s"
+                % (
+                    runtime_rag_strategy("project"),
+                    runtime_rag_strategy("agent"),
+                    runtime_memory_strategy(),
+                ),
                 runtime_agentic_rag_enabled(),
                 use_kb_rag,
                 use_memory_library_rag,
@@ -835,6 +851,7 @@ async def _handle_multi_llm(
         )
         return
     context_added = False
+    rag_scopes: set = set()
     final_user_message = user_message
     if rag_client and sources.project:
         try:
@@ -846,13 +863,18 @@ async def _handle_multi_llm(
             proj_hits = filter_rag_hits_by_score(proj_hits, min_sim)
             if proj_hits:
                 parts, _m = format_rag_fragments(
-                    proj_hits, proj_id_name, max_chars=12000, store_label="project (multi-llm)"
+                    proj_hits,
+                    proj_id_name,
+                    max_chars=rag_context_max_chars("project (multi-llm)"),
+                    store_label="project (multi-llm)",
+                    include_chunk_meta=False,
                 )
                 if parts:
                     final_user_message = f"""Документы проекта (RAG):
 {chr(10).join(parts)}
 Вопрос: {user_message}"""
                     context_added = True
+                    rag_scopes.add("project")
                     logger.info(f"[multi-llm project_rag] {len(proj_hits)} фрагментов, project={project_id}")
         except RagReindexInProgress:
             await _notify_reindex_wait(sio, sid)
@@ -878,7 +900,11 @@ async def _handle_multi_llm(
             hits = filter_rag_hits_by_score(list(hits or []), min_sim)
             if hits:
                 parts, _m = format_rag_fragments(
-                    hits, kb_id_name, max_chars=10000, store_label="kb (multi-llm)", include_chunk_meta=False
+                    hits,
+                    kb_id_name,
+                    max_chars=rag_context_max_chars("kb (multi-llm)"),
+                    store_label="kb (multi-llm)",
+                    include_chunk_meta=False,
                 )
                 if parts:
                     final_user_message = f"""{prefix}:
@@ -886,6 +912,7 @@ async def _handle_multi_llm(
 
 {final_user_message}"""
                     context_added = True
+                    rag_scopes.add("agent")
         except RagReindexInProgress:
             await _notify_reindex_wait(sio, sid)
             await _abort_multi_llm_reindex(
@@ -898,11 +925,16 @@ async def _handle_multi_llm(
         try:
             mem_id_name = build_rag_id_to_filename(list(await rag_client.memory_rag_list_documents() or []))
             hits = await rag_client.memory_rag_search(user_message, strategy=rag_strategy)
-            hits = filter_rag_hits_by_score(list(hits or []), min_sim)
+            # Memory: порог только из env (RAG_MEMORY_SIMILARITY_THRESHOLD), не из UI.
+            hits = filter_rag_hits_by_score(list(hits or []), get_memory_similarity_threshold())
             prefix = "Документы из настроек (библиотека памяти)"
             if hits:
                 parts, _m = format_rag_fragments(
-                    hits, mem_id_name, max_chars=10000, store_label="memory (multi-llm)", include_chunk_meta=False
+                    hits,
+                    mem_id_name,
+                    max_chars=rag_context_max_chars("memory (multi-llm)"),
+                    store_label="memory (multi-llm)",
+                    include_chunk_meta=False,
                 )
                 if parts:
                     final_user_message = f"""{prefix}:
@@ -910,6 +942,7 @@ async def _handle_multi_llm(
 
 {final_user_message}"""
                     context_added = True
+                    rag_scopes.add("memory")
         except RagReindexInProgress:
             await _notify_reindex_wait(sio, sid)
             await _abort_multi_llm_reindex(
@@ -933,7 +966,7 @@ async def _handle_multi_llm(
             f"[multi-llm inline_context] {len(inline_context)} символов, RAG-контекст {('совмещён' if final_user_message != inline_block else 'не применялся')}"
         )
     inline_imgs = list(inline_images) if inline_images else None
-    rag_override = runtime_rag_system_prompt() or None
+    rag_override = runtime_rag_system_prompt(rag_scopes) or None
 
     feedback_block = await build_user_feedback_system_block(
         (current_user or {}).get("user_id"),
@@ -1390,7 +1423,11 @@ async def _handle_agent_mode(
                         list(await rag_client.project_rag_list_documents(project_id) or [])
                     )
                 parts, _m = format_rag_fragments(
-                    proj_hits, proj_map, max_chars=8000, store_label="project (agent)"
+                    proj_hits,
+                    proj_map,
+                    max_chars=rag_context_max_chars("project (agent)"),
+                    store_label="project (agent)",
+                    include_chunk_meta=False,
                 )
                 if parts:
                     effective_message = f"""Документы проекта (RAG):
@@ -1424,7 +1461,11 @@ async def _handle_agent_mode(
                 with logged_suppress(logger):
                     kb_map = build_rag_id_to_filename(list(await rag_client.kb_list_documents() or []))
                 parts, _m = format_rag_fragments(
-                    hits, kb_map, max_chars=8000, store_label="kb (agent)", include_chunk_meta=False
+                    hits,
+                    kb_map,
+                    max_chars=rag_context_max_chars("kb (agent)"),
+                    store_label="kb (agent)",
+                    include_chunk_meta=False,
                 )
                 if parts:
                     effective_message = f"""{prefix}:
@@ -1448,7 +1489,11 @@ async def _handle_agent_mode(
                 with logged_suppress(logger):
                     mem_map = build_rag_id_to_filename(list(await rag_client.memory_rag_list_documents() or []))
                 parts, _m = format_rag_fragments(
-                    hits, mem_map, max_chars=8000, store_label="memory (agent)", include_chunk_meta=False
+                    hits,
+                    mem_map,
+                    max_chars=rag_context_max_chars("memory (agent)"),
+                    store_label="memory (agent)",
+                    include_chunk_meta=False,
                 )
                 if parts:
                     effective_message = f"""{prefix}:
@@ -1542,6 +1587,12 @@ async def _handle_direct(
     inline_context: str = "",
     inline_images: list = None,
 ):
+    chat_timer = StageTimer(
+        "CHAT",
+        store="direct",
+        conversation_id=conversation_id,
+        strategy=rag_strategy,
+    )
     min_sim, rag_block = rag_guard_env()
     sources = resolve_active_rag_sources(
         project_id=project_id,
@@ -1555,12 +1606,15 @@ async def _handle_direct(
         await _abort_chat_reindex(
             sio, sid, conversation_id, project_id, current_user
         )
+        chat_timer.log(logger)
         return
     context_added = False
+    rag_scopes: set = set()
     final_message = user_message
     images = list(inline_images) if inline_images else None
     proj_hits_for_trace = []
     proj_id_name: dict = {}
+    _t_rag0 = time.perf_counter()
     if rag_client and sources.project:
         with logged_suppress(logger):
             proj_rows = list(await rag_client.project_rag_list_documents(project_id) or [])
@@ -1581,7 +1635,11 @@ async def _handle_direct(
                                     proj_hits = [(c, sc, did, idx)] + proj_hits
                                     seen.add((did, idx))
                 parts, _m = format_rag_fragments(
-                    proj_hits, proj_id_name, max_chars=12000, store_label="project (direct)"
+                    proj_hits,
+                    proj_id_name,
+                    max_chars=rag_context_max_chars("project (direct)"),
+                    store_label="project (direct)",
+                    include_chunk_meta=False,
                 )
                 proj_context = "\n".join(parts)
                 final_message = f"""Документы проекта (RAG):
@@ -1590,6 +1648,7 @@ async def _handle_direct(
 Ответь на основе этих документов. Перечисляй только то, что явно есть в фрагментах."""
                 proj_hits_for_trace = proj_hits
                 context_added = True
+                rag_scopes.add("project")
                 logger.info(f"[direct project_rag] {len(proj_hits)} фрагментов, project={project_id}")
         except RagReindexInProgress:
             await _notify_reindex_wait(sio, sid)
@@ -1615,6 +1674,7 @@ async def _handle_direct(
                 logger.exception("Ошибка операции")
                 trace_proj_map = {}
         hits_out, files_used = ([], set())
+        _proj_rows = []
         for content, score, doc_id, chunk_idx in proj_hits_for_trace:
             if doc_id is None:
                 continue
@@ -1625,11 +1685,14 @@ async def _handle_direct(
             if not fn:
                 fn = f"doc_{doc_id}"
             files_used.add(fn)
+            _proj_rows.append((content, score, doc_id, chunk_idx, fn))
+        _proj_pcts = scores_to_relevance_percents([r[1] for r in _proj_rows])
+        for (content, _score, doc_id, chunk_idx, fn), pct in zip(_proj_rows, _proj_pcts):
             hits_out.append(
                 {
                     "file": fn,
                     "anchor": f"chunk@{chunk_idx}({fn})",
-                    "relevance": round(float(score), 4),
+                    "relevance": pct,
                     "content": (content or "")[:12000],
                     "chunkIndex": chunk_idx,
                     "documentId": doc_id,
@@ -1695,11 +1758,13 @@ async def _handle_direct(
                 return
             except Exception:
                 logger.exception("memory_rag search error")
-            mem_hits = filter_rag_hits_by_score(mem_hits, min_sim)
+            mem_hits = filter_rag_hits_by_score(mem_hits, get_memory_similarity_threshold())
         kb_id_name = build_rag_id_to_filename(kb_rows)
         mem_id_name = build_rag_id_to_filename(mem_rows)
         hits_out = document_search_trace["hits"] if document_search_trace else []
         files_used = set(document_search_trace["sourceFiles"]) if document_search_trace else set()
+        # Собираем все новые хиты, затем одним проходом ставим Relevance 1..100.
+        _pending_trace: list = []
         for content, score, doc_id, chunk_idx in kb_hits:
             if doc_id is None:
                 continue
@@ -1710,17 +1775,7 @@ async def _handle_direct(
             if not fn:
                 fn = f"doc_{doc_id}"
             files_used.add(fn)
-            hits_out.append(
-                {
-                    "file": fn,
-                    "anchor": f"chunk@{chunk_idx}({fn})",
-                    "relevance": round(float(score), 4),
-                    "content": (content or "")[:12000],
-                    "chunkIndex": chunk_idx,
-                    "documentId": doc_id,
-                    "store": "kb",
-                }
-            )
+            _pending_trace.append((content, score, doc_id, chunk_idx, fn, "kb"))
         for content, score, doc_id, chunk_idx in mem_hits:
             if doc_id is None:
                 continue
@@ -1731,15 +1786,18 @@ async def _handle_direct(
             if not fn:
                 fn = f"doc_{doc_id}"
             files_used.add(fn)
+            _pending_trace.append((content, score, doc_id, chunk_idx, fn, "memory"))
+        _pcts = scores_to_relevance_percents([row[1] for row in _pending_trace])
+        for (content, _score, doc_id, chunk_idx, fn, store), pct in zip(_pending_trace, _pcts):
             hits_out.append(
                 {
                     "file": fn,
                     "anchor": f"chunk@{chunk_idx}({fn})",
-                    "relevance": round(float(score), 4),
+                    "relevance": pct,
                     "content": (content or "")[:12000],
                     "chunkIndex": chunk_idx,
                     "documentId": doc_id,
-                    "store": "memory",
+                    "store": store,
                 }
             )
         document_search_trace = {
@@ -1748,19 +1806,26 @@ async def _handle_direct(
             "sourceFiles": sorted(files_used),
             "hits": hits_out,
         }
-    for hits_list, prefix, idnm, store_lbl in [
-        (kb_hits, "База Знаний (постоянные документы)", kb_id_name, "kb (direct)"),
-        (mem_hits, "Документы из настроек (библиотека памяти)", mem_id_name, "memory (direct)"),
+    for hits_list, prefix, idnm, store_lbl, hit_scope in [
+        (kb_hits, "База Знаний (постоянные документы)", kb_id_name, "kb (direct)", "agent"),
+        (mem_hits, "Документы из настроек (библиотека памяти)", mem_id_name, "memory (direct)", "memory"),
     ]:
         if hits_list:
             parts, _m = format_rag_fragments(
-                hits_list, idnm, max_chars=10000, store_label=store_lbl, include_chunk_meta=False
+                hits_list,
+                idnm,
+                max_chars=rag_context_max_chars(store_lbl),
+                store_label=store_lbl,
+                include_chunk_meta=False,
             )
             final_message = f"""{prefix}:
 {''.join(parts)}
 
 {final_message}"""
             context_added = True
+            if hit_scope:
+                rag_scopes.add(hit_scope)
+    chat_timer.mark("rag_retrieve", time.perf_counter() - _t_rag0)
     if inline_context:
         inline_block = f"""[Прикреплённый документ]
 {inline_context}"""
@@ -1803,7 +1868,7 @@ async def _handle_direct(
     eff_system_prompt = merge_feedback_into_system_prompt(eff_system_prompt, feedback_block)
     if context_added:
         eff_system_prompt = merge_strict_rag_system_prompt(
-            eff_system_prompt, rag_override=runtime_rag_system_prompt() or None
+            eff_system_prompt, rag_override=runtime_rag_system_prompt(rag_scopes) or None
         )
     try:
         from backend.services.skills import apply_skills_to_chat, strip_skill_mentions
@@ -1977,6 +2042,7 @@ async def _handle_direct(
             enable_thinking=enable_thinking,
         )
 
+    _t_llm0 = time.perf_counter()
     if canned:
         response = canned
         if streaming:
@@ -2010,12 +2076,15 @@ async def _handle_direct(
         if response is None or stop_generation_flags.get(sid, False):
             stop_generation_flags[sid] = False
             await sio.emit("generation_stopped", {"message": "Генерация остановлена"}, room=sid)
+            chat_timer.mark("llm", time.perf_counter() - _t_llm0)
+            chat_timer.log(logger)
             return
     else:
         with concurrent.futures.ThreadPoolExecutor() as ex:
             response = await asyncio.get_event_loop().run_in_executor(
                 ex, _make_ctx_runner(lambda: _run_ask(False, None))
             )
+    chat_timer.mark("llm", time.perf_counter() - _t_llm0)
     if context_added and (not canned) and response:
         response = await maybe_replace_ungrounded(final_message[:20000], response, RAG_STRICT_NOT_FOUND_MESSAGE)
     if stop_generation_flags.get(sid, False):
@@ -2044,6 +2113,8 @@ async def _handle_direct(
             payload["ask_user"] = coding_result.pending_ask_user
         if getattr(coding_result, "active_plan", None):
             payload["active_plan"] = coding_result.active_plan
+    chat_timer.meta["context_added"] = context_added
+    chat_timer.log(logger)
     await sio.emit("chat_complete", payload, room=sid)
     rag_metrics = await _compute_and_emit_rag_metrics(
         sio,

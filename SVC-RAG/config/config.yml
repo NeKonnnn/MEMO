@@ -42,6 +42,13 @@ rag_models:
       base_url: ""
       api_key_env: "LLM_API_KEY_PHOENIX"
       timeout: 300
+      embed_path: "/v1/embeddings"
+      rerank_path: "/v1/rerank"
+      embedding_model: ""
+      reranker_model: ""
+      chat_only: false
+      embed_payload_style: "openai"
+      rerank_payload_style: "openai"
 
 app:
   title: "astrachat RAG Service"
@@ -61,6 +68,12 @@ rag_models_client:
   # Индексация DOCX/PDF: на CPU один чанк ~секунды; 60 с мало для больших документов
   timeout: 600.0
   embed_batch_size: 24
+  # Параллельные POST /embeddings при индексации (K8s: RAG_MODELS_CLIENT_EMBED_CONCURRENCY)
+  embed_concurrency: 4
+  # Для native обычно пусто (дефолт берёт SVC-RAG-MODELS). Для openai-compat шлюза — имя модели.
+  api_key_env: ""
+  embedding_model: ""
+  reranker_model: ""
 
 # Если base_url пустой, подставляется из блока urls
 llm_service:
@@ -151,3 +164,12 @@ rag:
   # --- Graph RAG ---
   enable_graph_rag: true
   eval_llm_judge_allowed: true
+
+  # ANN pgvector: hnsw (дефолт) | ivfflat. Env: RAG_VECTOR_INDEX_METHOD
+  # При смене метода неактивный индекс снимается; данные векторов не трогаются.
+  vector_index_method: hnsw
+  vector_ivfflat_lists: 100
+  vector_ivfflat_probes: 10
+  vector_hnsw_m: 16
+  vector_hnsw_ef_construction: 64
+  vector_hnsw_ef_search: 40

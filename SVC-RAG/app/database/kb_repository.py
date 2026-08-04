@@ -306,6 +306,9 @@ class KbVectorRepository:
         cast = self._cast()
         async with await self.db.acquire() as conn:
             table = await self._table(conn)
+            from app.database.embedding_schema import apply_ann_search_settings
+
+            await apply_ann_search_settings(conn)
             from_sql = f"{table} v {join_sql}".strip()
             q = f"""
                 SELECT v.id, v.document_id, v.chunk_index, v.embedding::text, v.content,

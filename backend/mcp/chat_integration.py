@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from backend.context_prompts import merge_context_prompt_into_system
+from backend.llm_providers.routing import thinking_request_extra
 from backend.mcp.agent_loop import get_mcp_agent_loop
 from backend.mcp.events import McpEventCallback
 from backend.mcp.platform import get_mcp_platform
@@ -103,7 +104,8 @@ async def maybe_run_mcp_agent(
         history=history,
         system_prompt=system_prompt,
     )
-    request_extra = {"enable_thinking": enable_thinking} if enable_thinking else None
+    # UI «Быстрый»/«Мышление»: явно вкл/выкл (раньше при False флаг не слался).
+    request_extra = thinking_request_extra(bool(enable_thinking))
     loop = get_mcp_agent_loop()
     return await loop.run(
         messages=messages,

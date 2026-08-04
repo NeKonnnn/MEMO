@@ -2,7 +2,7 @@
 # Использование: docker compose build llm-service  (если в compose указан этот файл)
 # Требуется: NVIDIA GPU + NVIDIA Container Toolkit (nvidia-docker2).
 
-ARG CUDA_VERSION=12.2
+ARG CUDA_VERSION=12.8
 FROM nvidia/cuda:${CUDA_VERSION}.0-devel-ubuntu22.04
 
 # devel вместо runtime — нужен nvcc для сборки vllm и llama.cpp если потребуется
@@ -28,6 +28,8 @@ RUN apt-get update && apt-get install -y \
     cmake \
     gcc \
     g++ \
+    gcc-12 \
+    g++-12 \
     libopenblas-dev \
     git \
     pkg-config \

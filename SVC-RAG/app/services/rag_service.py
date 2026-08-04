@@ -1,17 +1,17 @@
 # Индексация документов и поиск: парсинг → чанки → эмбеддинги (RAG-MODELS) → pgvector, опционально BM25 и реранк
-import logging
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
-from rank_bm25 import BM25Okapi
 
 from app.clients.rag_models_client import RagModelsClient
 from app.core.config import get_settings
+from app.core.http_verify import resolve_httpx_verify
 from app.database.models import Document, DocumentVector
 from app.database.repository import DocumentRepository, VectorRepository
 from app.database.search_filters import DocumentVectorSearchFilters
+from app.services.bm25_index import InMemoryBm25Index, hybrid_combine_vector_bm25
 from app.services.hit_postprocess import apply_rerank_min_and_window
 from app.services.retrieval_eval import log_retrieval_with_eval
 from app.services.rag_search_helpers import (
@@ -19,6 +19,7 @@ from app.services.rag_search_helpers import (
     effective_use_reranking,
     filter_low_signal_chunks,
     filter_by_min_vector_similarity,
+    fuse_seed_and_graph_hits,
     keyword_boost_hits,
     merge_vector_and_keyword_hits,
     resolve_auto_pipeline_strategy,
@@ -31,16 +32,10 @@ from app.services.chunker import split_into_chunks, split_into_chunks_with_meta
 from app.services.document_parser import parse_document
 from app.services.hierarchical import DocumentSummarizer, OptimizedDocumentIndex
 from app.services.retrieval_pipeline import _is_enumeration_query
+from app.services.stage_timer import StageTimer
+from app.core.logging import get_logger
 
-logger = logging.getLogger(__name__)
-
-
-def _tokenize_ru_en(text: str) -> List[str]:
-    """Простая токенизация для BM25: по пробелам и пунктуации."""
-    import re
-
-    text = (text or "").lower()
-    return re.findall(r"\b\w+\b", text)
+logger = get_logger(__name__)
 
 
 class RagService:
@@ -59,13 +54,10 @@ class RagService:
         self.graph_repo = graph_repo
         self.graph_enabled: bool = bool(getattr(cfg, "enable_graph_rag", True))
 
-        # BM25 / гибридный поиск
+        # BM25 / гибридный поиск (индекс нужен и для lexical, и для hybrid)
         self.use_hybrid_search: bool = cfg.use_hybrid_search
         self.hybrid_bm25_weight: float = cfg.hybrid_bm25_weight
-        self.bm25_index: Optional[BM25Okapi] = None
-        self.bm25_texts: List[str] = []
-        self.bm25_metadatas: List[Dict[str, Any]] = []
-        self._bm25_needs_rebuild: bool = False
+        self._bm25 = InMemoryBm25Index(self.vector_repo.get_all_contents_for_bm25)
 
         # Иерархия: суммаризатор и оптимизированный индекс (при включённой настройке)
         self._summarizer: Optional[DocumentSummarizer] = None
@@ -75,7 +67,15 @@ class RagService:
 
             async def _llm_summarize(prompt: str) -> str:
                 try:
-                    async with httpx.AsyncClient(timeout=llm_cfg.timeout) as client:
+                    logger.debug(
+                        "[SVC-RAG→LLM] summarize: url=%s model=%s prompt_len=%s",
+                        f"{llm_cfg.base_url.rstrip("/")}/v1/chat/completions",
+                        llm_cfg.default_model,
+                        len(prompt or ""),
+                    )
+                    async with httpx.AsyncClient(
+                        timeout=llm_cfg.timeout, verify=resolve_httpx_verify()
+                    ) as client:
                         r = await client.post(
                             f"{llm_cfg.base_url.rstrip('/')}/v1/chat/completions",
                             json={
@@ -88,7 +88,13 @@ class RagService:
                         )
                         r.raise_for_status()
                         data = r.json()
-                        return (data.get("choices") or [{}])[0].get("message", {}).get("content", "") or ""
+                        _content = (data.get("choices") or [{}])[0].get(
+                            "message", {}
+                        ).get("content", "") or ""
+                        logger.debug(
+                            "[SVC-RAG->LLM] summarize: ответ=%s символов", len(_content)
+                        )
+                        return _content
                 except Exception as e:
                     logger.warning("LLM суммаризация не удалась: %s", e)
                     return ""
@@ -101,19 +107,24 @@ class RagService:
             )
             self._optimized_index = OptimizedDocumentIndex(self.rag_client, self.vector_repo)
 
+    @property
+    def bm25_index(self):
+        """Совместимость с кодом, проверяющим наличие BM25-индекса."""
+        return self._bm25.index
+
+    @property
+    def bm25_texts(self) -> List[str]:
+        return self._bm25.texts
+
     async def warm_up(self) -> None:
         """Прогрев сервиса на старте SVC-RAG.
 
-        Сейчас собирает BM25-индекс один раз, чтобы первый гибридный/auto-запрос
-        не висел 1-5 секунд на горячем построении индекса (особенно после рестарта).
-        Безопасно вызывать многократно: перестроит при ``_bm25_needs_rebuild=True``.
+        Собирает BM25-индекс один раз, чтобы первый lexical/hybrid/auto-запрос
+        не висел на горячем построении индекса (особенно после рестарта).
         """
-        if not self.use_hybrid_search:
-            return
         try:
-            await self._build_bm25_index()
-            self._bm25_needs_rebuild = False
-            logger.info("[SVC-RAG] warm_up: BM25-индекс готов (chunks=%d)", len(self.bm25_texts))
+            await self._bm25.ensure_built()
+            logger.info("[SVC-RAG] warm_up: BM25-индекс готов (chunks=%d)", len(self._bm25.texts))
         except Exception as e:
             logger.warning("[SVC-RAG] warm_up: BM25 не построен: %s", e)
 
@@ -151,8 +162,11 @@ class RagService:
         Эти данные сохраняются в metadata документа (ключ image_info), чтобы backend
         мог восстановить информацию об изображении/объекте MinIO.
         """
-        parsed = await parse_document(file_data, filename)
+        timer = StageTimer("INDEX", store="global", file=filename)
+        with timer.stage("parse"):
+            parsed = await parse_document(file_data, filename)
         if not parsed:
+            timer.log(logger)
             return {"ok": False, "error": "Не удалось извлечь текст или формат не поддерживается", "document_id": None}
 
         text = (parsed.get("text") or "").strip()
@@ -160,6 +174,7 @@ class RagService:
         ftype = (parsed.get("file_type") or "").lower()
 
         if not text:
+            timer.log(logger)
             if ftype == "pdf":
                 return {
                     "ok": False,
@@ -215,8 +230,11 @@ class RagService:
             if not ok:
                 await self.document_repo.delete_document(doc_id)
                 return {"ok": False, "error": "Ошибка иерархической индексации", "document_id": None}
-            if self.use_hybrid_search:
-                self._bm25_needs_rebuild = True
+            self._bm25.mark_dirty()
+            timer.meta["doc_id"] = doc_id
+            timer.meta["chunks"] = hierarchical_doc["metadata"]["total_chunks"]
+            timer.meta["mode"] = "hierarchical"
+            timer.log(logger)
             return {
                 "ok": True,
                 "document_id": doc_id,
@@ -224,8 +242,10 @@ class RagService:
                 "chunks_count": hierarchical_doc["metadata"]["total_chunks"],
             }
 
-        chunks_with_meta = split_into_chunks_with_meta(text, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+        with timer.stage("chunk"):
+            chunks_with_meta = split_into_chunks_with_meta(text, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
         if not chunks_with_meta:
+            timer.log(logger)
             return {"ok": False, "error": "После разбиения чанков не осталось", "document_id": None}
         chunks = [c for c, _m in chunks_with_meta]
 
@@ -246,18 +266,23 @@ class RagService:
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow(),
         )
-        doc_id = await self.document_repo.create_document(doc)
+        with timer.stage("insert_document"):
+            doc_id = await self.document_repo.create_document(doc)
         if not doc_id:
+            timer.log(logger)
             return {"ok": False, "error": "Не удалось сохранить документ в БД", "document_id": None}
 
         try:
-            embeddings = await self.rag_client.embed(chunks)
+            with timer.stage("embed"):
+                embeddings = await self.rag_client.embed(chunks)
         except Exception as e:
             await self.document_repo.delete_document(doc_id)
+            timer.log(logger)
             return {"ok": False, "error": f"Ошибка эмбеддингов: {e}", "document_id": None}
 
         if len(embeddings) != len(chunks):
             await self.document_repo.delete_document(doc_id)
+            timer.log(logger)
             return {"ok": False, "error": "Число эмбеддингов не совпадает с числом чанков", "document_id": None}
 
         vectors = [
@@ -270,21 +295,26 @@ class RagService:
             )
             for i, emb in enumerate(embeddings)
         ]
-        created = await self.vector_repo.create_vectors_batch(vectors)
+        with timer.stage("insert"):
+            created = await self.vector_repo.create_vectors_batch(vectors)
         if self.graph_repo and self.graph_enabled:
             try:
-                await self.graph_repo.rebuild_document_graph(
-                    store_type="global",
-                    document_id=doc_id,
-                    chunks=[(v.chunk_index, v.content) for v in vectors],
-                )
+                with timer.stage("graph"):
+                    await self.graph_repo.rebuild_document_graph(
+                        store_type="global",
+                        document_id=doc_id,
+                        chunks=[(v.chunk_index, v.content) for v in vectors],
+                    )
             except Exception as e:
                 logger.warning("Graph индекс не собран для документа %s: %s", doc_id, e)
 
         # После добавления документа помечаем BM25 индекс на пересборку
-        if self.use_hybrid_search:
-            self._bm25_needs_rebuild = True
+        with timer.stage("bm25"):
+            self._bm25.mark_dirty()
 
+        timer.meta["doc_id"] = doc_id
+        timer.meta["chunks"] = created
+        timer.log(logger)
         return {
             "ok": True,
             "document_id": doc_id,
@@ -314,15 +344,15 @@ class RagService:
           Реранк для auto остаётся с семантикой режима auto (как в effective_use_reranking).
         - "reranking" - векторный/гибридный/иерархический поиск + rerank.
         - "hierarchical" - умный поиск по иерархии (OptimizedDocumentIndex).
-        - "hybrid" - гибрид (BM25 + векторный); cross-encoder rerank — если RAG_USE_RERANKING=true в SVC-RAG.
-        - "standard" - векторный поиск с постобработкой качества (без BM25/rerank).
+        - "hybrid" - векторный (cosine) + BM25 через weighted RRF по рангам; опционально cross-encoder rerank.
+        - "standard" - чистый векторный поиск (pgvector cosine similarity), без BM25/FTS merge.
         - "raw_cosine" - сырой векторный поиск (pgvector cosine) без постобработки.
         - "graph" - seed retrieval + расширение по графу связей чанков.
-        - "lexical" - только BM25 (без векторного поиска и без rerank).
+        - "lexical" - только BM25 (sparse/keyword retrieval), без векторного поиска и без rerank.
         Также поддерживается "flat" как синоним "standard".
 
-        Возвращает список (content, score, document_id, chunk_index), где score - комбинированный
-        скор (для reranking: 0.7 * rerank_score + 0.3 * original_score, как в backend).
+        Возвращает список (content, score, document_id, chunk_index).
+        При rerank порядок задаёт cross-encoder; prior (cosine/RRF) — только tiebreak.
         """
         q_text = (query or "").strip()
         vq_text = (vector_query or "").strip()
@@ -332,15 +362,23 @@ class RagService:
         t_search_start = time.perf_counter()
 
         user_strategy = (strategy or "auto").lower()
+        logger.debug(
+            "[SVC-RAG] search вход: strategy=%s, k=%s, document_id=%s, use_reranking=%s",
+            user_strategy,
+            k,
+            document_id,
+            use_reranking,
+        )
+
         if user_strategy == "flat":
             user_strategy = "standard"
         if user_strategy in {"keyword", "bm25"}:
             user_strategy = "lexical"
 
-        original_strategy = user_strategy
         rerank_key = user_strategy
         if user_strategy == "auto":
-            hybrid_ok = bool(self.use_hybrid_search and self.bm25_index is not None)
+            # Индекс может ещё не быть прогрет — hybrid всё равно доступен (построение lazy).
+            hybrid_ok = bool(self.use_hybrid_search)
             graph_ok = bool(self.graph_repo and self.graph_enabled)
             hier_ok = self._optimized_index is not None
             picked = resolve_auto_pipeline_strategy(
@@ -353,7 +391,7 @@ class RagService:
             )
             user_strategy = picked
             rerank_key = "auto"
-            logger.info(
+            logger.debug(
                 "[SVC-RAG] global strategy=auto → %s (hybrid_ready=%s graph=%s hierarchical=%s)",
                 picked,
                 hybrid_ok,
@@ -363,7 +401,7 @@ class RagService:
 
         # Явный иерархический поиск - отдельная ветка
         if user_strategy == "hierarchical" and self._optimized_index is None:
-            logger.info(
+            logger.debug(
                 "[SVC-RAG] search store=global strategy=hierarchical недоступен (optimized_index выключен/не создан) → обычный pgvector/BM25/rerank путь"
             )
         if user_strategy == "hierarchical" and self._optimized_index is not None:
@@ -386,8 +424,8 @@ class RagService:
                 return final_h
             except Exception as e:
                 logger.warning("Иерархический поиск не удался, fallback на плоский: %s", e)
-                user_strategy = "hybrid" if (self.use_hybrid_search and self.bm25_index) else "standard"
-                logger.info("[SVC-RAG] после сбоя hierarchical используем pipeline=%s", user_strategy)
+                user_strategy = "hybrid" if (self.use_hybrid_search and self._bm25.ready) else "standard"
+                logger.debug("[SVC-RAG] после сбоя hierarchical используем pipeline=%s", user_strategy)
 
         if user_strategy == "graph":
             return await self._graph_search(
@@ -404,7 +442,7 @@ class RagService:
             )
 
         if user_strategy == "lexical":
-            bm25_rows = await self._bm25_search(q_text, max(k * 6, 48))
+            bm25_rows = await self._bm25.search(q_text, max(k * 6, 48))
             if document_id is not None:
                 bm25_rows = [row for row in bm25_rows if int(row[0]) == int(document_id)]
             if not bm25_rows:
@@ -456,7 +494,13 @@ class RagService:
             return final_lexical
 
         cfg_rerank_enabled = self._cfg.use_reranking
-        use_rerank = effective_use_reranking(use_reranking, cfg_rerank_enabled, rerank_key, query_text=q_text)
+        # standard = чистый cosine: без rerank. hybrid — rerank по конфигу.
+        use_rerank = effective_use_reranking(
+            use_reranking,
+            cfg_rerank_enabled,
+            "standard" if user_strategy == "standard" else rerank_key,
+            query_text=q_text,
+        )
 
         # Как в KB/project/memory: широкий пул из pgvector + диверсификация по document_id.
         # Иначе при rerank_top_k=20 весь пул забивают чанки 1–2 больших DOCX, а PDF (напр. CV) не попадает в реранк.
@@ -546,7 +590,135 @@ class RagService:
             )
             return out_raw
 
+        # --- standard: чистый семантический поиск (cosine), без FTS/BM25 ---
+        if user_strategy == "standard":
+            min_sim_std = float(getattr(self._cfg, "min_vector_similarity", 0.0) or 0.0)
+            pairs = filter_by_min_vector_similarity(pairs, min_sim_std, k)
+            pairs = filter_low_signal_chunks(
+                pairs,
+                min_len=int(getattr(self._cfg, "min_chunk_length", 40)),
+                rescue_keep=max(k * 3, 12),
+            )
+            if document_id is None and pairs and should_diversify_hits(pairs):
+                pool_div = max(int(self._cfg.rerank_top_k or 20), k * 6, 56)
+                pairs = diversify_hits_by_document(pairs, min(pool_div, len(pairs)))
+            out_std = [(v.content, float(score), v.document_id, v.chunk_index) for v, score in pairs[:k]]
+            final_std = await self._finalize_hit_rows(out_std, used_rerank=False)
+            await log_retrieval_with_eval(
+                store="global (глобальные документы)",
+                strategy_resolved="standard",
+                pipeline="pgvector_cosine_similarity (vector_only, no_fts_no_bm25)",
+                extra_lines=[
+                    f"k={k}",
+                    f"лимит_векторов_pgvector={fetch_lim}",
+                    f"document_id={document_id}",
+                    "гибрид=выключен_для_этой_стратегии",
+                    "реранк_cross_encoder=нет",
+                ],
+                final_hits=final_std,
+                k_requested=k,
+                query_for_eval=q_text,
+                search_started_perf=t_search_start,
+                gold_document_ids=eval_gold_document_ids,
+                gold_chunks=eval_gold_chunks,
+                llm_judge=eval_llm_judge,
+            )
+            return final_std
+
+        # --- hybrid: vector cosine + BM25 через weighted RRF (без FTS merge) ---
+        if user_strategy == "hybrid":
+            # Cosine-порог применяем ТОЛЬКО к сырым vector-скорам ДО merge.
+            # После RRF шкала уже не cosine — filter_by_min_vector_similarity
+            # там некорректен и выкидывает BM25-only хиты.
+            min_sim_h = float(getattr(self._cfg, "min_vector_similarity", 0.0) or 0.0)
+            pairs = filter_by_min_vector_similarity(pairs, min_sim_h, k)
+            pairs = filter_low_signal_chunks(
+                pairs,
+                min_len=int(getattr(self._cfg, "min_chunk_length", 40)),
+                rescue_keep=max(k * 3, 12),
+            )
+
+            hybrid_applied = False
+            if self.use_hybrid_search:
+                hybrid_results = await hybrid_combine_vector_bm25(
+                    q_text,
+                    pairs,
+                    k=fetch_lim,
+                    bm25_index=self._bm25,
+                    bm25_weight=self.hybrid_bm25_weight,
+                    fetch_chunk=self.vector_repo.get_vector_by_document_and_chunk,
+                    document_id=document_id,
+                )
+                if hybrid_results:
+                    pairs = hybrid_results
+                    hybrid_applied = True
+
+            # diversify по RRF-скорам ок (сравниваем порядок, не абсолютную шкалу)
+            if document_id is None and pairs and should_diversify_hits(pairs):
+                pool_div = max(int(self._cfg.rerank_top_k or 20), k * 6, 56)
+                pairs = diversify_hits_by_document(pairs, min(pool_div, len(pairs)))
+
+            pipeline_desc = "pgvector_cosine_similarity + bm25_rrf_merge"
+            if not hybrid_applied:
+                pipeline_desc = "pgvector_cosine_similarity + bm25_skipped(no_index_or_disabled)"
+            if use_rerank:
+                pipeline_desc += " + cross_encoder_rerank"
+            else:
+                pipeline_desc += " (no_rerank)"
+
+            used_rerank_h = False
+            if use_rerank and len(pairs) > 1:
+                passages = [v.content for v, _ in pairs]
+                try:
+                    reranked = await self.rag_client.rerank(q_text, passages, top_k=len(pairs))
+                    out_h: List[Tuple[str, float, Optional[int], Optional[int]]] = []
+                    # Порядок задаёт cross-encoder; prior (RRF) — только tiebreak.
+                    prior_order = {
+                        i: r
+                        for r, (i, _) in enumerate(
+                            sorted(enumerate(pairs), key=lambda x: float(x[1][1]), reverse=True)
+                        )
+                    }
+                    n_p = max(len(pairs), 1)
+                    for rr_rank, (idx, sc) in enumerate(reranked):
+                        if idx < len(pairs):
+                            v, _orig = pairs[idx]
+                            prior_norm = 1.0 - (prior_order.get(idx, n_p - 1) / n_p)
+                            final_score = float(sc) + 1e-6 * prior_norm - 1e-9 * rr_rank
+                            out_h.append((v.content, final_score, v.document_id, v.chunk_index))
+                    used_rerank_h = True
+                except Exception as e:
+                    logger.warning("[global] hybrid rerank failed: %s", e)
+                    out_h = [(v.content, float(score), v.document_id, v.chunk_index) for v, score in pairs]
+            else:
+                out_h = [(v.content, float(score), v.document_id, v.chunk_index) for v, score in pairs]
+            out_h = out_h[:k]
+            final_h = await self._finalize_hit_rows(out_h, used_rerank=used_rerank_h)
+            await log_retrieval_with_eval(
+                store="global (глобальные документы)",
+                strategy_resolved="hybrid",
+                pipeline=pipeline_desc,
+                extra_lines=[
+                    f"k={k}",
+                    f"лимит_векторов_pgvector={fetch_lim}",
+                    f"гибрид_BM25_в_конфиге={self.use_hybrid_search}",
+                    f"гибрид_применён={'да' if hybrid_applied else 'нет'}",
+                    f"hybrid_bm25_weight={self.hybrid_bm25_weight}",
+                    "fusion=weighted_RRF",
+                    f"реранк_cross_encoder={'да' if used_rerank_h else 'нет'}",
+                ],
+                final_hits=final_h,
+                k_requested=k,
+                query_for_eval=q_text,
+                search_started_perf=t_search_start,
+                gold_document_ids=eval_gold_document_ids,
+                gold_chunks=eval_gold_chunks,
+                llm_judge=eval_llm_judge,
+            )
+            return final_h
+
         # --- Keyword FTS (OR) + Entity lane ---
+        # Используется для auto / reranking / прочих режимов с постобработкой.
         # Те же принципы, что и в retrieval_pipeline.py для нон-global хранилищ:
         #  1. OR-семантика FTS уже внутри VectorRepository.keyword_search (fts.py).
         #  2. Entity lane — targeted FTS только по собственным именам/кодам,
@@ -578,7 +750,7 @@ class RagService:
             seen_fid: set = set()
             filename_doc_ids = [d for d in filename_doc_ids if not (d in seen_fid or seen_fid.add(d))]
             if filename_doc_ids:
-                logger.info(
+                logger.debug(
                     "[global] filename_anchor: %s → document_ids=%s",
                     filename_mentions,
                     filename_doc_ids,
@@ -632,7 +804,7 @@ class RagService:
                             entity_hits.append((dv, sc))
                             existing.add((dv.document_id, dv.chunk_index))
                     if ilike_hits:
-                        logger.info(
+                        logger.debug(
                             "[global] entity_lane ILIKE(raw): %s → %d чанков",
                             lookup_tokens,
                             len(ilike_hits),
@@ -676,7 +848,7 @@ class RagService:
                             existing.add(key)
                             added += 1
                     if added:
-                        logger.info(
+                        logger.debug(
                             "[global] entity_lane filename-match: %s → docs %s → +%d chunks",
                             entity_tokens,
                             matched_docs_list,
@@ -715,18 +887,6 @@ class RagService:
             )
         pairs = keyword_boost_hits(pairs, q_text)
 
-        use_hybrid = self.use_hybrid_search and not document_id
-        if user_strategy == "standard":
-            use_hybrid = False
-        elif user_strategy == "hybrid":
-            use_hybrid = self.use_hybrid_search and not document_id
-
-        hybrid_applied = False
-        if use_hybrid and self.bm25_index:
-            hybrid_results = await self._hybrid_combine(q_text, pairs, k=fetch_lim)
-            pairs = [(v, score) for v, score in hybrid_results]
-            hybrid_applied = True
-
         # Entity-anchor документы исключаем из diversify, иначе при cap=1/doc
         # у CV останется только чанк с «Газпромбанк», а «МФТИ» и «Тинькофф»
         # из соседних чанков потеряются, даже если документ попал в entity-hits.
@@ -743,14 +903,9 @@ class RagService:
                 keep_all_for_docs=entity_anchor_docs_preview | set(filename_doc_ids or []),
             )
 
-        pipeline_desc = "pgvector_cosine_similarity"
+        pipeline_desc = "pgvector_cosine_similarity + keyword_fts_merge"
         if document_id is not None:
             pipeline_desc += " (doc_scoped)"
-        if use_hybrid:
-            if hybrid_applied:
-                pipeline_desc += " + bm25_hybrid_merge"
-            else:
-                pipeline_desc += " + bm25_skipped(no_index_yet_or_disabled)"
         if use_rerank:
             pipeline_desc += " + cross_encoder_rerank"
         else:
@@ -759,12 +914,7 @@ class RagService:
         report_extras = [
             f"k={k}",
             f"лимит_векторов_pgvector={fetch_lim}",
-            f"гибрид_BM25_в_конфиге={self.use_hybrid_search}",
-            (
-                f"гибрид_применён={'да' if hybrid_applied else 'нет'}"
-                if use_hybrid
-                else "гибрид=выключен_для_этой_стратегии"
-            ),
+            "гибрид_BM25=не_в_этой_ветке(auto/reranking_fts)",
             f"реранк_cross_encoder={'да' if use_rerank else 'нет'}",
         ]
 
@@ -1036,15 +1186,21 @@ class RagService:
         if use_rerank and len(pairs) > 1:
             passages = [v.content for v, _ in pairs]
             try:
-                # top_k=len(pairs) — получаем полный ранжированный список для пост-реранк диверсификации
+                # top_k=len(pairs) — полный ранжированный список; порядок = cross-encoder.
                 reranked = await self.rag_client.rerank(q_text, passages, top_k=len(pairs))
+                prior_order = {
+                    i: r
+                    for r, (i, _) in enumerate(
+                        sorted(enumerate(pairs), key=lambda x: float(x[1][1]), reverse=True)
+                    )
+                }
+                n_p = max(len(pairs), 1)
                 out = []
-                for idx, sc in reranked:
+                for rr_rank, (idx, sc) in enumerate(reranked):
                     if idx < len(pairs):
-                        v, orig_score = pairs[idx]
-                        rerank_score = float(sc)
-                        original_score = float(orig_score)
-                        final_score = 0.7 * rerank_score + 0.3 * original_score
+                        v, _orig = pairs[idx]
+                        prior_norm = 1.0 - (prior_order.get(idx, n_p - 1) / n_p)
+                        final_score = float(sc) + 1e-6 * prior_norm - 1e-9 * rr_rank
                         out.append((v.content, final_score, v.document_id, v.chunk_index))
                 logger.info("[SVC-RAG] search store=global rerank=ok hits=%s", len(out))
                 final_out = await self._finalize_hit_rows(_cut_with_entity_pin(out), used_rerank=True)
@@ -1085,127 +1241,6 @@ class RagService:
             llm_judge=eval_llm_judge,
         )
         return final_pairs
-
-    async def _build_bm25_index(self) -> None:
-        """Построение BM25 индекса из всех документов"""
-        if not self.use_hybrid_search:
-            return
-
-        try:
-            rows = await self.vector_repo.get_all_contents_for_bm25()
-            if not rows:
-                logger.warning("Нет текстов для построения BM25 индекса")
-                self.bm25_index = None
-                self.bm25_texts = []
-                self.bm25_metadatas = []
-                return
-
-            all_texts: List[str] = []
-            all_metadatas: List[Dict[str, Any]] = []
-            for document_id, chunk_index, content in rows:
-                all_texts.append(content)
-                all_metadatas.append(
-                    {
-                        "document_id": document_id,
-                        "chunk": chunk_index,
-                    }
-                )
-
-            tokenized_texts = [_tokenize_ru_en(t) for t in all_texts]
-            self.bm25_index = BM25Okapi(tokenized_texts)
-            self.bm25_texts = all_texts
-            self.bm25_metadatas = all_metadatas
-            logger.info("BM25 индекс построен: %s чанков", len(all_texts))
-        except Exception as e:
-            logger.error("Ошибка построения BM25 индекса: %s", e)
-            self.bm25_index = None
-            self.bm25_texts = []
-            self.bm25_metadatas = []
-
-    async def _bm25_search(self, query: str, k: int) -> List[Tuple[int, int, float]]:
-        """BM25 поиск: возвращает список (document_id, chunk_index, score)."""
-        if not self.use_hybrid_search:
-            return []
-
-        if self._bm25_needs_rebuild or not self.bm25_index:
-            logger.info("Пересоздание BM25 индекса перед поиском...")
-            await self._build_bm25_index()
-            self._bm25_needs_rebuild = False
-
-        if not self.bm25_index or not self.bm25_texts:
-            return []
-
-        try:
-            q_tokens = _tokenize_ru_en(query)
-            scores = self.bm25_index.get_scores(q_tokens)
-            top_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:k]
-            results: List[Tuple[int, int, float]] = []
-            for idx in top_indices:
-                meta = self.bm25_metadatas[idx]
-                results.append((meta["document_id"], meta["chunk"], float(scores[idx])))
-            return results
-        except Exception as e:
-            logger.error("Ошибка BM25 поиска: %s", e)
-            return []
-
-    async def _hybrid_combine(
-        self,
-        query: str,
-        vector_pairs: List[Tuple[DocumentVector, float]],
-        k: int,
-    ) -> List[Tuple[DocumentVector, float]]:
-        """Гибридный поиск: объединяет векторные результаты и BM25 по формуле как в backend."""
-        if not self.use_hybrid_search:
-            return vector_pairs[:k]
-
-        bm25_results = await self._bm25_search(query, k * 2)
-
-        # Нормализация векторных скоров
-        if vector_pairs:
-            max_vector_score = max(score for _, score in vector_pairs) or 1.0
-        else:
-            max_vector_score = 1.0
-
-        # Нормализация BM25 скоров
-        if bm25_results:
-            max_bm25_score = max(score for _, _, score in bm25_results) or 1.0
-        else:
-            max_bm25_score = 1.0
-
-        combined: Dict[Tuple[int, int], Dict[str, Any]] = {}
-
-        # Добавляем векторные результаты
-        for v, vec_score in vector_pairs:
-            key = (v.document_id, v.chunk_index)
-            normalized_vec = vec_score / max_vector_score if max_vector_score > 0 else 0.0
-            combined[key] = {
-                "vector": v,
-                "vector_score": vec_score,
-                "bm25_score": 0.0,
-                "final_score": normalized_vec * (1.0 - self.hybrid_bm25_weight),
-            }
-
-        # Добавляем/обновляем BM25 результаты
-        for doc_id, chunk_index, bm25_score in bm25_results:
-            key = (doc_id, chunk_index)
-            normalized_bm25 = bm25_score / max_bm25_score if max_bm25_score > 0 else 0.0
-            if key in combined:
-                combined[key]["bm25_score"] = bm25_score
-                combined[key]["final_score"] += normalized_bm25 * self.hybrid_bm25_weight
-            else:
-                # Точечный запрос вместо загрузки всех векторов документа
-                vec = await self.vector_repo.get_vector_by_document_and_chunk(doc_id, chunk_index)
-                if not vec:
-                    continue
-                combined[key] = {
-                    "vector": vec,
-                    "vector_score": 0.0,
-                    "bm25_score": bm25_score,
-                    "final_score": normalized_bm25 * self.hybrid_bm25_weight,
-                }
-
-        final = sorted(combined.values(), key=lambda x: x["final_score"], reverse=True)[:k]
-        return [(item["vector"], float(item["final_score"])) for item in final]
 
     async def _graph_search(
         self,
@@ -1290,12 +1325,16 @@ class RagService:
             except Exception as e:
                 logger.warning("Graph expand failed, fallback to seeds: %s", e)
 
-        scored: List[Tuple[DocumentVector, float]] = []
-        for vec, base_score in pairs:
-            gscore = graph_scores.get((vec.document_id, vec.chunk_index), 0.0)
-            final = 0.7 * float(base_score) + 0.3 * float(gscore)
-            scored.append((vec, final))
-        scored.sort(key=lambda x: x[1], reverse=True)
+        # Weighted RRF seed↔graph + подтягивание соседей, которых нет в seed-пуле.
+        scored = await fuse_seed_and_graph_hits(
+            pairs,
+            graph_scores,
+            fetch_chunk=self.vector_repo.get_vector_by_document_and_chunk,
+            graph_weight=0.35,
+            limit=max(k * 4, 40),
+        )
+        if not scored:
+            scored = list(pairs)
 
         if (use_reranking if use_reranking is not None else self._cfg.use_reranking) and len(scored) > 1:
             n_take = min(len(scored), max(k * 2, 12))
@@ -1304,10 +1343,18 @@ class RagService:
             try:
                 reranked = await self.rag_client.rerank(q_text, passages, top_k=k)
                 out: List[Tuple[str, float, Optional[int], Optional[int]]] = []
-                for idx, sc in reranked:
+                prior_order = {
+                    i: r
+                    for r, (i, _) in enumerate(
+                        sorted(enumerate(subset), key=lambda x: float(x[1][1]), reverse=True)
+                    )
+                }
+                n_p = max(len(subset), 1)
+                for rr_rank, (idx, sc) in enumerate(reranked):
                     if idx < len(subset):
-                        v, graph_mix_score = subset[idx]
-                        final_score = 0.7 * float(sc) + 0.3 * float(graph_mix_score)
+                        v, _gm = subset[idx]
+                        prior_norm = 1.0 - (prior_order.get(idx, n_p - 1) / n_p)
+                        final_score = float(sc) + 1e-6 * prior_norm - 1e-9 * rr_rank
                         out.append((v.content, final_score, v.document_id, v.chunk_index))
                 if out:
                     logger.info(
@@ -1373,8 +1420,7 @@ class RagService:
                 pass
         await self.vector_repo.delete_vectors_by_document(document_id)
         await self.document_repo.delete_document(document_id)
-        if self.use_hybrid_search:
-            self._bm25_needs_rebuild = True
+        self._bm25.mark_dirty()
         return True
 
     async def list_documents(self) -> List[Dict[str, Any]]:

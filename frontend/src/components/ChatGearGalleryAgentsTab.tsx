@@ -18,6 +18,7 @@ import {
 import type { Agent } from './AgentSelector';
 import { getActiveAgentFromStorage } from './AgentSelector';
 import { applyAgentModelAndSettings } from '../utils/applyAgentServer';
+import { persistAgentMcpConfig } from '../utils/applyAgentMcp';
 import { MODEL_SETTINGS_DEFAULT } from '../constants/modelSettingsStyles';
 
 const STORAGE_AGENT_ID = 'active_agent_id';
@@ -82,6 +83,7 @@ export default function ChatGearGalleryAgentsTab({
     localStorage.removeItem(STORAGE_AGENT_ID);
     localStorage.removeItem(STORAGE_AGENT_NAME);
     localStorage.removeItem(STORAGE_AGENT_PROMPT);
+    persistAgentMcpConfig(null);
     setActiveAgent(null);
     window.dispatchEvent(new CustomEvent('agentSelected', { detail: null }));
     showNotification('info', 'Агент снят');
@@ -143,6 +145,7 @@ export default function ChatGearGalleryAgentsTab({
         localStorage.setItem(STORAGE_AGENT_ID, String(full.id));
         localStorage.setItem(STORAGE_AGENT_NAME, full.name);
         localStorage.setItem(STORAGE_AGENT_PROMPT, full.system_prompt || '');
+        persistAgentMcpConfig(cfg);
         setActiveAgent({ id: full.id, name: full.name, system_prompt: full.system_prompt || '' });
         window.dispatchEvent(new CustomEvent('agentSelected', { detail: full }));
       };

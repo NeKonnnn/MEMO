@@ -46,8 +46,9 @@ from app.services.rag_search_helpers import (
     should_diversify_hits,
     vector_fetch_limit,
 )
-from app.services.rerank_helpers import rerank_vector_hits
+from app.services.rerank_helpers import rerank_vector_hits_ex
 from app.services.retrieval_eval import log_retrieval_with_eval
+from app.services.stage_timer import StageTimer
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -123,12 +124,17 @@ class RetrievalTrace:
     used_rerank: bool = False
     warnings: List[str] = field(default_factory=list)
     seconds: float = 0.0
+    stage_seconds: Dict[str, float] = field(default_factory=dict)
 
     def add(self, name: str, *, count: int, details: Optional[Dict[str, Any]] = None) -> None:
         entry: Dict[str, Any] = {"stage": name, "count": count}
         if details:
             entry.update(details)
         self.steps.append(entry)
+
+    def mark_stage(self, name: str, seconds: float) -> None:
+        key = (name or "unknown").strip() or "unknown"
+        self.stage_seconds[key] = self.stage_seconds.get(key, 0.0) + max(0.0, float(seconds))
 
     def warn(self, msg: str) -> None:
         self.warnings.append(msg)
@@ -144,6 +150,7 @@ class RetrievalTrace:
             "warnings": list(self.warnings),
             "steps": list(self.steps),
             "seconds": round(self.seconds, 4),
+            "stage_seconds": {k: round(v, 4) for k, v in self.stage_seconds.items()},
         }
 
 
@@ -170,6 +177,7 @@ async def run_retrieval_pipeline(
     embed_model: Optional[str] = None,
     rerank_client: Optional[RagModelsClient] = None,
     rerank_model: Optional[str] = None,
+    document_ids: Optional[List[int]] = None,
     # Метаданные для retrieval_eval / логов — опциональны:
     eval_gold_document_ids: Optional[List[int]] = None,
     eval_gold_chunks: Optional[List[Tuple[int, int]]] = None,
@@ -181,6 +189,25 @@ async def run_retrieval_pipeline(
     q_text = (query or "").strip()
     vq = (vector_query or "").strip()
     t0 = time.perf_counter()
+    timer = StageTimer("SEARCH", store=store, k=k)
+
+    # Белый список документов (например, привязанные к агенту). Векторный,
+    # лексический и substring-поиск фильтруются репозиторием на стороне SQL,
+    # а BM25-индекс и поиск по имени файла идут мимо него - их скоупим здесь
+    allowed_doc_ids: Optional[set] = None
+    if document_ids:
+        allowed_doc_ids = {int(d) for d in document_ids if d is not None}
+    if document_id is not None:
+        # document_id — сужение внутри белого списка, а не расширение.
+        allowed_doc_ids = {int(document_id)}
+
+    def _keep_doc(doc_id: Any) -> bool:
+        if allowed_doc_ids is None or doc_id is None:
+            return True
+        try:
+            return int(doc_id) in allowed_doc_ids
+        except (TypeError, ValueError):
+            return False
 
     requested = (strategy or "auto").lower()
     if requested == "flat":
@@ -257,9 +284,9 @@ async def run_retrieval_pipeline(
                             filename_doc_ids.extend(ids2)
                     except Exception:
                         pass
-        # Дедуп с сохранением порядка.
+        # Дедуп с сохранением порядка + скоуп по белому списку
         seen: set = set()
-        filename_doc_ids = [d for d in filename_doc_ids if not (d in seen or seen.add(d))]
+        filename_doc_ids = [d for d in filename_doc_ids if _keep_doc(d) and not (d in seen or seen.add(d))]
         if filename_doc_ids:
             logger.info(
                 "[%s] filename_anchor: query mentions %s → document_ids=%s",
@@ -327,10 +354,23 @@ async def run_retrieval_pipeline(
         pipeline=" -> ".join(pipeline_parts),
     )
 
+    def _done(
+        hits: List[Tuple[str, float, Optional[int], Optional[int]]],
+        tr: RetrievalTrace,
+    ) -> Tuple[List[Tuple[str, float, Optional[int], Optional[int]]], RetrievalTrace]:
+        tr.seconds = time.perf_counter() - t0
+        for name, sec in timer.items():
+            tr.mark_stage(name, sec)
+        timer.meta["strategy"] = tr.resolved_strategy
+        timer.meta["requested"] = tr.requested_strategy
+        timer.meta["hits"] = len(hits or [])
+        timer.meta["rerank"] = "yes" if tr.used_rerank else "no"
+        timer.log(logger)
+        return hits, tr
+
     if not q_text and not vq:
         trace.warn("empty_query: ни query, ни vector_query не заданы")
-        trace.seconds = time.perf_counter() - t0
-        return [], trace
+        return _done([], trace)
 
     # --- lexical: только BM25 (без эмбеддингов / cosine) ---
     if resolved == "lexical":
@@ -349,11 +389,12 @@ async def run_retrieval_pipeline(
                 gold_chunks=eval_gold_chunks,
                 llm_judge=eval_llm_judge,
             )
-            trace.seconds = time.perf_counter() - t0
-            return [], trace
-        bm25_rows = await bm25_index.search(q_text, max(k * 6, 48))
-        if document_id is not None:
-            bm25_rows = [row for row in bm25_rows if int(row[0]) == int(document_id)]
+            return _done([], trace)
+        with timer.stage("bm25"):
+            bm25_rows = await bm25_index.search(q_text, max(k * 6, 48))
+            # Индекс строится по всей таблице - фильтруем сами
+            if allowed_doc_ids is not None:
+                bm25_rows = [row for row in bm25_rows if _keep_doc(row[0])]
         if not bm25_rows or vector_repo_for_window is None:
             if not bm25_rows:
                 trace.warn("lexical: пустая выдача BM25")
@@ -372,41 +413,61 @@ async def run_retrieval_pipeline(
                 gold_chunks=eval_gold_chunks,
                 llm_judge=eval_llm_judge,
             )
-            trace.seconds = time.perf_counter() - t0
-            return [], trace
+            return _done([], trace)
         max_bm25 = max((float(score) for _, _, score in bm25_rows), default=1.0) or 1.0
-        out_lexical: List[Tuple[str, float, Optional[int], Optional[int]]] = []
-        fetch_one = getattr(vector_repo_for_window, "get_vector_by_document_and_chunk", None)
+        lex_hits: List[Tuple[DocumentVector, float]] = []
+        fetch_one = getattr(
+            vector_repo_for_window, "get_vector_by_document_and_chunk", None
+        )
         if fetch_one is None:
             trace.warn("lexical: get_vector_by_document_and_chunk недоступен")
-            trace.seconds = time.perf_counter() - t0
-            return [], trace
+            return _done([], trace)
+        # Под реранк нужен пул больше k: реранжировать k из k бессмысленно.
+        # Без реранка добираем ровно k, как было, — лишних чтений не делаем.
+        lex_pool = max(int(cfg.rerank_top_k or 20), k) if eff_rr else k
         for doc_id_bm25, chunk_idx_bm25, score_bm25 in bm25_rows:
             vec = await fetch_one(doc_id_bm25, chunk_idx_bm25)
             if not vec:
                 continue
-            # project_repo может вернуть DocumentVector напрямую или обёртку
             if isinstance(vec, tuple):
                 vec = vec[0]
-            out_lexical.append(
-                (
-                    vec.content,
-                    float(score_bm25) / max_bm25,
-                    vec.document_id,
-                    vec.chunk_index,
-                )
-            )
-            if len(out_lexical) >= k:
+            lex_hits.append((vec, float(score_bm25) / max_bm25))
+            if len(lex_hits) >= lex_pool:
                 break
-        out_lexical = out_lexical[:k]
+        used_rr_lex = False
+        if eff_rr and len(lex_hits) > 1:
+            try:
+                with timer.stage("rerank"):
+                    lex_hits, used_rr_lex = await rerank_vector_hits_ex(
+                        q_text,
+                        lex_hits,
+                        rerank_client or rag_client,
+                        top_k=max(int(cfg.rerank_top_k or 20), k),
+                        model=rerank_model,
+                    )
+                if used_rr_lex:
+                    trace.add("cross_encoder_rerank", count=len(lex_hits))
+                else:
+                    trace.warn("rerank_skipped: реранкер недоступен")
+            except Exception as e:
+                logger.warning("[%s] lexical rerank failed: %s", store, e)
+                trace.warn(f"rerank_failed: {e}")
+        out_lexical = [
+            (dv.content, float(sc), dv.document_id, dv.chunk_index)
+            for dv, sc in lex_hits[:k]
+        ]
         trace.add("bm25_search", count=len(out_lexical))
-        trace.used_rerank = False
-        trace.seconds = time.perf_counter() - t0
+        trace.used_rerank = used_rr_lex
         await log_retrieval_with_eval(
             store=log_store_label or store,
             strategy_resolved="lexical",
-            pipeline="bm25_only",
-            extra_lines=[f"k={k}", f"document_id={document_id}", "реранк_cross_encoder=нет"],
+            pipeline="bm25_only" + (" -> cross_encoder_rerank" if used_rr_lex else ""),
+            extra_lines=[
+                f"k={k}",
+                f"document_id={document_id}",
+                f"реранк_cross_encoder={'да' if eff_rr else 'нет'}",
+                f"реранк_применён={'да' if used_rr_lex else 'нет'}",
+            ],
             final_hits=out_lexical,
             k_requested=k,
             query_for_eval=q_text,
@@ -415,13 +476,14 @@ async def run_retrieval_pipeline(
             gold_chunks=eval_gold_chunks,
             llm_judge=eval_llm_judge,
         )
-        return out_lexical, trace
+        return _done(out_lexical, trace)
 
     emb_src = vq or q_text
     try:
-        query_emb = await rag_client.embed(
-            [emb_src], model=embed_model, kind="query"
-        )
+        with timer.stage("embed_query"):
+            query_emb = await rag_client.embed(
+                [emb_src], model=embed_model, kind="query"
+            )
     except Exception as e:
         trace.warn(f"embed_error: {e}")
         await log_retrieval_with_eval(
@@ -437,15 +499,14 @@ async def run_retrieval_pipeline(
             gold_chunks=eval_gold_chunks,
             llm_judge=eval_llm_judge,
         )
-        trace.seconds = time.perf_counter() - t0
-        return [], trace
+        return _done([], trace)
 
     if not query_emb:
         trace.warn("empty_embedding: сервис rag-models вернул пустой список")
-        trace.seconds = time.perf_counter() - t0
-        return [], trace
+        return _done([], trace)
 
-    hits: List[Tuple[DocumentVector, float]] = await search_vectors(query_emb[0], fetch_lim)
+    with timer.stage("vector"):
+        hits: List[Tuple[DocumentVector, float]] = await search_vectors(query_emb[0], fetch_lim)
     trace.add("vector_search", count=len(hits), details={"limit": fetch_lim})
 
     # Для vector/graph поиска summary-чанки (level 1/2) иерархической индексации
@@ -481,7 +542,6 @@ async def run_retrieval_pipeline(
     if resolved == "raw_cosine":
         rows = [(dv.content, float(sc), dv.document_id, dv.chunk_index) for dv, sc in hits[:k]]
         trace.add("raw_cosine_cut", count=len(rows))
-        trace.seconds = time.perf_counter() - t0
         await log_retrieval_with_eval(
             store=log_store_label or store,
             strategy_resolved="raw_cosine",
@@ -495,7 +555,7 @@ async def run_retrieval_pipeline(
             gold_chunks=eval_gold_chunks,
             llm_judge=eval_llm_judge,
         )
-        return rows, trace
+        return _done(rows, trace)
 
     # --- vector: чистый cosine + опциональный cap «чанков на документ» ---
     if resolved == "vector":
@@ -519,13 +579,30 @@ async def run_retrieval_pipeline(
                     "before": before_div,
                 },
             )
+        used_rr_vec = False
+        if eff_rr and len(vec_hits) > 1:
+            try:
+                with timer.stage("rerank"):
+                    vec_hits, used_rr_vec = await rerank_vector_hits_ex(
+                        q_text,
+                        vec_hits,
+                        rerank_client or rag_client,
+                        top_k=max(int(cfg.rerank_top_k or 20), k),
+                        model=rerank_model,
+                    )
+                if used_rr_vec:
+                    trace.add("cross_encoder_rerank", count=len(vec_hits))
+                else:
+                    trace.warn("rerank_skipped: реранкер недоступен")
+            except Exception as e:
+                logger.warning("[%s] vector rerank failed: %s", store, e)
+                trace.warn(f"rerank_failed: {e}")
         rows = [
             (dv.content, float(sc), dv.document_id, dv.chunk_index) 
             for dv, sc in vec_hits[:k]
         ]
         trace.add("vector_cosine_only", count=len(rows))
-        trace.used_rerank = False
-        trace.seconds = time.perf_counter() - t0
+        trace.used_rerank = used_rr_vec
         await log_retrieval_with_eval(
             store=log_store_label or store,
             strategy_resolved="vector",
@@ -546,7 +623,8 @@ async def run_retrieval_pipeline(
                     else "диверсификация=нет"
                 ),
                 "гибрид=нет",
-                "реранк_cross_encoder=нет",
+                f"реранк_cross_encoder={'да' if eff_rr else 'нет'}",
+                f"реранк_применён={'да' if used_rr_vec else 'нет'}",
             ],
             final_hits=rows,
             k_requested=k,
@@ -556,81 +634,86 @@ async def run_retrieval_pipeline(
             gold_chunks=eval_gold_chunks,
             llm_judge=eval_llm_judge,
         )
-        return rows, trace
+        return _done(rows, trace)
 
     # --- hybrid: cosine + BM25 через weighted RRF ---
     if resolved == "hybrid":
-        # Cosine-порог — только по сырым vector-скорам ДО RRF merge.
-        min_sim = float(getattr(cfg, "min_vector_similarity", 0.0) or 0.0)
-        hits = filter_by_min_vector_similarity(hits, min_sim, k)
-        hits = filter_low_signal_chunks(
-            hits, min_len=int(getattr(cfg, "min_chunk_length", 40)), rescue_keep=max(k * 3, 12)
-        )
-        trace.add("pre_hybrid_vector_filter", count=len(hits))
-
-        hybrid_applied = False
-        if bm25_index is not None and getattr(cfg, "use_hybrid_search", True):
-
-            async def _fetch_chunk(doc_id: int, chunk_idx: int):
-                if vector_repo_for_window is None:
-                    return None
-                fetch_one = getattr(vector_repo_for_window, "get_vector_by_document_and_chunk", None)
-                if fetch_one is None:
-                    return None
-                vec = await fetch_one(doc_id, chunk_idx)
-                if isinstance(vec, tuple):
-                    return vec[0]
-                return vec
-
-            hybrid_hits = await hybrid_combine_vector_bm25(
-                q_text,
-                hits,
-                k=fetch_lim,
-                bm25_index=bm25_index,
-                bm25_weight=float(getattr(cfg, "hybrid_bm25_weight", 0.3) or 0.3),
-                fetch_chunk=_fetch_chunk,
-                document_id=document_id,
+        with timer.stage("hybrid"):
+            # Cosine-порог — только по сырым vector-скорам ДО RRF merge.
+            min_sim = float(getattr(cfg, "min_vector_similarity", 0.0) or 0.0)
+            hits = filter_by_min_vector_similarity(hits, min_sim, k)
+            hits = filter_low_signal_chunks(
+                hits, min_len=int(getattr(cfg, "min_chunk_length", 40)), rescue_keep=max(k * 3, 12)
             )
-            if hybrid_hits:
-                hits = hybrid_hits
-                hybrid_applied = True
-                trace.add("bm25_rrf_merge", count=len(hits))
-        else:
-            trace.warn("hybrid: BM25 недоступен, остаёмся на vector-only")
+            trace.add("pre_hybrid_vector_filter", count=len(hits))
 
-        # Hybrid использует отдельную диверсификацию ПОСЛЕ weighted RRF.
-        # Никаких cosine-порогов/эвристик к RRF-score не применяем: это другая шкала.
-        hybrid_diversified = False
-        if document_id is None and hits and bool(getattr(cfg, "hybrid_diversify_results", True)):
-            pool_div = max(int(cfg.rerank_top_k or 20), k * 6, 56)
-            hits = diversify_hybrid_rrf_hits(
-                hits,
-                candidate_limit=min(pool_div, len(hits)),
-                max_chunks_per_document=int(getattr(cfg, "hybrid_max_chunks_per_document", 2) or 0),
-                min_results=k,
-            )
-            hybrid_diversified = True
-            trace.add(
-                "hybrid_rrf_diversify",
-                count=len(hits),
-                details={
-                    "max_chunks_per_document": int(getattr(cfg, "hybrid_max_chunks_per_document", 2) or 0),
-                    "score_scale": "RRF",
-                },
-            )
+            hybrid_applied = False
+            if bm25_index is not None and getattr(cfg, "use_hybrid_search", True):
+
+                async def _fetch_chunk(doc_id: int, chunk_idx: int):
+                    if vector_repo_for_window is None:
+                        return None
+                    fetch_one = getattr(vector_repo_for_window, "get_vector_by_document_and_chunk", None)
+                    if fetch_one is None:
+                        return None
+                    vec = await fetch_one(doc_id, chunk_idx)
+                    if isinstance(vec, tuple):
+                        return vec[0]
+                    return vec
+
+                hybrid_hits = await hybrid_combine_vector_bm25(
+                    q_text,
+                    hits,
+                    k=fetch_lim,
+                    bm25_index=bm25_index,
+                    bm25_weight=float(getattr(cfg, "hybrid_bm25_weight", 0.3) or 0.3),
+                    fetch_chunk=_fetch_chunk,
+                    document_id=document_id,
+                    allowed_document_ids=allowed_doc_ids,
+                )
+                if hybrid_hits:
+                    hits = hybrid_hits
+                    hybrid_applied = True
+                    trace.add("bm25_rrf_merge", count=len(hits))
+            else:
+                trace.warn("hybrid: BM25 недоступен, остаёмся на vector-only")
+
+            # Hybrid использует отдельную диверсификацию ПОСЛЕ weighted RRF.
+            # Никаких cosine-порогов/эвристик к RRF-score не применяем: это другая шкала.
+            hybrid_diversified = False
+            if document_id is None and hits and bool(getattr(cfg, "hybrid_diversify_results", True)):
+                pool_div = max(int(cfg.rerank_top_k or 20), k * 6, 56)
+                hits = diversify_hybrid_rrf_hits(
+                    hits,
+                    candidate_limit=min(pool_div, len(hits)),
+                    max_chunks_per_document=int(getattr(cfg, "hybrid_max_chunks_per_document", 2) or 0),
+                    min_results=k,
+                )
+                hybrid_diversified = True
+                trace.add(
+                    "hybrid_rrf_diversify",
+                    count=len(hits),
+                    details={
+                        "max_chunks_per_document": int(getattr(cfg, "hybrid_max_chunks_per_document", 2) or 0),
+                        "score_scale": "RRF",
+                    },
+                )
 
         used_rr = False
         if eff_rr and len(hits) > 1:
             try:
-                hits = await rerank_vector_hits(
-                    q_text,
-                    hits,
-                    rerank_client or rag_client,
-                    top_k=int(cfg.rerank_top_k or 20),
-                    model=rerank_model,
-                )
-                used_rr = True
-                trace.add("cross_encoder_rerank", count=len(hits))
+                with timer.stage("rerank"):
+                    hits, used_rr = await rerank_vector_hits_ex(
+                        q_text,
+                        hits,
+                        rerank_client or rag_client,
+                        top_k=int(cfg.rerank_top_k or 20),
+                        model=rerank_model,
+                    )
+                if used_rr:
+                    trace.add("cross_encoder_rerank", count=len(hits))
+                else: 
+                    trace.warn("hybrid_rerank_skipped: реранкер недоступен")
             except Exception as e:
                 logger.warning("[%s] hybrid rerank failed: %s", store, e)
                 trace.warn(f"hybrid_rerank_failed: {e}")
@@ -651,7 +734,6 @@ async def run_retrieval_pipeline(
             f"{'hybrid_rrf_diversify' if hybrid_diversified else 'no_diversify'} -> "
             f"{'cross_encoder_rerank' if used_rr else 'no_rerank'}"
         )
-        trace.seconds = time.perf_counter() - t0
         await log_retrieval_with_eval(
             store=log_store_label or store,
             strategy_resolved="hybrid",
@@ -673,7 +755,7 @@ async def run_retrieval_pipeline(
             gold_chunks=eval_gold_chunks,
             llm_judge=eval_llm_judge,
         )
-        return rows, trace
+        return _done(rows, trace)
 
     # --- Keyword FTS (OR-семантика) ---
     # Используется для auto→reranking / graph и прочих режимов с постобработкой.
@@ -767,7 +849,7 @@ async def run_retrieval_pipeline(
                     logger.warning("[%s] entity_find_docs_by_filename(%r)_failed: %s", store, tok, e)
                     continue
                 if ids:
-                    matched_docs.update(ids)
+                    matched_docs.update(d for d in ids if _keep_doc(d))
             # Разумный cap: не более 8 документов, чтобы не взорвать контекст.
             # Если пользователь ищет «Ivanov» и у него 50 файлов с Ivanov в имени
             # — это уже сигнал переформулировать запрос, а не RAG-магия.
@@ -951,16 +1033,19 @@ async def run_retrieval_pipeline(
     used_rr = False
     if eff_rr and hits:
         try:
-            hits = await rerank_vector_hits(
-                q_text,
-                hits,
-                rerank_client or rag_client,
-                top_k=max(len(hits), k * 4, int(cfg.rerank_top_k or 20)),
-                vector_weight=0.3,
-                model=rerank_model,
-            )
-            used_rr = True
-            trace.add("cross_encoder_rerank", count=len(hits))
+            with timer.stage("rerank"):
+                hits, used_rr = await rerank_vector_hits_ex(
+                    q_text,
+                    hits,
+                    rerank_client or rag_client,
+                    top_k=max(len(hits), k * 4, int(cfg.rerank_top_k or 20)),
+                    vector_weight=0.3,
+                    model=rerank_model,
+                )
+            if used_rr:
+                trace.add("cross_encoder_rerank", count=len(hits))
+            else:
+                trace.warn("rerank_skipped: реранкер недоступен")
         except Exception as e:
             trace.warn(f"rerank_failed: {e}")
     trace.used_rerank = used_rr
@@ -1241,5 +1326,4 @@ async def run_retrieval_pipeline(
         gold_chunks=eval_gold_chunks,
         llm_judge=eval_llm_judge,
     )
-    trace.seconds = time.perf_counter() - t0
-    return final, trace
+    return _done(final, trace)

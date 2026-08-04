@@ -10,6 +10,7 @@ from typing import Dict, List, Optional
 import httpx
 
 from app.core.config import get_settings
+from app.core.http_verify import resolve_httpx_verify
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +64,9 @@ async def judge_chunk_relevance(query: str, passages: List[str]) -> tuple[List[b
         (query or "")[:120],
     )
     try:
-        async with httpx.AsyncClient(timeout=llm_cfg.timeout) as client:
+        async with httpx.AsyncClient(
+            timeout=llm_cfg.timeout, verify=resolve_httpx_verify()
+        ) as client:
             r = await client.post(
                 f"{llm_cfg.base_url.rstrip('/')}/v1/chat/completions",
                 json={

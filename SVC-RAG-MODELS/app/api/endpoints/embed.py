@@ -3,7 +3,7 @@ import logging
 from typing import List, Optional, Union
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from app.dependencies.rag_models_handler import get_embedding_model
 from app.core.config import settings
@@ -11,29 +11,44 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+
 class EmbedRequest(BaseModel):
+    """OpenAI-совместимый POST /v1/embeddings (+ legacy text/texts)."""
+
+    input: Union[str, List[str], None] = None
     text: Union[str, None] = None
     texts: Union[List[str], None] = None
     # Какой моделью эмбеддить: "FRIDA" или "local/FRIDA". None -> кластерный дефолт.
     model: Optional[str] = None
-    # Асимметричные модели (FRIDA) кодируют запрос и документ по-разному:
-    # "query" -> префикс search_query, "document" -> search_document.
-    # None/неизвестное -> без префикса (как раньше). Модели без промптов не затрагиваются.
+    # Асимметричные модели (FRIDA): "query" / "document" → search_query / search_document.
     kind: Optional[str] = None
 
+    @model_validator(mode="after")
+    def _require_texts(self):
+        if not self.get_texts():
+            raise ValueError("Нужно передать input, text или texts")
+        return self
+
     def get_texts(self) -> List[str]:
+        if self.input is not None:
+            if isinstance(self.input, list):
+                return [str(x) for x in self.input]
+            return [str(self.input)]
         if self.texts:
-            return self.texts
+            return list(self.texts)
         if self.text is not None:
             return [self.text]
         return []
 
+
 class EmbedResponse(BaseModel):
+    """Legacy-ответ POST /v1/embed (обратная совместимость)."""
+
     embeddings: List[List[float]]
     embedding_dim: int
-    # Чем реально посчитано — для наблюдаемости и проверки на стороне svc-rag
     model: Optional[str] = None
     prompt: Optional[str] = None
+
 
 def _prompt_name_for(model, kind: Optional[str]) -> Optional[str]:
     """Имя промпта для асимметричной модели, если она его знает.
@@ -63,6 +78,7 @@ def _prompt_name_for(model, kind: Optional[str]) -> Optional[str]:
     except TypeError:
         return None
 
+
 def _encode_texts(model, texts: List[str], batch_size: int, prompt_name: Optional[str]):
     kwargs = {
         "convert_to_numpy": True,
@@ -73,19 +89,15 @@ def _encode_texts(model, texts: List[str], batch_size: int, prompt_name: Optiona
         kwargs["prompt_name"] = prompt_name
     return model.encode(texts, **kwargs)
 
-@router.post("/embed", response_model=EmbedResponse)
-async def embed_texts(request: EmbedRequest):
-    if not settings.rag_models.enabled:
-        raise HTTPException(status_code=503, detail="Сервис RAG-моделей выключен")
-    texts = request.get_texts()
-    if not texts:
-        raise HTTPException(
-            status_code=400, detail="Нужно передать text или texts в теле запроса"
-        )
 
+async def _compute_embeddings(
+    texts: List[str],
+    model_name: Optional[str],
+    kind: Optional[str],
+) -> tuple[List[List[float]], str, Optional[str], int]:
     try:
-        entry = await get_embedding_model(request.model)
-    except ValueError as e:  # модель не разрешена конфигом
+        entry = await get_embedding_model(model_name)
+    except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(
@@ -93,14 +105,14 @@ async def embed_texts(request: EmbedRequest):
         ) from e
 
     model = entry["model"]
-    model_name = entry.get("path", "").rstrip("/").split("/")[-1] or "?"
+    resolved_name = entry.get("path", "").rstrip("/").split("/")[-1] or "?"
     batch_size = max(1, int(settings.rag_models.embed_batch_size))
-    prompt_name = _prompt_name_for(model, request.kind)
+    prompt_name = _prompt_name_for(model, kind)
     logger.info(
         "[EMBED] model=%s dim=%s kind=%s prompt=%s texts=%s batch_size=%s",
-        model_name,
-        entry.get('dim'),
-        request.kind or "-",
+        resolved_name,
+        entry.get("dim"),
+        kind or "-",
         prompt_name or "-",
         len(texts),
         batch_size,
@@ -113,15 +125,49 @@ async def embed_texts(request: EmbedRequest):
         embeddings = [embeddings.tolist()]
     else:
         embeddings = embeddings.tolist()
-    # Всегда берём фактическую длину вектора: конфиг мог устареть
     if embeddings and embeddings[0]:
         dim = len(embeddings[0])
         entry["dim"] = dim
     else:
         dim = int(entry.get("dim") or 384)
+    return embeddings, resolved_name, prompt_name, int(dim)
+
+
+@router.post("/embeddings")
+async def embed_texts_openai(request: EmbedRequest):
+    """OpenAI-совместимый POST /v1/embeddings — основной контракт для SVC-RAG."""
+    if not settings.rag_models.enabled:
+        raise HTTPException(status_code=503, detail="Сервис RAG-моделей выключен")
+
+    texts = request.get_texts()
+    embeddings, model_name, _prompt, _dim = await _compute_embeddings(
+        texts, request.model, request.kind
+    )
+
+    return {
+        "object": "list",
+        "data": [
+            {"object": "embedding", "embedding": vec, "index": i}
+            for i, vec in enumerate(embeddings)
+        ],
+        "model": model_name,
+        "usage": {"prompt_tokens": 0, "total_tokens": 0},
+    }
+
+
+@router.post("/embed", response_model=EmbedResponse)
+async def embed_texts_legacy(request: EmbedRequest):
+    """Legacy POST /v1/embed — оставляем для старых клиентов."""
+    if not settings.rag_models.enabled:
+        raise HTTPException(status_code=503, detail="Сервис RAG-моделей выключен")
+
+    texts = request.get_texts()
+    embeddings, model_name, prompt_name, dim = await _compute_embeddings(
+        texts, request.model, request.kind
+    )
     return EmbedResponse(
         embeddings=embeddings,
-        embedding_dim=int(dim),
+        embedding_dim=dim,
         model=model_name,
         prompt=prompt_name,
     )

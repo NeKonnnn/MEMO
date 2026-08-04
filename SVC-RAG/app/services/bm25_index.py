@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
+import time
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
 from rank_bm25 import BM25Okapi
 
@@ -53,6 +54,7 @@ class InMemoryBm25Index:
         return self.ready
 
     async def build(self) -> None:
+        t0 = time.perf_counter()
         try:
             rows = await self._fetch_contents()
             if not rows:
@@ -73,7 +75,11 @@ class InMemoryBm25Index:
             self.texts = texts
             self.metadatas = metadatas
             self.needs_rebuild = False
-            logger.info("BM25 индекс построен: %s чанков", len(texts))
+            logger.info(
+                "BM25 индекс построен: %s чанков за %.3fs",
+                len(texts),
+                time.perf_counter() - t0,
+            )
         except Exception as e:
             logger.error("Ошибка построения BM25 индекса: %s", e)
             self.index = None
@@ -113,6 +119,7 @@ async def hybrid_combine_vector_bm25(
     bm25_weight: float,
     fetch_chunk: FetchChunkFn,
     document_id: Optional[int] = None,
+    allowed_document_ids: Optional[Set[int]] = None,
 ) -> List[Tuple[DocumentVector, float]]:
     """Гибрид vector+BM25 через weighted RRF (не max-norm linear blend).
 
@@ -135,8 +142,13 @@ async def hybrid_combine_vector_bm25(
     # Симметричный пул кандидатов: не меньше k*3 и не меньше 48 с каждой стороны.
     pool = max(int(k) * 3, 48)
     bm25_results = await bm25_index.search(query, pool)
+    # Индекс общий на всю таблицу - сужаем до разрешенных документов
     if document_id is not None:
         bm25_results = [row for row in bm25_results if int(row[0]) == int(document_id)]
+    elif allowed_document_ids is not None:
+        bm25_results = [
+            row for row in bm25_results if int(row[0]) in allowed_document_ids
+        ]
 
     # Dense тоже ограничиваем тем же pool (входной список может быть шире).
     vector_sorted = sorted(vector_pairs, key=lambda x: float(x[1]), reverse=True)[:pool]

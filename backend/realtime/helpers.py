@@ -137,6 +137,8 @@ async def _resolve_agent_chat_params(agent_id_raw, user_id=None) -> dict:
         "kb_document_ids": [],
         "skill_ids": [],
         "skills_enabled": False,
+        "mcp_enabled": False,
+        "mcp_server_ids": [],
     }
     if agent_id_raw is None:
         return empty
@@ -202,10 +204,35 @@ async def _resolve_agent_chat_params(agent_id_raw, user_id=None) -> dict:
             out["skills_enabled"] = bool(cfg.get("skills_enabled"))
         else:
             out["skills_enabled"] = bool(out["skill_ids"])
+        out["mcp_enabled"] = bool(cfg.get("mcp_enabled", False))
+        raw_mcp_ids = cfg.get("mcp_server_ids")
+        if isinstance(raw_mcp_ids, list):
+            out["mcp_server_ids"] = [str(v).strip() for v in raw_mcp_ids if str(v).strip()]
         logger.info(
-            f"[chat] agent_id={aid} → model_path={out['model_path']}, max_tokens={out['max_tokens']}, temperature={out['temperature']}"
+            f"[chat] agent_id={aid} → model_path={out['model_path']}, "
+            f"max_tokens={out['max_tokens']}, temperature={out['temperature']}, "
+            f"file_search={out['file_search_enabled']}, "
+            f"kb_document_ids={out['kb_document_ids']}, "
+            f"mcp_enabled={out['mcp_enabled']}, mcp_server_ids={out['mcp_server_ids']}"
         )
         return out
     except Exception:
         logger.exception("_resolve_agent_chat_params")
         return empty
+
+
+def agent_mcp_tool_ids(agent_profile: dict) -> List[str]:
+    """tool_ids из config агента (server:mcp:{id})."""
+    if not isinstance(agent_profile, dict) or not agent_profile.get("mcp_enabled"):
+        return []
+    raw = agent_profile.get("mcp_server_ids") or []
+    if not isinstance(raw, list):
+        return []
+    out: List[str] = []
+    for sid in raw:
+        s = str(sid).strip()
+        if s:
+            tid = f"server:mcp:{s}"
+            if tid not in out:
+                out.append(tid)
+    return out

@@ -11,6 +11,7 @@ from fastapi import (
     File,
     Form,
     HTTPException,
+    Query,
     UploadFile,
 )
 
@@ -139,6 +140,43 @@ async def project_rag_list(
         for d in docs
     ]
 
+class ProjectDocumentChunkHit(BaseModel):
+    content: str
+    document_id: int
+    chunk_index: int
+
+
+class ProjectDocumentChunksResponse(BaseModel):
+    chunks: List[ProjectDocumentChunkHit]
+
+
+@router.get(
+    "/projects/{project_id}/documents/{document_id}/chunks",
+    response_model=ProjectDocumentChunksResponse,
+)
+async def project_rag_get_document_chunks(
+    project_id: str,
+    document_id: int,
+    start: int = Query(0, ge=0),
+    limit: int = Query(3, ge=1, le=10),
+    svc: ProjectRagService = Depends(get_project_rag_service),
+):
+    """Первые чанки документа проекта (оглавление/структура). Не /v1/documents — там роутера нет."""
+    result = await svc.get_document_chunks(
+        project_id, document_id, start=start, limit=limit
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail="Документ не найден в проекте")
+    return ProjectDocumentChunksResponse(
+        chunks=[
+            ProjectDocumentChunkHit(
+                content=c, document_id=doc_id, chunk_index=idx
+            )
+            for c, doc_id, idx in result
+        ]
+    )
+
+
 @router.delete("/projects/{project_id}/documents/{document_id}")
 async def project_rag_delete_document(
     project_id: str,
@@ -188,8 +226,8 @@ async def project_rag_search(
         return_trace=True,
         model=body.embedding_model,
         provider=body.embedding_provider,
-        reranker_model=body.reranker_model,
-        reranker_provider=body.reranker_provider,
+        rerank_model=body.reranker_model,
+        rerank_provider=body.reranker_provider,
         **eval_search_kwargs_from_body(body),
     )
     results, trace = payload

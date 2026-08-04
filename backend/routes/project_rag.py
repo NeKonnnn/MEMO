@@ -99,7 +99,9 @@ async def project_rag_upload(
         try:
             # Project RAG: UI-стратегия чанкования из персональных настроек пользователя
             user_id = str(current_user.get("user_id") or "").strip()
-            user_rag = await get_user_rag_settings(user_id, "project") if user_id else {}
+            user_rag = await (
+                get_user_rag_settings(user_id, "project") if user_id else {}
+            )
             chunk_params = chunk_params_from_rag_settings(user_rag) if user_rag else get_rag_chunk_index_params()
             from backend.services.user_rag_settings import (
                 embedding_fields_from_rag_settings,

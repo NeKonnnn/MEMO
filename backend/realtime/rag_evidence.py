@@ -17,6 +17,24 @@ logger = get_logger(__name__)
 RAG_NO_RELEVANT_CONTEXT_MESSAGE = RAG_STRICT_NOT_FOUND_MESSAGE
 
 
+def _rag_env_flag(name: str, default: bool) -> bool:
+    raw = (os.getenv(name) or "").strip().lower()
+    if not raw:
+        return default
+    return raw in ("1", "true", "yes", "on")
+
+
+def memory_rag_enabled() -> bool:
+    """Глобальный выключатель Библиотеки: ```RAG_MEMORY_ENABLED=0```
+
+    Выключает ИСТОЧНИК, а не кнопку в UI: тумблер у пользователя остаётся, но
+    memory-rag в поиск не попадает ни в одном режиме чата. Нужен, когда
+    Библиотека наполнена мусором или переиндексируется, а ронять остальной RAG
+    нельзя
+    """
+    return _rag_env_flag("RAG_MEMORY_ENABLED", True)
+
+
 def build_rag_id_to_filename(rows: Optional[List[Any]]) -> Dict[int, str]:
     """Сопоставление id документа в SVC-RAG с именем файла для подписей в промпте (без вывода числового id)."""
     out: Dict[int, str] = {}
@@ -118,6 +136,12 @@ def resolve_active_rag_sources(
     project = bool(project_id)
     agent_kb = bool(use_agent_scoped_kb) and bool(agent_kb_doc_ids) and len(agent_kb_doc_ids) > 0
     memory = bool(use_memory_library_rag) or bool(use_kb_rag)
+    if memory and not memory_rag_enabled():
+        logger.info(
+            "[RAG-SOURCES] Библиотека выключена глобально (RAG_MEMORY_ENABLED=0) - "
+            "тумблер пользователя игнорируем"
+        )
+        memory = False
     sources = ActiveRagSources(project=project, agent_kb=agent_kb, memory=memory)
     logger.debug(
         "[RAG-SOURCES] active=%s (project_id=%s, use_agent_scoped_kb=%s, agent_kb_docs=%s, "
@@ -268,7 +292,7 @@ def filter_rag_hits_by_score(
     if not out and raw_scores:
         mx = max(raw_scores)
         if mx < min_score and mx < 0.0:
-            logger.debug(
+            logger.info(
                 "[RAG] Порог RAG_MIN_SIMILARITY=%s не применён: шкала похожа на реранк (max score=%.4f < 0). Оставляем хиты как отдал SVC-RAG; при необходимости задайте RAG_RERANK_MIN_SCORE в svc-rag.",
                 min_score,
                 mx,
@@ -282,14 +306,14 @@ def filter_rag_hits_by_score(
             rescue = max(4, min(rescue, 24))
             ranked = sorted([h for h in hits if len(h) > 1], key=lambda h: float(h[1]), reverse=True)
             if ranked:
-                logger.debug(
+                logger.info(
                     "[RAG] max score=%.4f < RAG_MIN_SIMILARITY=%s — спасение recall: топ-%s чанков.",
                     mx,
                     min_score,
                     rescue,
                 )
                 return ranked[:rescue]
-        logger.debug(
+        logger.info(
             "[RAG] Все %s хитов отсечены порогом RAG_MIN_SIMILARITY=%s (макс. score до фильтра: %.4f). Уменьшите RAG_MIN_SIMILARITY в окружении, если ответы есть в документах, но контекст пуст.",
             len(hits),
             min_score,
@@ -312,10 +336,12 @@ def _format_single_fragment(
     title = rag_document_label(doc_id, id_to_name)
     if include_chunk_meta:
         try:
-            sc = float(score)
-        except (TypeError, ValueError):
-            sc = 0.0
-        return f"Фрагмент {number} (документ «{title}», чанк {chunk_idx}, релевантность: {sc:.2f}):\n{content}\n"
+            from backend.rag_query.relevance import score_to_relevance_percent
+
+            sc_pct = score_to_relevance_percent(score)
+        except Exception:
+            sc_pct = 1
+        return f"Фрагмент {number} (документ «{title}», чанк {chunk_idx}, релевантность: {sc_pct}%):\n{content}\n"
     return f"Фрагмент {number} (документ «{title}»): {content}\n"
 
 
@@ -325,7 +351,9 @@ def format_rag_fragments(
     *,
     max_chars: int,
     store_label: str,
-    include_chunk_meta: bool = True,
+    include_chunk_meta: bool = False,
+    # По умолчанию False: номер чанка и релевантность - служебная разметка, модель
+    # копирует ее в ответ пользователю. Значения остаются в логах и рассировке.
     truncate_marker: str = "\n... [обрезано]\n",
 ) -> Tuple[List[str], Dict[str, int]]:
     """Единая формализация RAG-хитов в текстовые фрагменты с бюджетом длины.
@@ -436,7 +464,7 @@ def format_rag_fragments(
     metrics["dropped"] = max(0, len(indexed) - used_count)
     metrics["total_chars"] = total
     metrics["documents_in_prompt"] = len(selected_doc_ids)
-    logger.debug(
+    logger.info(
         "[RAG/fragments] store=%s: получено=%d, попало_в_промпт_целиком=%d, документов_в_промпт=%d/%d, последний_обрезан=%d, отброшено_после_лимита=%d, длина=%d/%d",
         store_label,
         metrics["received"],
@@ -448,7 +476,57 @@ def format_rag_fragments(
         metrics["total_chars"],
         max_chars,
     )
+    _log_selected_chunks(
+        store_label=store_label,
+        indexed=indexed,
+        selected_entries=selected_entries,
+        id_to_name=id_to_name,
+        truncated_last=truncated_last,
+    )
     return (parts, metrics)
+
+def _log_selected_chunks(
+    *,
+    store_label: str,
+    indexed: List[Tuple[int, Optional[int], Tuple[str, float, Optional[int], Optional[int]]]],
+    selected_entries: List[Optional[str]],
+    id_to_name: Dict[int, str],
+    truncated_last: bool,
+) -> None:
+    """Поимённо: какие чанки ушли в промпт, а какие не поместились.
+
+    Счётчиков ```[RAG/fragments]``` не хватает, чтобы разобрать конкретный ответ:
+    они говорят «попало 12 из 17», но не какие именно. Здесь видно каждый
+    кандидат, его релевантность и попал ли он в CONTEXT — то есть на что
+    модель реально могла опираться.
+    """
+    if not logger.isEnabledFor(10) or not indexed:  # DEBUG
+        return
+    last_selected = max(
+        (i for i, entry in enumerate(selected_entries) if entry is not None),
+        default=-1,
+    )
+    lines = []
+    for idx, (num, d_id, row) in enumerate(indexed):
+        try:
+            content, score, *doc_id, chunk_idx = row
+        except (TypeError, ValueError):
+            continue
+        used = selected_entries[idx] is not None
+        mark = "✓" if used else "✗"
+        if used and truncated_last and idx == last_selected:
+            mark = "▲"  # попал, но обрезан по бюджету
+        title = id_to_name.get(d_id, f"doc*{d_id}") if d_id is not None else "?"
+        preview = " ".join(str(content or "").split())[:80]
+        lines.append(
+            f"    {mark} фрагмент {num:>2}  score={float(score or 0):.4f}  "
+            f"чанк {chunk_idx}  «{title}»  {preview}…"
+        )
+    logger.debug(
+        "[RAG/выбор] store=%s: что ушло в CONTEXT (✓ целиком, ▲ обрезан, ✗ не поместился):\n%s",
+        store_label,
+        "\n".join(lines),
+    )
 
 
 async def fetch_rag_store_counts(

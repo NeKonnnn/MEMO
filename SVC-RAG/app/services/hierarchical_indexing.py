@@ -16,12 +16,31 @@ from app.services.hierarchical import DocumentSummarizer, OptimizedDocumentIndex
 
 logger = get_logger(__name__)
 
+# Backend отдаёт HTTP 200 и с текстом ошибки в теле: ask_agent при сбое
+# возвращает человекочитаемое сообщение, а не исключение. Такой текст нельзя
+# класть в индекс — он станет содержимым summary-чанка и будет всплывать
+# в поиске. 01.08 так и вышло: десятки чанков «Ошибка LLM (HTTP 422)».
+# Проверка дублирует такую же на стороне backend намеренно: сервисы
+# выкатываются по отдельности, и любой из них может оказаться старой версии.
+_LLM_ERROR_MARKERS = (
+    "ошибка llm (http",
+    "не удалось получить ответ от модели",
+    "ошибка при обращении к модели",
+    "сервис llm недоступен",
+    "модель не загружена на стороне провайдера",
+    "запрос не помещается в контекстное окно модели",
+)
+
+def _looks_like_llm_error(text: str) -> bool:
+    s = str(text or "").strip().lower()
+    return bool(s) and any(m in s[:200] for m in _LLM_ERROR_MARKERS)
+
 async def _summarize_via_backend(prompt: str) -> str:
     """LLM-суммаризация через backend. При сбое — пустая строка (fallback внутри summarizer)."""
     from app.services import llm_chat
 
     try:
-        return await llm_chat.chat(
+        result = await llm_chat.chat(
             prompt,
             purpose="summarize",
             temperature=0.3,
@@ -30,6 +49,14 @@ async def _summarize_via_backend(prompt: str) -> str:
     except Exception as e:
         logger.warning("[hierarchical] LLM summary не удалась: %s", e)
         return ""
+    if _looks_like_llm_error(result):
+        logger.warning(
+            "[hierarchical] backend вернул текст ошибки вместо summary — "
+            "в индекс не пишем: %s",
+            str(result)[:200],
+        )
+        return ""
+    return result
 
 async def index_document_hierarchically(
     text: str,

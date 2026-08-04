@@ -4,7 +4,12 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
-from app.api.rag_common import RagSearchEvalBody, RagSearchFiltersBody, eval_search_kwargs_from_body, filters_body_to_domain
+from app.api.rag_common import (
+    RagSearchEvalBody,
+    RagSearchFiltersBody,
+    eval_search_kwargs_from_body,
+    filters_body_to_domain,
+)
 from app.dependencies import get_rag_service
 from app.services.rag_service import RagService
 

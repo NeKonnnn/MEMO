@@ -29,6 +29,7 @@ import { getApiUrl } from '../config/api';
 import { useAuth } from '../contexts/AuthContext';
 import { useAppActions } from '../contexts/AppContext';
 import { applyAgentModelAndSettings } from '../utils/applyAgentServer';
+import { persistAgentMcpConfig } from '../utils/applyAgentMcp';
 import { MODEL_SETTINGS_DEFAULT } from '../constants/modelSettingsStyles';
 import {
   ASTRA_OPEN_AGENT_CONSTRUCTOR,
@@ -210,6 +211,7 @@ export default function AgentGalleryPage() {
       localStorage.setItem(STORAGE_AGENT_ID, String(full.id));
       localStorage.setItem(STORAGE_AGENT_NAME, full.name);
       localStorage.setItem(STORAGE_AGENT_PROMPT, full.system_prompt || '');
+      persistAgentMcpConfig(cfg);
       window.dispatchEvent(new CustomEvent('agentSelected', { detail: full }));
 
       if (!applied.ok) {

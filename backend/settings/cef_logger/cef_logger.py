@@ -191,6 +191,36 @@ EVENTS: Dict[str, CEFEventSpec] = {
         "success",
         "Файл {fname} ({fsize} байт, тип: {cs1}) извлечён напрямую (без эмбединга) пользователем {suser} [{cat}]",
     ),
+    "FS008": CEFEventSpec(
+        "FS008",
+        "File Inline Attach Rejected",
+        4,
+        "/Object/File/InlineAttach",
+        "upload",
+        "failure",
+        "Попытка прикрепить файл {fname} ({fsize} байт) к сообщению отклонена пользователем {suser}. "
+        "Причина: {reason} [{cat}]",
+    ),
+    "FS009": CEFEventSpec(
+        "FS009",
+        "Rag Pvc File Write",
+        2,
+        "/Storage/Pvc/Rag/Write",
+        "write",
+        "success",
+        "Файл {fname} ({fsize} байт, scope: {cs1}) сохранён в PVC RAG "
+        "({cs2}) пользователем {suser} [{cat}]",
+    ),
+    "FS010": CEFEventSpec(
+        "FS010",
+        "Rag Pvc File Write Failed",
+        4,
+        "/Storage/Pvc/Rag/Write",
+        "write",
+        "failure",
+        "Ошибка сохранения файла {fname} ({fsize} байт, scope: {cs1}) в PVC RAG "
+        "пользователем {suser}. Причина: {reason} [{cat}]",
+    ),
     "SEC001": CEFEventSpec(
         "SEC001",
         "User Login Success",

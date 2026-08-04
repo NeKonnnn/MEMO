@@ -49,6 +49,11 @@ class MemoryRagSearchRequest(RagSearchEvalBody):
     strategy: Optional[str] = None
     vector_query: Optional[str] = None
     filters: Optional[RagSearchFiltersBody] = None
+    # Модель Библиотеки из ENV бэкенда; пусто — кластерная, как раньше.
+    embedding_model: Optional[str] = None
+    embedding_provider: Optional[str] = None
+    reranker_model: Optional[str] = None
+    reranker_provider: Optional[str] = None
     debug_trace: bool = False
 
 class MemoryRagSearchHit(BaseModel):
@@ -69,6 +74,8 @@ async def index_memory_rag_document(
     chunk_size: Optional[int] = Form(None),
     chunk_overlap: Optional[int] = Form(None),
     chunking_strategy: Optional[str] = Form(None),
+    embedding_model: Optional[str] = Form(None),
+    embedding_provider: Optional[str] = Form(None),
     svc: MemoryRagService = Depends(get_memory_rag_service),
 ):
     if not file.filename:
@@ -85,6 +92,8 @@ async def index_memory_rag_document(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
         chunking_strategy=chunking_strategy or "universal",
+        model=embedding_model,
+        provider=embedding_provider,
     )
     if not result.get("ok"):
         raise HTTPException(
@@ -127,6 +136,8 @@ class MemoryReindexRequest(BaseModel):
     chunk_size: Optional[int] = None
     chunk_overlap: Optional[int] = None
     chunking_strategy: Optional[str] = None
+    embedding_model: Optional[str] = None
+    embedding_provider: Optional[str] = None
 
 _memory_reindex_lock = asyncio.Lock()
 
@@ -135,6 +146,8 @@ async def _memory_reindex_bg(
     chunk_size: Optional[int],
     chunk_overlap: Optional[int],
     chunking_strategy: Optional[str],
+    embedding_model: Optional[str],
+    embedding_provider: Optional[str],
 ) -> None:
     from app.services.memory_rag_service import (
         bump_memory_reindex_generation,
@@ -151,6 +164,8 @@ async def _memory_reindex_bg(
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap,
                 chunking_strategy=chunking_strategy,
+                model=embedding_model,
+                provider=embedding_provider,
                 generation=gen,
             )
             logger.info("[REINDEX memory] фоновая переиндексация завершена: %s", res)
@@ -170,6 +185,8 @@ async def memory_rag_reindex(
         body.chunk_size,
         body.chunk_overlap,
         body.chunking_strategy,
+        body.embedding_model,
+        body.embedding_provider,
     )
     return {"ok": True, "status": "started"}
 
@@ -197,6 +214,10 @@ async def memory_rag_search(
         strategy=body.strategy,
         vector_query=body.vector_query,
         filters=filters_body_to_domain(body.filters),
+        model=body.embedding_model,
+        provider=body.embedding_provider,
+        rerank_model=body.reranker_model,
+        rerank_provider=body.reranker_provider,
         return_trace=True,
         **eval_search_kwargs_from_body(body),
     )

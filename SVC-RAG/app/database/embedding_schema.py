@@ -5,20 +5,28 @@
 остальные получают суффикс: kb_vectors_2048. Существующие данные не переносятся и
 не удаляются.
 
+ANN-индекс (HNSW или IVFFlat) выбирается через env/config:
+  RAG_VECTOR_INDEX_METHOD=hnsw|ivfflat  (дефолт hnsw)
+
+На таблице одновременно активен только один метод: при свапе неактивный индекс
+удаляется, чтобы планировщик Postgres не путался и не было двойной стоимости записи.
+Данные чанков/эмбеддингов при свапе НЕ трогаются.
+
+Типы по размерности (pgvector 0.8):
+  dim <= 2000   -> vector(dim)  + ANN (vector_cosine_ops)
+  2001..4000    -> halfvec(dim) + ANN (halfvec_cosine_ops)
+  dim > 4000    -> vector(dim), без ANN (точный скан)
+
 Что НЕЛЬЗЯ делать (и почему тут этого нет по умолчанию): приводить одну общую таблицу
 к новой размерности через ALTER — это требует TRUNCATE, то есть стирает вектора ВСЕХ
 пользователей из-за выбора одного. Старая функция migrate_vector_tables оставлена, но
 только для явного админского вызова.
-
-Типы по размерности (pgvector 0.8):
-  dim <= 2000   -> vector(dim)  + HNSW (vector_cosine_ops)
-  2001..4000    -> halfvec(dim) + HNSW (halfvec_cosine_ops)
-  dim > 4000    -> vector(dim), без ANN (точный скан)
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -28,24 +36,78 @@ logger = logging.getLogger(__name__)
 HNSW_MAX_DIM = 2000  # предел для типа vector
 HALFVEC_MAX_DIM = 4000  # предел для типа halfvec (нужен pgvector >= 0.7)
 
+INDEX_METHOD_HNSW = "hnsw"
+INDEX_METHOD_IVFFLAT = "ivfflat"
+INDEX_METHODS: Tuple[str, ...] = (INDEX_METHOD_HNSW, INDEX_METHOD_IVFFLAT)
+
 VECTOR_TABLES: Tuple[str, ...] = (
     "kb_vectors",
     "memory_rag_vectors",
     "project_rag_vectors",
 )
 
-_INDEX_BY_TABLE = {
+# Исторические имена HNSW-индексов (без суффикса метода в середине).
+_HNSW_INDEX_BY_TABLE = {
     "kb_vectors": "idx_kb_vectors_embedding_hnsw",
     "memory_rag_vectors": "idx_memory_rag_vectors_embedding_hnsw",
     "project_rag_vectors": "idx_proj_rag_vectors_embedding_hnsw",
 }
 
-def index_name_for(table: str) -> str:
-    """Имя HNSW-индекса. Для таблиц с суффиксом размерности — производное."""
-    known = _INDEX_BY_TABLE.get(table)
-    if known:
-        return known
-    return f"idx_{table}_embedding_hnsw"
+
+def resolve_index_method(raw: Optional[str] = None) -> str:
+    """Нормализовать метод ANN: hnsw | ivfflat."""
+    if raw is None:
+        try:
+            from app.core.config import get_settings
+
+            raw = getattr(get_settings().rag, "vector_index_method", None)
+        except Exception:
+            raw = None
+    if raw is None or str(raw).strip() == "":
+        raw = os.environ.get("RAG_VECTOR_INDEX_METHOD", INDEX_METHOD_HNSW)
+    s = str(raw or INDEX_METHOD_HNSW).strip().lower().replace("-", "").replace("_", "")
+    if s in {"ivf", "ivfflat", "ivfflatindex"}:
+        return INDEX_METHOD_IVFFLAT
+    return INDEX_METHOD_HNSW
+
+
+def _index_params() -> Dict[str, int]:
+    """Параметры построения/поиска из конфига (с безопасными дефолтами)."""
+    try:
+        from app.core.config import get_settings
+
+        rag = get_settings().rag
+        return {
+            "ivfflat_lists": max(1, int(getattr(rag, "vector_ivfflat_lists", 100) or 100)),
+            "ivfflat_probes": max(1, int(getattr(rag, "vector_ivfflat_probes", 10) or 10)),
+            "hnsw_m": max(2, int(getattr(rag, "vector_hnsw_m", 16) or 16)),
+            "hnsw_ef_construction": max(
+                4, int(getattr(rag, "vector_hnsw_ef_construction", 64) or 64)
+            ),
+            "hnsw_ef_search": max(1, int(getattr(rag, "vector_hnsw_ef_search", 40) or 40)),
+        }
+    except Exception:
+        return {
+            "ivfflat_lists": max(1, int(os.environ.get("RAG_VECTOR_IVFFLAT_LISTS", "100") or 100)),
+            "ivfflat_probes": max(1, int(os.environ.get("RAG_VECTOR_IVFFLAT_PROBES", "10") or 10)),
+            "hnsw_m": max(2, int(os.environ.get("RAG_VECTOR_HNSW_M", "16") or 16)),
+            "hnsw_ef_construction": max(
+                4, int(os.environ.get("RAG_VECTOR_HNSW_EF_CONSTRUCTION", "64") or 64)
+            ),
+            "hnsw_ef_search": max(1, int(os.environ.get("RAG_VECTOR_HNSW_EF_SEARCH", "40") or 40)),
+        }
+
+
+def index_name_for(table: str, method: Optional[str] = None) -> str:
+    """Имя ANN-индекса для таблицы и метода."""
+    m = resolve_index_method(method)
+    if m == INDEX_METHOD_HNSW:
+        known = _HNSW_INDEX_BY_TABLE.get(table)
+        if known:
+            return known
+        return f"idx_{table}_embedding_hnsw"
+    return f"idx_{table}_embedding_ivfflat"
+
 
 def vector_column_type(dim: int) -> str:
     """Тип колонки embedding для этой размерности."""
@@ -54,12 +116,14 @@ def vector_column_type(dim: int) -> str:
         return f"halfvec({d})"
     return f"vector({d})"
 
+
 def vector_cast(dim: int) -> str:
     """Во что кастовать литерал вектора в запросах для этой размерности."""
     d = int(dim)
     if HNSW_MAX_DIM < d <= HALFVEC_MAX_DIM:
         return "halfvec"
     return "vector"
+
 
 async def get_column_embedding_type(conn, table: str) -> Optional[Tuple[int, str]]:
     """(dim, 'vector'|'halfvec') колонки embedding или None, если таблицы нет."""
@@ -90,10 +154,12 @@ async def get_column_vector_dim(conn, table: str) -> Optional[int]:
     info = await get_column_embedding_type(conn, table)
     return info[0] if info else None
 
+
 async def table_exists(conn, table: str) -> bool:
     return bool(
         await conn.fetchval("SELECT to_regclass($1) IS NOT NULL", f"public.{table}")
     )
+
 
 async def resolve_vector_table(conn, base: str, dim: int) -> str:
     """Имя таблицы векторов для размерности dim.
@@ -110,17 +176,43 @@ async def resolve_vector_table(conn, base: str, dim: int) -> str:
         return base
     return f"{base}_{d}"
 
-async def drop_embedding_index(conn, table: str) -> None:
-    await conn.execute(f"DROP INDEX IF EXISTS {index_name_for(table)}")
+
+async def drop_embedding_index(conn, table: str, method: Optional[str] = None) -> None:
+    """Удалить ANN-индекс. method=None — оба метода (полный сброс)."""
+    methods = INDEX_METHODS if method is None else (resolve_index_method(method),)
+    for m in methods:
+        name = index_name_for(table, m)
+        await conn.execute(f"DROP INDEX IF EXISTS {name}")
+
+
+async def apply_ann_search_settings(conn) -> None:
+    """Session-level probes / ef_search перед cosine-поиском."""
+    method = resolve_index_method()
+    params = _index_params()
+    try:
+        if method == INDEX_METHOD_IVFFLAT:
+            await conn.execute(f"SET ivfflat.probes = {int(params['ivfflat_probes'])}")
+        else:
+            await conn.execute(f"SET hnsw.ef_search = {int(params['hnsw_ef_search'])}")
+    except Exception:
+        logger.debug(
+            "Не удалось выставить ANN search settings (method=%s) — идём с дефолтами pgvector",
+            method,
+            exc_info=True,
+        )
+
 
 async def create_embedding_index(conn, table: str, dim: int) -> bool:
-    """HNSW под фактический тип колонки. Возвращает True, если индекс есть.
+    """Создать ANN-индекс активного метода; неактивный снять.
 
+    Возвращает True, если активный индекс есть (или уже был).
     Размерность и тип (vector/halfvec) берём из БД — колонка могла разойтись с конфигом.
-    Legacy-таблицы часто ``vector(2048+)``: для них HNSW недоступен (лимит vector=2000),
-    halfvec_ops на vector ставить нельзя.
+    Legacy-таблицы часто ``vector(2048+)``: для них HNSW/IVFFlat с vector_ops
+    недоступны при dim>2000 (нужен halfvec).
     """
-    index_name = index_name_for(table)
+    method = resolve_index_method()
+    params = _index_params()
+    index_name = index_name_for(table, method)
     info = await get_column_embedding_type(conn, table)
     if info:
         effective_dim, col_kind = info
@@ -138,38 +230,85 @@ async def create_embedding_index(conn, table: str, dim: int) -> bool:
             effective_dim,
             HALFVEC_MAX_DIM,
         )
-        await conn.execute(f"DROP INDEX IF EXISTS {index_name}")
+        await drop_embedding_index(conn, table)
         return False
 
-    # HNSW для vector только до 2000; для halfvec — до 4000.
+    # ANN для vector только до 2000; для halfvec — до 4000.
     if col_kind == "vector" and effective_dim > HNSW_MAX_DIM:
         logger.warning(
-            "%s: колонка vector(%s) > %s — HNSW недоступен (нужен halfvec), работаем без ANN",
+            "%s: колонка vector(%s) > %s — ANN недоступен (нужен halfvec), работаем без ANN",
             table,
             effective_dim,
             HNSW_MAX_DIM,
         )
-        await conn.execute(f"DROP INDEX IF EXISTS {index_name}")
+        await drop_embedding_index(conn, table)
         return False
 
     ops = "halfvec_cosine_ops" if col_kind == "halfvec" else "vector_cosine_ops"
+
+    # Свап: убрать индекс другого метода, чтобы не держать два ANN на одной колонке.
+    other = INDEX_METHOD_IVFFLAT if method == INDEX_METHOD_HNSW else INDEX_METHOD_HNSW
+    other_name = index_name_for(table, other)
     try:
-        await conn.execute(
-            f"""
-            CREATE INDEX IF NOT EXISTS {index_name}
-            ON {table} USING hnsw (embedding {ops})
-            """
+        await conn.execute(f"DROP INDEX IF EXISTS {other_name}")
+    except Exception:
+        logger.debug(
+            "%s: не удалось снять неактивный индекс %s", table, other_name, exc_info=True
         )
+
+    try:
+        if method == INDEX_METHOD_IVFFLAT:
+            lists = int(params["ivfflat_lists"])
+            await conn.execute(
+                f"""
+                CREATE INDEX IF NOT EXISTS {index_name}
+                ON {table} USING ivfflat (embedding {ops})
+                WITH (lists = {lists})
+                """
+            )
+            logger.info(
+                "%s: ANN=ivfflat index=%s dim=%s lists=%s probes=%s ops=%s kind=%s",
+                table,
+                index_name,
+                effective_dim,
+                lists,
+                params["ivfflat_probes"],
+                ops,
+                col_kind,
+            )
+        else:
+            m = int(params["hnsw_m"])
+            efc = int(params["hnsw_ef_construction"])
+            await conn.execute(
+                f"""
+                CREATE INDEX IF NOT EXISTS {index_name}
+                ON {table} USING hnsw (embedding {ops})
+                WITH (m = {m}, ef_construction = {efc})
+                """
+            )
+            logger.info(
+                "%s: ANN=hnsw index=%s dim=%s m=%s ef_construction=%s ef_search=%s ops=%s kind=%s",
+                table,
+                index_name,
+                effective_dim,
+                m,
+                efc,
+                params["hnsw_ef_search"],
+                ops,
+                col_kind,
+            )
         return True
     except Exception:
         logger.exception(
-            "%s: не удалось создать HNSW (dim=%s, kind=%s, ops=%s) — работаем без ANN",
+            "%s: не удалось создать ANN=%s (dim=%s, kind=%s, ops=%s) — работаем без ANN",
             table,
+            method,
             effective_dim,
             col_kind,
             ops,
         )
         return False
+
 
 async def ensure_vector_table(conn, base: str, dim: int, parent_table: str) -> str:
     """Гарантировать таблицу векторов для размерности dim. ДОБАВЛЯЮЩАЯ операция.
@@ -200,8 +339,15 @@ async def ensure_vector_table(conn, base: str, dim: int, parent_table: str) -> s
         f"CREATE INDEX IF NOT EXISTS idx_{table}_document_id ON {table}(document_id)"
     )
     await create_embedding_index(conn, table, d)
-    logger.info("Таблица векторов %s готова (dim=%s, тип=%s)", table, d, coltype)
+    logger.info(
+        "Таблица векторов %s готова (dim=%s, тип=%s, ann=%s)",
+        table,
+        d,
+        coltype,
+        resolve_index_method(),
+    )
     return table
+
 
 async def list_vector_tables(conn, base: str) -> List[str]:
     """Все существующие таблицы этого стора: base и base_<dim>.
@@ -223,6 +369,7 @@ async def list_vector_tables(conn, base: str) -> List[str]:
     )
     return [r["name"] for r in rows]
 
+
 async def vector_tables_overview(conn) -> Dict[str, Any]:
     """Диагностика: какие таблицы векторов есть, какой размерности и сколько строк."""
     out: Dict[str, Any] = {}
@@ -236,7 +383,12 @@ async def vector_tables_overview(conn) -> Dict[str, Any]:
                 dim, count = None, -1
             tables.append({"table": name, "dim": dim, "rows": count})
         out[base] = tables
+    out["ann"] = {
+        "method": resolve_index_method(),
+        "params": _index_params(),
+    }
     return out
+
 
 async def migrate_vector_tables(conn, target_dim: int) -> Dict[str, Any]:
     """РАЗРУШИТЕЛЬНО. Приводит общие таблицы к target_dim, ОЧИЩАЯ их (TRUNCATE).
@@ -257,7 +409,8 @@ async def migrate_vector_tables(conn, target_dim: int) -> Dict[str, Any]:
     changed: List[str] = []
     unchanged: List[str] = []
     cleared_rows = 0
-    hnsw_enabled = target_dim <= HALFVEC_MAX_DIM
+    method = resolve_index_method()
+    ann_enabled = target_dim <= HALFVEC_MAX_DIM
 
     for table in VECTOR_TABLES:
         if not await table_exists(conn, table):
@@ -294,7 +447,9 @@ async def migrate_vector_tables(conn, target_dim: int) -> Dict[str, Any]:
         "unchanged_tables": unchanged,
         "cleared_rows": cleared_rows,
         "migrated": bool(changed),
-        "hnsw_enabled": hnsw_enabled,
+        "ann_method": method,
+        "ann_enabled": ann_enabled,
+        "hnsw_enabled": ann_enabled and method == INDEX_METHOD_HNSW,
         "hnsw_max_dim": HNSW_MAX_DIM,
         "halfvec_max_dim": HALFVEC_MAX_DIM,
     }

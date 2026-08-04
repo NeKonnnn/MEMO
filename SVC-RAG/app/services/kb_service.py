@@ -21,6 +21,7 @@ from app.services.chunker import (
 )
 from app.services.document_parser import parse_document
 from app.services.retrieval_pipeline import RetrievalTrace, run_retrieval_pipeline
+from app.services.stage_timer import StageTimer
 
 logger = get_logger(__name__)
 
@@ -128,8 +129,11 @@ class KbService:
         provider: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Парсим файл, режем на чанки, получаем эмбеддинги и сохраняем в kb_documents/kb_vectors."""
-        parsed = await parse_document(file_data, filename)
+        timer = StageTimer("INDEX", store="kb", file=filename)
+        with timer.stage("parse"):
+            parsed = await parse_document(file_data, filename)
         if not parsed:
+            timer.log(logger)
             return {
                 "ok": False,
                 "error": "Не удалось извлечь текст или формат не поддерживается",
@@ -138,12 +142,14 @@ class KbService:
 
         text = parsed.get("text", "")
         if not text.strip():
+            timer.log(logger)
             return {"ok": False, "error": "Документ пустой", "document_id": None}
 
         # Модель выбираем ДО создания документа: иначе при ошибке сохранения
         # в БД останется документ без единого вектора.
         try:
-            prof, repo = await self._route(model, provider)
+            with timer.stage("route_embed_model"):
+                prof, repo = await self._route(model, provider)
         except Exception as e:
             logger.error(
                 "[INDEX kb] не удалось выбрать модель (provider=%s model=%s): %s",
@@ -151,6 +157,7 @@ class KbService:
                 model,
                 e,
             )
+            timer.log(logger)
             return {
                 "ok": False,
                 "error": f"Модель эмбеддинга: {e}",
@@ -184,8 +191,10 @@ class KbService:
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow(),
         )
-        doc_id = await self.doc_repo.create_document(doc)
+        with timer.stage("insert_document"):
+            doc_id = await self.doc_repo.create_document(doc)
         if doc_id is None:
+            timer.log(logger)
             return {
                 "ok": False,
                 "error": "Ошибка сохранения документа в БД",
@@ -194,26 +203,30 @@ class KbService:
 
         if (chunking_strategy or "").strip().lower() == "hierarchical":
             try:
-                count = await index_document_hierarchically(
-                    text,
-                    doc_id,
-                    filename=filename,
-                    vector_repo=repo,
-                    rag_client=prof.client,
-                    chunk_size=chunk_size,
-                    chunk_overlap=chunk_overlap,
-                    model=prof.model,
-                )
+                with timer.stage("hierarchical_embed_insert"):
+                    count = await index_document_hierarchically(
+                        text,
+                        doc_id,
+                        filename=filename,
+                        vector_repo=repo,
+                        rag_client=prof.client,
+                        chunk_size=chunk_size,
+                        chunk_overlap=chunk_overlap,
+                        model=prof.model,
+                    )
             except Exception as e:
                 logger.error("KB иерархическая индексация не удалась: %s", e)
                 await self.doc_repo.delete_document(doc_id)
+                timer.log(logger)
                 return {
                     "ok": False,
                     "error": f"Иерархическая индексация: {e}",
                     "document_id": None,
                 }
-            self._mark_bm25_dirty()
-            await self._rebuild_graph_for_document(doc_id)
+            with timer.stage("bm25"):
+                self._mark_bm25_dirty()
+            with timer.stage("graph"):
+                await self._rebuild_graph_for_document(doc_id)
             eff_size, eff_overlap = resolve_chunk_params(chunk_size, chunk_overlap)
             logger.info(
                 "[INDEX kb] '%s' (id=%s, owner=%s, uploader=%s): strategy=hierarchical size=%s overlap=%s "
@@ -228,6 +241,9 @@ class KbService:
                 count,
                 prof.label,
             )
+            timer.meta["doc_id"] = doc_id
+            timer.meta["chunks"] = count
+            timer.log(logger)
             return {
                 "ok": True,
                 "document_id": doc_id,
@@ -235,13 +251,15 @@ class KbService:
                 "chunks_count": count,
             }
 
-        chunks_with_meta = split_into_chunks_with_meta(
-            text,
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-            chunking_strategy=chunking_strategy or "universal",
-        )
+        with timer.stage("chunk"):
+            chunks_with_meta = split_into_chunks_with_meta(
+                text,
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+                chunking_strategy=chunking_strategy or "universal",
+            )
         if not chunks_with_meta:
+            timer.log(logger)
             return {
                 "ok": False,
                 "error": "Не удалось нарезать чанки",
@@ -250,10 +268,12 @@ class KbService:
         chunks = [c for c, _m in chunks_with_meta]
 
         try:
-            embeddings = await prof.embed(chunks, kind="document")
+            with timer.stage("embed"):
+                embeddings = await prof.embed(chunks, kind="document")
         except Exception as e:
             logger.error("Ошибка получения эмбеддингов для KB: %s", e)
             await self.doc_repo.delete_document(doc_id)
+            timer.log(logger)
             return {
                 "ok": False,
                 "error": f"Ошибка эмбеддингов: {e}",
@@ -276,15 +296,18 @@ class KbService:
                 )
             )
 
-        created = await repo.create_vectors_batch(vectors)
-        self._mark_bm25_dirty()
+        with timer.stage("insert"):
+            created = await repo.create_vectors_batch(vectors)
+        with timer.stage("bm25"):
+            self._mark_bm25_dirty()
         if self.graph_repo:
             try:
-                await self.graph_repo.rebuild_document_graph(
-                    store_type="kb",
-                    document_id=doc_id,
-                    chunks=[(v.chunk_index, v.content) for v in vectors],
-                )
+                with timer.stage("graph"):
+                    await self.graph_repo.rebuild_document_graph(
+                        store_type="kb",
+                        document_id=doc_id,
+                        chunks=[(v.chunk_index, v.content) for v in vectors],
+                    )
             except Exception as e:
                 logger.warning(
                     "KB graph индекс не собран для документа %s: %s", doc_id, e
@@ -304,6 +327,9 @@ class KbService:
             created,
             prof.label,
         )
+        timer.meta["doc_id"] = doc_id
+        timer.meta["chunks"] = created
+        timer.log(logger)
         return {
             "ok": True,
             "document_id": doc_id,
@@ -505,8 +531,8 @@ class KbService:
         return_trace: bool = False,
         model: Optional[str] = None,
         provider: Optional[str] = None,
-        reranker_model: Optional[str] = None,
-        reranker_provider: Optional[str] = None,
+        rerank_model: Optional[str] = None,
+        rerank_provider: Optional[str] = None,
     ) -> Union[
         List[Tuple[str, float, Optional[int], Optional[int]]],
         Tuple[List[Tuple[str, float, Optional[int], Optional[int]]], RetrievalTrace],
@@ -522,7 +548,7 @@ class KbService:
         # Реранкер выбирается независимо от эмбеддера: хранилища у него нет.
         from app.services.embed_routing import rerank_client_for
 
-        rr_client = rerank_client_for(self.rag_client, reranker_provider, reranker_model)
+        rr_client = rerank_client_for(self.rag_client, rerank_provider, rerank_model)
         async def _vectors(emb, lim):
             return await repo.similarity_search(
                 query_embedding=emb,
@@ -561,13 +587,14 @@ class KbService:
             vector_query=vector_query,
             k=k,
             document_id=document_id,
+            document_ids=document_ids,
             use_reranking=use_reranking,
             strategy=strategy,
             filters=filters,
             rag_client=prof.client,
             embed_model=prof.model,
             rerank_client=rr_client,
-            rerank_model=reranker_model,
+            rerank_model=rerank_model,
             graph_repo=self.graph_repo,
             cfg=cfg,
             search_vectors=_vectors,

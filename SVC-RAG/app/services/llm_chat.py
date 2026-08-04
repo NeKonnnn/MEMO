@@ -3,7 +3,7 @@
 
 Используется двумя LLM-функциями RAG:
   • LLM-as-a-Judge      (app/services/llm_rag_judge.py)
-  • иерархическая суммаризация (app/services/hierarchical_indexing.py)
+  • иерархическая суммаризация (app/services/rag_service.py -> _llm_summarize)
 
 Поведение запроса 1:1 с прежним (model/temperature/max_tokens/stream=false, без
 авторизации) - добавлена только подробная трассировка (см. app.core.logging.llm_trace),
@@ -19,6 +19,7 @@ from typing import Optional
 import httpx
 
 from app.core.config import get_settings
+from app.core.http_verify import resolve_httpx_verify
 from app.core.logging import (
     get_logger,
     log_llm_config,
@@ -109,15 +110,11 @@ async def chat(
     # можно было увидеть, что именно ушло в модель.
     logger.debug("[LLM→] rid=%s purpose=%s prompt=%r", rid, purpose, prompt)
 
-    # --- Будущая доработка auth/TLS (сейчас отключена, поведение прежнее) -------
-    # headers = {}
-    # if auth: headers["Authorization"] = f"Bearer {os.environ[cfg.api_key_env]}"
-    # verify = os.getenv("TLS_CERT_PATH") or os.getenv("SSL_CERT_FILE") or True
-    # ---------------------------------------------------------------------------
-
     start = time.monotonic()
     try:
-        async with httpx.AsyncClient(timeout=req_timeout) as client:
+        async with httpx.AsyncClient(
+            timeout=req_timeout, verify=resolve_httpx_verify()
+        ) as client:
             resp = await client.post(url, json=payload)
             resp.raise_for_status()
             data = resp.json()

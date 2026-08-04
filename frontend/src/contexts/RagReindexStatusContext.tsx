@@ -25,6 +25,7 @@ interface RagReindexStatusContextValue {
   projectHasDocuments: boolean;
   blockMessage: string;
   shouldBlockRagSend: (ctx: Pick<RagSendBlockContext, 'libraryEnabled'>) => boolean;
+  memoryRagEnabled: boolean;
 }
 
 const defaultStatus: RagReindexStatusPayload = {
@@ -34,6 +35,7 @@ const defaultStatus: RagReindexStatusPayload = {
   any_reindexing: false,
   agent_has_kb: false,
   project_has_documents: false,
+  memory_rag_enabled: true,
   message: '',
 };
 
@@ -44,6 +46,7 @@ const RagReindexStatusContext = createContext<RagReindexStatusContextValue>({
   projectHasDocuments: false,
   blockMessage: '',
   shouldBlockRagSend: () => false,
+  memoryRagEnabled: true,
 });
 
 function readActiveAgentId(): number | null {
@@ -63,12 +66,16 @@ export function RagReindexStatusProvider({ children }: { children: ReactNode }) 
   const location = useLocation();
   const [status, setStatus] = useState<RagReindexStatusPayload | null>(null);
 
+  const currentChatProjectId = useMemo(() => {
+    const chat = state.chats.find((c) => c.id === state.currentChatId);
+    return chat?.projectId ?? null;
+  }, [state.chats, state.currentChatId]);
+
   const pollProjectId = useMemo(() => {
     const routeProjectId = projectIdFromPathname(location.pathname);
     if (routeProjectId) return routeProjectId;
-    const chat = state.chats.find((c) => c.id === state.currentChatId);
-    return chat?.projectId ?? null;
-  }, [location.pathname, state.chats, state.currentChatId]);
+    return currentChatProjectId;
+  }, [location.pathname, currentChatProjectId]);
 
   const pollAgentId = useMemo(() => readActiveAgentId(), [location.pathname, state.currentChatId]);
 
@@ -94,8 +101,7 @@ export function RagReindexStatusProvider({ children }: { children: ReactNode }) 
       const poll = async () => {
         const activeAgentId = readActiveAgentId();
         const routeProjectId = projectIdFromPathname(location.pathname);
-        const chat = state.chats.find((c) => c.id === state.currentChatId);
-        const activeProjectId = routeProjectId ?? chat?.projectId ?? null;
+        const activeProjectId = routeProjectId ?? currentChatProjectId;
         const params = new URLSearchParams();
         if (activeAgentId != null) {
           params.set('agent_id', String(activeAgentId));
@@ -117,6 +123,7 @@ export function RagReindexStatusProvider({ children }: { children: ReactNode }) 
             any_reindexing: Boolean(data.any_reindexing),
             agent_has_kb: Boolean(data.agent_has_kb),
             project_has_documents: Boolean(data.project_has_documents),
+            memory_rag_enabled: data.memory_rag_enabled !== false,
             message: typeof data.message === 'string' ? data.message : '',
           });
         } catch {
@@ -133,7 +140,7 @@ export function RagReindexStatusProvider({ children }: { children: ReactNode }) 
       cancelled = true;
       if (interval) clearInterval(interval);
     };
-  }, [location.pathname, state.chats, state.currentChatId, pollProjectId, pollAgentId]);
+  }, [location.pathname, currentChatProjectId, pollProjectId, pollAgentId]);
 
   const effectiveStatus = status ?? defaultStatus;
   const blockMessage = ragReindexBlockMessage(effectiveStatus);
@@ -154,6 +161,7 @@ export function RagReindexStatusProvider({ children }: { children: ReactNode }) 
       anyReindexing: effectiveStatus.any_reindexing,
       agentHasKb: effectiveStatus.agent_has_kb,
       projectHasDocuments: effectiveStatus.project_has_documents,
+      memoryRagEnabled: effectiveStatus.memory_rag_enabled !== false,
       blockMessage,
       shouldBlockRagSend: shouldBlock,
     }),

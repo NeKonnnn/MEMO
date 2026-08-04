@@ -81,17 +81,13 @@ def effective_use_reranking(
     *,
     query_text: Optional[str] = None,
 ) -> bool:
-    """vector / lexical / raw_cosine — без реранка.
-    hybrid    — вектор+BM25; реранк включается только если он разрешён в конфиге.
-    reranking — только реранк по конфигу.
-    auto      — по конфигу и флагу запроса.
-
-    Дополнительно: для кириллических запросов с английским-only реранкером реранк
-    принудительно выключается (см. ``should_disable_rerank_for_query``). Это в несколько
-    раз повышает качество на русскоязычном корпусе без замены модели.
+    """raw_cosine / flat - без реранка всегда (это режимы 'сырой выдачи')
+    Остальные - по настройке пользователя и конфигу
     """
     st = (strategy or "auto").lower()
-    if st in ("vector", "raw_cosine", "flat", "lexical", "keyword", "bm25"):
+    # Сырые режимы: постобработка в них отключена по определению — стратегия
+    # так и называется, и её смысл именно в том, чтобы увидеть выдачу как есть.
+    if st in ("raw_cosine", "flat"):
         return False
     base = False
     if st in ("hybrid", "reranking"):

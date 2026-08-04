@@ -108,6 +108,10 @@ class ChatCompletionRequest(BaseModel):
         None,
         description="Включить режим рассуждений (Qwen/DeepSeek и др.), если поддерживает бэкенд llama.cpp/vLLM",
     )
+    chat_template_kwargs: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Доп. kwargs шаблона чата (vLLM/Qwen). enable_thinking здесь — fallback, если top-level не задан.",
+    )
 class ChatCompletionResponseChoice(BaseModel):
     index: int
     message: AssistantMessage  # В ответе всегда assistant!

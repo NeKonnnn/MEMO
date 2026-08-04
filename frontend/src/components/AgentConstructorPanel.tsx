@@ -77,6 +77,9 @@ import {
 import ModelParametersModal, { type ModelParamsState } from './ModelParametersModal';
 import { MODEL_SETTINGS_DEFAULT, type ModelSettingsState } from '../constants/modelSettingsStyles';
 import ShareAgentDialog from './ShareAgentDialog';
+import { fetchMcpServers } from '../mcp/api';
+import type { McpServerConfigPublic } from '../mcp/types';
+import { persistAgentMcpConfig } from '../utils/applyAgentMcp';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -265,6 +268,13 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
   const [skillIds, setSkillIds] = useState<string[]>([]);
   const [skillsEnabled, setSkillsEnabled] = useState(false);
 
+  // MCP servers (config.mcp_enabled, config.mcp_server_ids)
+  const [mcpEnabled, setMcpEnabled] = useState(false);
+  const [mcpServerIds, setMcpServerIds] = useState<string[]>([]);
+  const [availableMcpServers, setAvailableMcpServers] = useState<McpServerConfigPublic[]>([]);
+  const [mcpPopoverAnchor, setMcpPopoverAnchor] = useState<HTMLElement | null>(null);
+  const mcpTriggerRef = useRef<HTMLDivElement>(null);
+
   // Support contacts
   const [supportName, setSupportName] = useState('');
   const [supportEmail, setSupportEmail] = useState('');
@@ -425,6 +435,14 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
     void loadKbDocuments();
     void (async () => {
       try {
+        const srv = await fetchMcpServers();
+        setAvailableMcpServers(srv.filter((s) => s.enabled));
+      } catch {
+        setAvailableMcpServers([]);
+      }
+    })();
+    void (async () => {
+      try {
         const headers: HeadersInit = tokenRef.current
           ? { Authorization: `Bearer ${tokenRef.current}` }
           : {};
@@ -523,6 +541,12 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
         ? cfg.skills_enabled
         : Array.isArray(cfg.skill_ids) && cfg.skill_ids.length > 0
     );
+    setMcpEnabled(!!cfg.mcp_enabled);
+    setMcpServerIds(
+      Array.isArray(cfg.mcp_server_ids)
+        ? cfg.mcp_server_ids.map((x: unknown) => String(x).trim()).filter(Boolean)
+        : []
+    );
     setSupportName(cfg.support_name || '');
     setSupportEmail(cfg.support_email || '');
     // eslint-disable-next-line react-hooks/exhaustive-deps -- только смена агента; agents читаем из ref
@@ -545,6 +569,8 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
     setKbDocumentIds([]);
     setSkillIds([]);
     setSkillsEnabled(false);
+    setMcpEnabled(false);
+    setMcpServerIds([]);
     setSupportName('');
     setSupportEmail('');
   }
@@ -659,6 +685,8 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
         kb_document_ids: kbDocumentIds,
         skill_ids: skillIds,
         skills_enabled: skillsEnabled,
+        mcp_enabled: mcpEnabled,
+        mcp_server_ids: mcpServerIds,
         support_name: supportName,
         support_email: supportEmail,
       },
@@ -694,10 +722,26 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
           localStorage.setItem('active_agent_id', String(savedId));
           localStorage.setItem('active_agent_name', name.trim());
           localStorage.setItem('active_agent_prompt', instructions.trim() || 'Системные инструкции не заданы.');
+          persistAgentMcpConfig({
+            mcp_enabled: mcpEnabled,
+            mcp_server_ids: mcpServerIds,
+          });
         } catch {
           /* */
         }
-        window.dispatchEvent(new CustomEvent('agentSelected'));
+        window.dispatchEvent(
+          new CustomEvent('agentSelected', {
+            detail: {
+              id: savedId,
+              name: name.trim(),
+              system_prompt: instructions.trim(),
+              config: {
+                mcp_enabled: mcpEnabled,
+                mcp_server_ids: mcpServerIds,
+              },
+            },
+          }),
+        );
       }
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 3000);
@@ -788,6 +832,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
     localStorage.setItem('active_agent_id', String(agent.id));
     localStorage.setItem('active_agent_prompt', agent.system_prompt);
     localStorage.setItem('active_agent_name', agent.name);
+    persistAgentMcpConfig(agent.config || {});
     window.dispatchEvent(new CustomEvent('agentSelected', { detail: agent }));
   };
 
@@ -1137,11 +1182,11 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
           </FormControl>
         </Box>
 
-        {/* ── Capabilities ─────────────────────────────────────────────────── */}
+        {/* ── Capabilities (скрыто — см. COMMENTS.md) ──────────────────────── */}
+        {/*
         <Box>
           <SectionHeader>Возможности</SectionHeader>
 
-          {/* Code interpreter */}
           <Box sx={{ mt: 1 }}>
             <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.45)', fontSize: '0.72rem', display: 'block', mb: 0.5 }}>
               API Интерпретатора кода
@@ -1187,7 +1232,6 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
             )}
           </Box>
 
-          {/* Web search */}
           <Box>
             <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.45)', fontSize: '0.72rem', display: 'block', mb: 0.5 }}>
               Веб-поиск
@@ -1213,7 +1257,6 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
             />
           </Box>
 
-          {/* File context — тот же upload, что и «Документы агента» */}
           <Box>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 0.75 }}>
               <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.45)', fontSize: '0.72rem' }}>
@@ -1244,8 +1287,10 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
             </Button>
           </Box>
         </Box>
+        */}
 
-        {/* ── Artifacts ────────────────────────────────────────────────────── */}
+        {/* ── Artifacts (скрыто — см. COMMENTS.md) ─────────────────────────── */}
+        {/*
         <Box>
           <SectionHeader>Артефакты</SectionHeader>
           <Box sx={{ mt: 1, display: 'flex', flexDirection: 'column', gap: 0.5 }}>
@@ -1275,6 +1320,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
             ))}
           </Box>
         </Box>
+        */}
 
         {/* ── Skills ───────────────────────────────────────────────────────── */}
         <Box sx={{ minWidth: 0 }}>
@@ -1338,6 +1384,117 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
               ))}
             </Box>
           )}
+        </Box>
+
+        {/* ── MCP ──────────────────────────────────────────────────────────── */}
+        <Box sx={{ minWidth: 0 }}>
+          <SectionHeader>MCP</SectionHeader>
+          <Box sx={{ mt: 1 }}>
+            <FormControlLabel
+              control={
+                <Checkbox
+                  size="small"
+                  checked={mcpEnabled}
+                  onChange={(e) => {
+                    const checked = e.target.checked;
+                    setMcpEnabled(checked);
+                    if (!checked) setMcpServerIds([]);
+                  }}
+                  sx={{ color: 'rgba(255,255,255,0.4)', '&.Mui-checked': { color: '#2196f3' }, p: 0.5 }}
+                />
+              }
+              label={
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                  <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.75)', fontSize: '0.78rem' }}>
+                    Добавить MCP
+                  </Typography>
+                  <Tooltip title="Подключить MCP-серверы astrachat к этому агенту. Настройка сохраняется в карточке агента и применяется при использовании из галереи." arrow>
+                    <HelpIcon sx={{ fontSize: 12, color: 'rgba(255,255,255,0.25)' }} />
+                  </Tooltip>
+                </Box>
+              }
+              sx={{ m: 0, mb: mcpEnabled ? 1 : 0, '& .MuiFormControlLabel-label': { ml: 0.5 } }}
+            />
+            {mcpEnabled && (
+              <Box>
+                <FormControl variant="outlined" fullWidth size="small" sx={categoryFieldSx}>
+                  <InputLabel htmlFor="agent-constructor-mcp">MCP-серверы</InputLabel>
+                  <OutlinedInput
+                    ref={mcpTriggerRef}
+                    id="agent-constructor-mcp"
+                    label="MCP-серверы"
+                    value={
+                      mcpServerIds.length === 0
+                        ? ''
+                        : mcpServerIds.length === 1
+                          ? (availableMcpServers.find((s) => s.id === mcpServerIds[0])?.display_name || mcpServerIds[0])
+                          : `Выбрано: ${mcpServerIds.length}`
+                    }
+                    readOnly
+                    placeholder="Выберите MCP-серверы"
+                    onClick={() => setMcpPopoverAnchor(mcpTriggerRef.current)}
+                    endAdornment={
+                      <InputAdornment position="end">
+                        <ExpandMoreIcon
+                          sx={{ ...DROPDOWN_CHEVRON_SX, transform: Boolean(mcpPopoverAnchor) ? 'rotate(180deg)' : 'none' }}
+                        />
+                      </InputAdornment>
+                    }
+                  />
+                </FormControl>
+                <Popover
+                  open={Boolean(mcpPopoverAnchor)}
+                  anchorEl={mcpPopoverAnchor}
+                  onClose={() => setMcpPopoverAnchor(null)}
+                  anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
+                  transformOrigin={{ vertical: 'top', horizontal: 'left' }}
+                  slotProps={{
+                    paper: { sx: getDropdownPopoverPaperSx(mcpPopoverAnchor) },
+                  }}
+                >
+                  <Box sx={{ py: 0.5, maxHeight: 220, overflowY: 'auto', ...SIDEBAR_HIDE_SCROLLBAR_SX }}>
+                    {availableMcpServers.length === 0 ? (
+                      <Box sx={{ px: 1.5, py: 1.5, fontSize: '0.78rem', color: 'rgba(255,255,255,0.35)', textAlign: 'center' }}>
+                        Нет подключённых MCP-серверов
+                      </Box>
+                    ) : (
+                      availableMcpServers.map((srv) => {
+                        const selected = mcpServerIds.includes(srv.id);
+                        return (
+                          <Box
+                            key={srv.id}
+                            onClick={() => {
+                              setMcpServerIds((prev) =>
+                                prev.includes(srv.id)
+                                  ? prev.filter((x) => x !== srv.id)
+                                  : [...prev, srv.id],
+                              );
+                            }}
+                            sx={{
+                              ...dropdownItemSx,
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: 0.75,
+                              color: selected ? 'white' : 'rgba(255,255,255,0.9)',
+                              fontWeight: selected ? 600 : 400,
+                              bgcolor: selected ? DROPDOWN_ITEM_HOVER_BG : 'transparent',
+                            }}
+                          >
+                            {selected ? (
+                              <CheckBoxIcon sx={{ fontSize: 16, color: '#2196f3', flexShrink: 0 }} />
+                            ) : (
+                              <CheckBoxBlankIcon sx={{ fontSize: 16, color: 'rgba(255,255,255,0.35)', flexShrink: 0 }} />
+                            )}
+                            {srv.display_name || srv.id}
+                          </Box>
+                        );
+                      })
+                    )}
+                  </Box>
+                </Popover>
+              </Box>
+            )}
+          </Box>
         </Box>
 
         {/* ── File Search (KB) ─────────────────────────────────────────────── */}
@@ -1508,7 +1665,8 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
           </Box>
         </Box>
 
-        {/* ── Tools and Actions ────────────────────────────────────────────── */}
+        {/* ── Tools and Actions (скрыто — см. COMMENTS.md) ─────────────────── */}
+        {/*
         <Box>
           <SectionHeader>Tools and Actions</SectionHeader>
           <Box sx={{ mt: 1, display: 'flex', gap: 1 }}>
@@ -1544,6 +1702,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
             </Button>
           </Box>
         </Box>
+        */}
 
         {/* ── Author Contacts ──────────────────────────────────────────────── */}
         <Box>
@@ -1601,7 +1760,8 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
           </Box>
         )}
 
-        {/* Advanced + Version */}
+        {/* Advanced + Version (скрыто — см. COMMENTS.md) */}
+        {/*
         <Box sx={{ display: 'flex', gap: 1 }}>
           <Button
             size="small"
@@ -1634,6 +1794,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
             Версия
           </Button>
         </Box>
+        */}
 
         {/* Share + Publish + Delete + Save */}
         <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>

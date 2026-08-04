@@ -56,6 +56,8 @@ async def _judge_llm(prompt: str) -> str:
                 streaming=False,
                 max_tokens=512,
                 temperature=0.0,
+                # Судья должен вернуть JSON, а не рассуждения.
+                service_call=True,
             )
             or ""
         )

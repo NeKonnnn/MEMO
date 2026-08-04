@@ -19,6 +19,9 @@ import {
 import { incrementTabNotification } from '../utils/tabNotifications';
 import { getMcpToolIdsForChat } from '../mcp/selectionStorage';
 import type { McpToolCallRecord } from '../mcp/types';
+import { isCodingModeEnabled, isCodingPlanModeEnabled } from '../coding/selectionStorage';
+import { resolveWorkspaceForChat } from '../coding/workspaceStorage';
+import { getApprovedPlan, setApprovedPlan, setDraftPlan } from '../coding/planStorage';
 import { extractSkillIds } from '../utils/skillMentions';
 import { getActiveSkillIds } from '../utils/skillSelectionStorage';
 import { getApiUrl } from '../config/api';
@@ -442,6 +445,33 @@ export function SocketProvider({ children }: { children: ReactNode }) {
 
     newSocket.on('chat_mcp_event', (data) => {
       handleServerMessage({ ...data, type: 'mcp_event', mcp_event_type: data.type });
+    });
+
+    newSocket.on('chat_coding_event', (data) => {
+      if (data?.type === 'mcp_tool_start' || data?.type === 'mcp_tool_end') {
+        handleServerMessage({ ...data, type: 'mcp_event', mcp_event_type: data.type });
+        return;
+      }
+      if (data?.type === 'plan_update' && data.plan) {
+        const chatId = currentChatIdRef.current;
+        setApprovedPlan(chatId, String(data.plan));
+        setDraftPlan(chatId, String(data.plan));
+        return;
+      }
+      if (data?.type === 'content_delta' && data.delta) {
+        const chatId = currentChatIdRef.current;
+        if (!chatId || !currentMessageRef.current) return;
+        responseAccumulatedRef.current = (responseAccumulatedRef.current || '') + String(data.delta);
+        handleServerMessage({
+          type: 'chunk',
+          chunk: String(data.delta),
+          accumulated: responseAccumulatedRef.current,
+        });
+        return;
+      }
+      if (data?.type === 'loop_breaker_triggered') {
+        showNotification('warning', `Coding agent: loop-breaker — ${data.reason || 'повтор без прогресса'}`);
+      }
     });
 
     setSocket(newSocket);
@@ -906,6 +936,10 @@ export function SocketProvider({ children }: { children: ReactNode }) {
         }
         
         const response = data.response || '';
+        if (data.active_plan && typeof data.active_plan === 'string') {
+          setApprovedPlan(chatId, data.active_plan);
+          setDraftPlan(chatId, data.active_plan);
+        }
         const responseWithReasoning =
           thinkingTraceRef.current.trim() && !response.includes('<think>')
             ? `<think>${thinkingTraceRef.current.trim()}</think>\n\n${response}`
@@ -1224,7 +1258,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
     setChatLoading(chatId, true);
     currentMessageRef.current = null;
 
-    if (!expectMultiLlm && isLikelyImageGenerationPrompt(message)) {
+    if (!expectMultiLlm && !isCodingModeEnabled(chatId) && isLikelyImageGenerationPrompt(message)) {
       const placeholderId = addMessage(chatId, {
         role: 'assistant',
         content: '',
@@ -1281,7 +1315,11 @@ export function SocketProvider({ children }: { children: ReactNode }) {
           }))
         : undefined,
       request_id: requestId,
-      tool_ids: resolveMcpToolIds(chatId),
+      tool_ids: isCodingModeEnabled(chatId) ? [] : resolveMcpToolIds(chatId),
+      coding_mode: isCodingModeEnabled(chatId),
+      plan_mode: isCodingPlanModeEnabled(chatId),
+      workspace_path: resolveWorkspaceForChat(project?.workspacePath),
+      approved_plan: getApprovedPlan(chatId) || undefined,
       image_gen_preset_id: readSelectedImageGenPresetId() || undefined,
     };
 
@@ -1366,7 +1404,11 @@ export function SocketProvider({ children }: { children: ReactNode }) {
         return ids.length ? ids : undefined;
       })(),
       request_id: requestId,
-      tool_ids: resolveMcpToolIds(chatId),
+      tool_ids: isCodingModeEnabled(chatId) ? [] : resolveMcpToolIds(chatId),
+      coding_mode: isCodingModeEnabled(chatId),
+      plan_mode: isCodingPlanModeEnabled(chatId),
+      workspace_path: resolveWorkspaceForChat(project?.workspacePath),
+      approved_plan: getApprovedPlan(chatId) || undefined,
     });
   };
 
@@ -1442,7 +1484,14 @@ export function SocketProvider({ children }: { children: ReactNode }) {
         return ids.length ? ids : undefined;
       })(),
       request_id: requestId,
-      tool_ids: resolveMcpToolIds(chatId),
+      tool_ids: isCodingModeEnabled(chatId) ? [] : resolveMcpToolIds(chatId),
+      coding_mode: isCodingModeEnabled(chatId),
+      plan_mode: isCodingPlanModeEnabled(chatId),
+      workspace_path: (() => {
+        const chat = getChatById(chatId);
+        const pid = chat?.projectId;
+        return pid ? resolveWorkspaceForChat(getProjectById(pid)?.workspacePath) : resolveWorkspaceForChat(undefined);
+      })(),
       image_gen_preset_id: readSelectedImageGenPresetId() || undefined,
     };
 

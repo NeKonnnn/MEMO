@@ -1,4 +1,4 @@
-"""Streamable HTTP transport (MCP SDK streamablehttp_client)."""
+"""Streamable HTTP transport (MCP SDK streamable_http_client)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,15 @@ from urllib.parse import urljoin
 
 from backend.mcp.sdk import import_mcp_sdk_submodule
 
-streamablehttp_client = import_mcp_sdk_submodule("mcp.client.streamable_http").streamablehttp_client
+_mod = import_mcp_sdk_submodule("mcp.client.streamable_http")
+# mcp SDK: раньше streamablehttp_client, сейчас streamable_http_client.
+streamablehttp_client = getattr(_mod, "streamable_http_client", None) or getattr(
+    _mod, "streamablehttp_client", None
+)
+if streamablehttp_client is None:
+    raise AttributeError(
+        "mcp.client.streamable_http: нет streamable_http_client / streamablehttp_client"
+    )
 
 from backend.mcp.client import create_httpx_client, create_insecure_httpx_client
 

@@ -17,7 +17,6 @@ from app.database.search_filters import DocumentVectorSearchFilters
 
 logger = logging.getLogger(__name__)
 
-
 class MemoryRagDocumentRepository:
     def __init__(self, db: PostgreSQLConnection):
         self.db = db
@@ -119,36 +118,41 @@ class MemoryRagDocumentRepository:
             )
         return [int(r["id"]) for r in rows]
 
-
 class MemoryRagVectorRepository:
     def __init__(self, db: PostgreSQLConnection, embedding_dim: int = 384):
         self.db = db
         self.embedding_dim = embedding_dim
+        self.base_table = "memory_rag_vectors"
+        self.parent_table = "memory_rag_documents"
+
+    async def _table(self, conn) -> str:
+        """Таблица МОЕЙ размерности (историческая без суффикса, прочие с _<dim>)."""
+        from app.database.embedding_schema import resolve_vector_table
+
+        return await resolve_vector_table(conn, self.base_table, self.embedding_dim)
+
+    async def _all_tables(self, conn) -> list:
+        """Все таблицы стора: у документа бывают вектора сразу в нескольких."""
+        from app.database.embedding_schema import list_vector_tables
+
+        return await list_vector_tables(conn, self.base_table)
+
+    def _cast(self) -> str:
+        """vector или halfvec — по размерности (halfvec с 2001, см. B2a)."""
+        from app.database.embedding_schema import vector_cast
+
+        return vector_cast(self.embedding_dim)
 
     async def create_tables(self):
-        async with await self.db.acquire() as conn:
-            await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
-            await conn.execute(f"""
-                CREATE TABLE IF NOT EXISTS memory_rag_vectors (
-                    id SERIAL PRIMARY KEY,
-                    document_id INTEGER NOT NULL REFERENCES memory_rag_documents(id) ON DELETE CASCADE,
-                    chunk_index INTEGER NOT NULL,
-                    embedding vector({self.embedding_dim}) NOT NULL,
-                    content TEXT NOT NULL,
-                    metadata JSONB DEFAULT '{{}}'::jsonb,
-                    created_at TIMESTAMP DEFAULT NOW(),
-                    UNIQUE(document_id, chunk_index)
-                )
-            """)
-            from app.database.embedding_schema import create_embedding_index
+        """Гарантировать таблицу СВОЕЙ размерности. Ничего не удаляет и не чистит."""
+        from app.database.embedding_schema import ensure_vector_table
 
-            await create_embedding_index(conn, "memory_rag_vectors", self.embedding_dim)
-            
-            await conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_memory_rag_vectors_document_id ON memory_rag_vectors(document_id)"
+        async with await self.db.acquire() as conn:
+            table = await ensure_vector_table(
+                conn, self.base_table, self.embedding_dim, self.parent_table
             )
-            await ensure_fts_columns(conn, "memory_rag_vectors")
-        logger.info("Таблица memory_rag_vectors готова (dim=%s)", self.embedding_dim)
+            await ensure_fts_columns(conn, table)
+        logger.info("Таблица %s готова (dim=%s)", table, self.embedding_dim)
 
     async def create_vectors_batch(self, vectors: List[DocumentVector]) -> int:
         if not vectors:
@@ -165,9 +169,10 @@ class MemoryRagVectorRepository:
             placeholders.append(f"(${base+1}, ${base+2}, ${base+3}, ${base+4}, ${base+5}::jsonb)")
             flat.extend([doc_id, idx, emb, content, meta])
         async with await self.db.acquire() as conn:
+            table = await self._table(conn)
             await conn.execute(
                 f"""
-                INSERT INTO memory_rag_vectors (document_id, chunk_index, embedding, content, metadata)
+                INSERT INTO {table} (document_id, chunk_index, embedding, content, metadata)
                 VALUES {", ".join(placeholders)}
                 """,
                 *flat,
@@ -206,17 +211,21 @@ class MemoryRagVectorRepository:
                 params.append(f"%{fn}%")
                 pi += 1
         where_sql = " AND ".join(clauses) if clauses else "TRUE"
-        from_sql = f"memory_rag_vectors v {join_sql}".strip()
-        q = f"""
-            SELECT v.id, v.document_id, v.chunk_index, v.embedding::text, v.content, v.metadata,
-                   1 - (v.embedding <=> $1::vector) as similarity
-            FROM {from_sql}
-            WHERE {where_sql}
-            ORDER BY v.embedding <=> $1::vector
-            LIMIT ${pi}
-        """
+        cast = self._cast()
         params.append(limit)
         async with await self.db.acquire() as conn:
+            from app.database.embedding_schema import apply_ann_search_settings
+
+            await apply_ann_search_settings(conn)
+            from_sql = f"{await self._table(conn)} v {join_sql}".strip()
+            q = f"""
+                SELECT v.id, v.document_id, v.chunk_index, v.embedding::text, v.content, v.metadata,
+                       1 - (v.embedding <=> $1::{cast}) as similarity
+                FROM {from_sql}
+                WHERE {where_sql}
+                ORDER BY v.embedding <=> $1::{cast}
+                LIMIT ${pi}
+            """
             rows = await conn.fetch(q, *params)
         result = []
         for row in rows:
@@ -246,7 +255,7 @@ class MemoryRagVectorRepository:
         document_id: Optional[int] = None,
         filters: Optional[DocumentVectorSearchFilters] = None,
     ) -> List[Tuple[DocumentVector, float]]:
-        """FTS-поиск через OR-``to_tsquery`` (russian + simple). См. ``app.database.fts``."""
+        """FTS-поиск через OR-```to_tsquery``` (russian + simple). См. ```app.database.fts```."""
         q_text = (query_text or "").strip()
         if not query_has_searchable_content(q_text):
             return []
@@ -280,17 +289,17 @@ class MemoryRagVectorRepository:
                 params.append(f"%{fn}%")
                 pi += 1
         where_sql = " AND ".join(clauses)
-        from_sql = f"memory_rag_vectors v {join_sql}".strip()
         params.append(limit)
-        q = f"""
-            SELECT v.id, v.document_id, v.chunk_index, v.embedding::text, v.content, v.metadata,
-                   {rank_fts} AS lexical_score
-            FROM {from_sql}
-            WHERE {where_sql}
-            ORDER BY lexical_score DESC, v.chunk_index ASC
-            LIMIT ${pi}
-        """
         async with await self.db.acquire() as conn:
+            from_sql = f"{await self._table(conn)} v {join_sql}".strip()
+            q = f"""
+                SELECT v.id, v.document_id, v.chunk_index, v.embedding::text, v.content, v.metadata,
+                       {rank_fts} AS lexical_score
+                FROM {from_sql}
+                WHERE {where_sql}
+                ORDER BY lexical_score DESC, v.chunk_index ASC
+                LIMIT ${pi}
+            """
             rows = await conn.fetch(q, *params)
         out: List[Tuple[DocumentVector, float]] = []
         for row in rows:
@@ -299,8 +308,7 @@ class MemoryRagVectorRepository:
             if isinstance(meta, str):
                 meta = json.loads(meta) if meta else {}
             out.append(
-                (
-                    DocumentVector(
+                (DocumentVector(
                         id=row["id"],
                         document_id=row["document_id"],
                         chunk_index=row["chunk_index"],
@@ -335,15 +343,15 @@ class MemoryRagVectorRepository:
             pi += 1
         where_sql = " AND ".join(clauses)
         params.append(limit)
-        q = f"""
-            SELECT v.id, v.document_id, v.chunk_index, v.embedding::text, v.content, v.metadata,
-                   {rank_sub} AS lexical_score
-            FROM memory_rag_vectors v
-            WHERE {where_sql}
-            ORDER BY lexical_score DESC, v.chunk_index ASC
-            LIMIT ${pi}
-        """
         async with await self.db.acquire() as conn:
+            q = f"""
+                SELECT v.id, v.document_id, v.chunk_index, v.embedding::text, v.content, v.metadata,
+                       {rank_sub} AS lexical_score
+                FROM {await self._table(conn)} v
+                WHERE {where_sql}
+                ORDER BY lexical_score DESC, v.chunk_index ASC
+                LIMIT ${pi}
+            """
             rows = await conn.fetch(q, *params)
         out: List[Tuple[DocumentVector, float]] = []
         for row in rows:
@@ -374,8 +382,8 @@ class MemoryRagVectorRepository:
             return {}
         async with await self.db.acquire() as conn:
             rows = await conn.fetch(
-                """
-                SELECT chunk_index, content FROM memory_rag_vectors
+                f"""
+                SELECT chunk_index, content FROM {await self._table(conn)}
                 WHERE document_id = $1 AND chunk_index = ANY($2::int[])
                 """,
                 document_id,
@@ -388,7 +396,7 @@ class MemoryRagVectorRepository:
         async with await self.db.acquire() as conn:
             rows = await conn.fetch(
                 "SELECT id, document_id, chunk_index, embedding::text, content, metadata "
-                "FROM memory_rag_vectors WHERE document_id = $1 ORDER BY chunk_index",
+                f"FROM {await self._table(conn)} WHERE document_id = $1 ORDER BY chunk_index",
                 document_id,
             )
         out: List[DocumentVector] = []
@@ -410,21 +418,36 @@ class MemoryRagVectorRepository:
         return out
 
     async def delete_vectors_by_document(self, document_id: int) -> bool:
+        """Чистит вектора документа во ВСЕХ таблицах.
+
+        Иначе при смене модели старые вектора остались бы в таблице прежней
+        размерности навсегда — и всплывали бы в поиске у тех, кто на той модели.
+        """
         async with await self.db.acquire() as conn:
-            await conn.execute("DELETE FROM memory_rag_vectors WHERE document_id = $1", document_id)
+            for t in await self._all_tables(conn):
+                await conn.execute(
+                    f"DELETE FROM {t} WHERE document_id = $1", document_id
+                )
         return True
 
     async def get_all_document_ids(self) -> List[int]:
         """Уникальные document_id в memory RAG."""
         async with await self.db.acquire() as conn:
-            rows = await conn.fetch("SELECT DISTINCT document_id FROM memory_rag_vectors ORDER BY document_id")
+            tables = await self._all_tables(conn)
+            if not tables:
+                return []
+            union = " UNION ".join(f"SELECT document_id FROM {t}" for t in tables)
+            rows = await conn.fetch(
+                f"SELECT DISTINCT document_id FROM ({union}) u ORDER BY document_id"
+            )
         return [r["document_id"] for r in rows]
 
     async def get_all_contents_for_bm25(self) -> List[Tuple[int, int, str]]:
         """Возвращает (document_id, chunk_index, content) для всех чанков memory — для BM25."""
         async with await self.db.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT document_id, chunk_index, content FROM memory_rag_vectors " "ORDER BY document_id, chunk_index"
+                f"SELECT document_id, chunk_index, content FROM {await self._table(conn)} "
+                "ORDER BY document_id, chunk_index"
             )
         return [(r["document_id"], r["chunk_index"], r["content"]) for r in rows]
 
@@ -433,7 +456,7 @@ class MemoryRagVectorRepository:
         async with await self.db.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT id, document_id, chunk_index, embedding::text, content, metadata "
-                "FROM memory_rag_vectors WHERE document_id = $1 AND chunk_index = $2",
+                f"FROM {await self._table(conn)} WHERE document_id = $1 AND chunk_index = $2",
                 document_id,
                 chunk_index,
             )

@@ -3179,6 +3179,7 @@ export default function Sidebar({ open, onToggle, isDarkMode, onToggleTheme, onH
             iconColor: draft.iconColor,
             memory: draft.memory,
             instructions: draft.instructions,
+            workspacePath: draft.workspacePath,
           });
           if (pendingChatIdForProject) {
             moveChatToProject(pendingChatIdForProject, projectId);
@@ -3194,6 +3195,7 @@ export default function Sidebar({ open, onToggle, isDarkMode, onToggleTheme, onH
             iconColor: updates.iconColor,
             memory: updates.memory,
             instructions: updates.instructions,
+            workspacePath: updates.workspacePath,
           });
           if (pendingChatIdForProject) {
             moveChatToProject(pendingChatIdForProject, projectId);
@@ -3211,6 +3213,7 @@ export default function Sidebar({ open, onToggle, isDarkMode, onToggleTheme, onH
             iconColor: projectData.iconColor,
             memory: projectData.memory,
             instructions: projectData.instructions,
+            workspacePath: projectData.workspacePath,
           });
           if (pendingChatIdForProject) {
             moveChatToProject(pendingChatIdForProject, projectId);

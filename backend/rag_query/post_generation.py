@@ -81,6 +81,8 @@ async def verify_answer_grounded(context_excerpt: str, answer: str) -> bool:
             streaming=False,
             system_prompt="Ты строгий аудитор: отвечай только «да» или «нет».",
             max_tokens=8,
+            # Ответ - одно слово. Мышление здесь съело бы весь бюджет целиком.
+            service_call=True,
         )
 
     try:

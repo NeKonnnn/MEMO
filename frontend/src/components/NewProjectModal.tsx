@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import ProjectRagLibraryInline from './ProjectRagLibraryInline';
+import WorkspacePicker from './WorkspacePicker';
 import {
   Dialog,
   DialogTitle,
@@ -63,6 +64,7 @@ export interface DraftProjectPayload {
   name: string;
   memory: 'default' | 'project-only';
   instructions: string;
+  workspacePath?: string;
   icon?: string;
   iconType?: 'icon' | 'emoji';
   iconColor?: string;
@@ -89,6 +91,7 @@ export interface ProjectData {
   category?: string;
   memory: 'default' | 'project-only';
   instructions: string;
+  workspacePath?: string;
 }
 
 const iconOptions = [
@@ -156,6 +159,7 @@ export default function NewProjectModal({
   const [selectedColor, setSelectedColor] = useState('#ffffff');
   const [memory, setMemory] = useState<'default' | 'project-only'>('default');
   const [instructions, setInstructions] = useState('');
+  const [workspacePath, setWorkspacePath] = useState('');
   const [showIconPicker, setShowIconPicker] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [iconTab, setIconTab] = useState(0);
@@ -195,6 +199,7 @@ export default function NewProjectModal({
     setSelectedColor('#ffffff');
     setMemory('default');
     setInstructions('');
+    setWorkspacePath('');
     setShowIconPicker(false);
     setShowAdvanced(false);
     setIconTab(0);
@@ -213,6 +218,7 @@ export default function NewProjectModal({
     name: projectName.trim(),
     memory,
     instructions: instructions.trim(),
+    workspacePath: workspacePath.trim() || undefined,
     icon: iconType === 'icon' ? selectedIcon || undefined : selectedEmoji || undefined,
     iconType,
     iconColor: selectedColor,
@@ -233,6 +239,7 @@ export default function NewProjectModal({
         category: undefined,
         memory,
         instructions: instructions.trim(),
+        workspacePath: workspacePath.trim() || undefined,
       };
       onCreateProject?.(projectData);
     }
@@ -574,6 +581,22 @@ export default function NewProjectModal({
                       color: theme.palette.mode === 'dark' ? 'white' : 'text.primary',
                     },
                   }}
+                />
+              </Box>
+              <Box sx={{ mb: 3 }}>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+                  <Typography variant="body2" fontWeight="500">
+                    Workspace (coding agent)
+                  </Typography>
+                  <Tooltip title="Выберите папку из списка — путь к Docker подставится автоматически.">
+                    <InfoIcon sx={{ fontSize: 16, opacity: 0.7 }} />
+                  </Tooltip>
+                </Box>
+                <WorkspacePicker
+                  value={workspacePath}
+                  onChange={setWorkspacePath}
+                  isDarkMode={theme.palette.mode === 'dark'}
+                  showGlobalDefault
                 />
               </Box>
             </Box>

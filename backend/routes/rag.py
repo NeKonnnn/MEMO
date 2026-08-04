@@ -3,6 +3,7 @@ routes/rag.py - настройки RAG, База Знаний (KB), библио
 """
 
 import os
+import time
 from typing import Annotated, Optional
 import asyncio
 import httpx
@@ -157,16 +158,24 @@ def _norm_uid(user_id: Optional[str]) -> str:
     return str(user_id or "").strip().lower()
 
 
-def _mark_user_scoped_reindex(user_id: str, *, active: bool) -> None:
+def _mark_user_scoped_reindex(
+    user_id: str, *, active: bool, scope: Optional[str] = None
+) -> None:
+    """Флаг "идет scoped-перечанковка" - только для затронутого стора"""
     uid = _norm_uid(user_id)
     if not uid:
         return
-    if active:
-        _user_scoped_reindex_kb.add(uid)
-        _user_scoped_reindex_project.add(uid)
-    else:
-        _user_scoped_reindex_kb.discard(uid)
-        _user_scoped_reindex_project.discard(uid)
+    sc = (scope or "").strip().lower()
+    targets = []
+    if sc in ("", "agent"):
+        targets.append(_user_scoped_reindex_kb)
+    if sc in ("", "project"):
+        targets.append(_user_scoped_reindex_project)
+    for target in targets:
+        if active:
+            target.add(uid)
+        else:
+            target.discard(uid)
 
 
 def _is_upstream_httpx_timeout(exc: BaseException) -> bool:
@@ -190,7 +199,10 @@ async def get_rag_settings(
     current_user: Annotated[dict, Depends(get_current_user)],
     scope: Optional[str] = None,
 ):
-    """Персональные RAG-настройки (project + agent).
+    """Персональные RAG-настройки одного стора.
+
+    ```scope``` — project (по умолчанию) или agent. Общие поля (стратегия поиска,
+    agentic_*, препроцесс запроса) одинаковы в обоих скоупах, остальные свои.
 
     Memory RAG (кроме стратегии поиска) — только ConfigMap/env SVC-RAG / SVC-RAG-MODELS.
     """
@@ -251,7 +263,14 @@ async def get_rag_reindex_status(
     agent_id: Optional[int] = None,
     project_id: Optional[str] = None,
 ):
-    """Агрегированный статус перечанковки RAG для UI (плашка и стоппер)."""
+    """Агрегированный статус перечанковки RAG для UI (плашка и стоппер).
+
+    Здесь же уезжает 'memory_rag_enabled': по нему
+    интерфейс гасит тумблер Библиотеки, когда стор выключен в ConfigMap
+    """
+    from backend.realtime.rag_evidence import memory_rag_enabled
+
+    memory_enabled = memory_rag_enabled()
     empty_payload = {
         "memory": {"reindexing": False},
         "project": {"reindexing": False},
@@ -259,6 +278,7 @@ async def get_rag_reindex_status(
         "any_reindexing": False,
         "agent_has_kb": False,
         "project_has_documents": False,
+        "memory_rag_enabled": memory_enabled,
         "message": "",
     }
     if not rag_client:
@@ -317,6 +337,7 @@ async def get_rag_reindex_status(
         "any_reindexing": memory_flag or project_flag or kb_flag,
         "agent_has_kb": agent_has_kb,
         "project_has_documents": project_has_documents,
+        "memory_rag_enabled": memory_enabled,
         "message": message,
     }
 
@@ -348,16 +369,16 @@ async def reset_rag_settings(current_user: Annotated[dict, Depends(get_current_u
                 "rag_rerank_top_n": 12,
                 "rag_embedding_model_path": "",
                 "rag_reranker_model_path": "",
-                "rag_system_prompt": (
-                    "Используй только предоставленный контекст. Если ответа нет в тексте, скажи «Не знаю». Не придумывай факты."
-                ),
+                "rag_system_prompt": "",
             }
         )
+        # Сброс — во ВСЕ скоупы: пользователь ждёт «как из коробки» целиком,
+        # а не только для того стора, что открыт в UI.
         merged = None
         for sc in SCOPES:
             merged = await save_user_rag_settings(user_id, defaults, sc)
         bump_rag_semantic_cache()
-        return {"message": "Настройки RAG сброшены", "success": True, **settings_response_dict(merged)}
+        return {"message": "Настройки RAG сброшены", "success": True, **settings_response_dict(merged or defaults)}
     except HTTPException:
         raise
     except Exception as e:
@@ -421,7 +442,11 @@ async def _collect_owner_agent_kb_document_ids(owner_user_id: str) -> list:
 async def _run_background_rechunk_for_user(
     user_id: str, chunk_params: dict, scope: Optional[str] = None
 ) -> None:
-    """Перечанковка только документов пользователя: project + agent KB (owner).
+    """Перечанковка документов в пределах ОДНОГО стора.
+
+    ```scope="agent"``` — только agent KB (документы, где owner_user_id = пользователь),
+    ```scope="project"``` — только документы проектов. Без scope трогает оба, как было
+    до разделения настроек.
 
     Memory RAG не трогаем — нарезка Memory только из env SVC-RAG.
     """
@@ -437,7 +462,8 @@ async def _run_background_rechunk_for_user(
 
     emb = await embedding_fields_for_user(oid, scope)
     logger.info(
-        "[RECHUNK-USER] старт user=%s scope=%s model=%s strategy=%s chunk_size=%s overlap=%s agent_docs=%s",
+        "[RECHUNK-USER] старт user=%s scope=%s model=%s strategy=%s chunk_size=%s ",
+        "overlap=%s agent_docs=%s",
         oid,
         scope or "both",
         emb.get("embedding_model"),
@@ -449,7 +475,7 @@ async def _run_background_rechunk_for_user(
     sc = (scope or "").strip().lower()
     do_agent = sc in ("", "agent")
     do_project = sc in ("", "project")
-    _mark_user_scoped_reindex(oid, active=True)
+    _mark_user_scoped_reindex(oid, active=True, scope=scope)
     _mark_reindex_started()
     try:
         if do_agent:
@@ -484,7 +510,7 @@ async def _run_background_rechunk_for_user(
         )
     except Exception:
         # Ставить задачи не удалось — снимаем флаг сразу, ждать нечего.
-        _mark_user_scoped_reindex(oid, active=False)
+        _mark_user_scoped_reindex(oid, active=False, scope=scope)
         raise
 
 
@@ -538,10 +564,8 @@ async def _run_background_reindex_after_model_change() -> None:
     )
 
 
-async def _run_background_reindex_for_user(
-    user_id: str, chunk_params: dict, scope: Optional[str] = None
-) -> None:
-    """Переиндексация project + agent KB только для пользователя (без Memory)."""
+async def _run_background_reindex_for_user(user_id: str, chunk_params: dict, scope: Optional[str] = None) -> None:
+    """Переиндексация документов пользователя в пределах сторна (без Memory)"""
     await _run_background_rechunk_for_user(user_id, chunk_params, scope)
 
 
@@ -662,12 +686,8 @@ async def update_rag_settings(
             except (TypeError, ValueError) as e:
                 raise HTTPException(status_code=400, detail="rag_rerank_top_n: ожидается целое число 1–64") from e
         if settings_data.rag_system_prompt is not None:
-            prompt = str(settings_data.rag_system_prompt or "").strip()
-            updates["rag_system_prompt"] = (
-                prompt
-                if prompt
-                else "Используй только предоставленный контекст. Если ответа нет в тексте, скажи «Не знаю». Не придумывай факты."
-            )
+            # Пустая строка допустима: тогда soft-rules; иначе — текст из UI как есть.
+            updates["rag_system_prompt"] = str(settings_data.rag_system_prompt or "").strip()
         if settings_data.rag_embedding_model_path is not None:
             updates["rag_embedding_model_path"] = str(settings_data.rag_embedding_model_path or "").strip()
         if settings_data.rag_reranker_model_path is not None:
@@ -698,16 +718,19 @@ async def update_rag_settings(
             and _chunk_after != _chunk_before
         ):
             logger.info(
-                "[RECHUNK-USER] чанкинг изменился user=%s scope=%s → scoped перечанковка",
+                "[RECHUNK-USER] чанкинг изменился user=%s scope=%s → scoped перечанковка только для этого стора",
                 user_id,
                 scope,
             )
             asyncio.create_task(
-                _run_background_rechunk_for_user(
-                    user_id, chunk_params_from_rag_settings(merged), scope
-                )
+                _run_background_rechunk_for_user(user_id, chunk_params_from_rag_settings(merged), scope)
             )
-        return {"message": "Настройки RAG обновлены", "success": True, **settings_response_dict(merged)}
+        return {
+            "message": "Настройки RAG обновлены", 
+            "success": True, 
+            **settings_response_dict(merged), 
+            "scope": scope,
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -715,19 +738,29 @@ async def update_rag_settings(
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
-async def _run_global_reindex(chunk_params: dict, include_memory: bool) -> None:
+async def _run_global_reindex(
+    agent_params: dict, project_params: dict, include_memory: bool
+) -> None:
     """Полный реиндекс KB + проектов (все документы всех пользователей)."""
     global _cluster_reindex_active
     if not rag_client:
         return
-    cs = chunk_params.get("chunk_size")
-    co = chunk_params.get("chunk_overlap")
-    strat = chunk_params.get("chunking_strategy")
+    a_cs = agent_params.get("chunk_size")
+    a_co = agent_params.get("chunk_overlap")
+    a_strat = agent_params.get("chunking_strategy")
+    p_cs = project_params.get("chunk_size")
+    p_co = project_params.get("chunk_overlap")
+    p_strat = project_params.get("chunking_strategy")
+    # Для fallback-а на старые версии без scope:
+    cs, co = a_cs, a_co
     logger.info(
-        "[REINDEX-ALL] старт: strategy=%s chunk_size=%s overlap=%s memory=%s",
-        strat,
-        cs,
-        co,
+        "[REINDEX-ALL] старт: agent strategy=%s chunk_size=%s overlap=%s project strategy=%s chunk_size=%s overlap=%s memory=%s",
+        a_strat, 
+        a_cs, 
+        a_co, 
+        p_strat, 
+        p_cs, 
+        p_co, 
         include_memory,
     )
     # Флаг снимает /api/rag/reindex-status по факту освобождения локов svc-rag:
@@ -737,14 +770,14 @@ async def _run_global_reindex(chunk_params: dict, include_memory: bool) -> None:
     _mark_reindex_started()
     try:
         kb_res = await rag_client.kb_reindex(
-            chunk_size=cs, chunk_overlap=co, chunking_strategy=strat
+            chunk_size=a_cs, chunk_overlap=a_co, chunking_strategy=a_strat
         )
         logger.info("[REINDEX-ALL] kb готово: %s", kb_res)
     except Exception:
         logger.exception("[REINDEX-ALL] kb ошибка")
     try:
         proj_res = await rag_client.project_rag_reindex_all(
-            chunk_size=cs, chunk_overlap=co, chunking_strategy=strat
+            chunk_size=p_cs, chunk_overlap=p_co, chunking_strategy=p_strat
         )
         logger.info("[REINDEX-ALL] projects готово: %s", proj_res)
     except Exception:
@@ -791,9 +824,14 @@ async def reindex_all_documents(
     logger.warning(
         "[REINDEX-ALL] запущен пользователем %s (memory=%s)", user_id, include_memory
     )
-    merged = await get_user_rag_settings(user_id)
+    agent_merged = await get_user_rag_settings(user_id, "agent")
+    project_merged = await get_user_rag_settings(user_id, "project")
     asyncio.create_task(
-        _run_global_reindex(chunk_params_from_rag_settings(merged), bool(include_memory))
+        _run_global_reindex(
+            chunk_params_from_rag_settings(agent_merged), 
+            chunk_params_from_rag_settings(project_merged), 
+            bool(include_memory),
+        )
     )
     return {
         "ok": True,
@@ -803,53 +841,449 @@ async def reindex_all_documents(
 
 
 PHOENIX_PROVIDER_ID = os.getenv("RAG_PHOENIX_PROVIDER_ID", "PHOENIX")
+CORSUR_PROVIDER_ID = os.getenv("RAG_CORSUR_PROVIDER_ID", "CORSUR")
+# Phoenix под ключом эмбеддингов: /v1/models отдаёт только эмбеддеры и реранкеры.
+PHOENIX_EMBEDDINGS_PROVIDER_ID = os.getenv(
+    "RAG_PHOENIX_EMBEDDINGS_PROVIDER_ID", "PHOENIX_Embeddings"
+)
 
-def _phoenix_guess_kind(model_id: str) -> Optional[str]:
+# Внешние OpenAI-совместимые источники эмбеддингов/реранка в UI.
+# Вкладки (порядок и написание): CORSUR → PHOENIX → PHOENIX_Embeddings.
+_EXTERNAL_RAG_CATALOG = (
+    {
+        "provider_id": CORSUR_PROVIDER_ID,
+        "path_prefix": "corsur",
+        "source": "corsur",
+        "description": "Модель CORSUR (llm.corsur)",
+        "rag_only": True,
+    },
+    {
+        "provider_id": PHOENIX_PROVIDER_ID,
+        "path_prefix": "phoenix",
+        "source": "phoenix",
+        "description": "Модель Phoenix (LiteLLM)",
+        "rag_only": False,
+    },
+    {
+        "provider_id": PHOENIX_EMBEDDINGS_PROVIDER_ID,
+        "path_prefix": "phoenix_embeddings",
+        "source": "phoenix_embeddings",
+        "description": "Модель Phoenix Embeddings (LiteLLM, emb-ключ)",
+        "rag_only": True,
+    },
+)
+
+# Подсказки к типу модели. Это СЕМЕЙСТВА, а не конкретные id: список моделей
+# приходит из /v1/models и нигде не хардкодится. Дополняются переменными
+# окружения через запятую — новое семейство не требует правки кода:
+#   RAG_RERANKER_NAME_HINTS=colbert,monot5
+#   RAG_EMBEDDING_NAME_HINTS=jina,nomic
+# Реранкерные проверяются ПЕРВЫМИ: 'bge/bge-rerank' → reranker, 'bge/bge-m3' → embedding.
+_RERANKER_NAME_HINTS_DEFAULT = ("rerank", "cross-encoder", "crossencoder", "marco")
+_EMBEDDING_NAME_HINTS_DEFAULT = (
+    "embed",
+    "bge",
+    "frida",
+    "giga",
+    "e5-",
+    "gte-",
+    "labse",
+    "minilm",
+)
+
+def _name_hints(env_name: str, defaults: tuple) -> tuple:
+    extra = (os.getenv(env_name, "") or "").replace(";", ",")
+    parts = [p.strip().lower() for p in extra.split(",") if p.strip()]
+    return tuple(defaults) + tuple(p for p in parts if p not in defaults)
+
+_RERANKER_NAME_HINTS = _name_hints(
+    "RAG_RERANKER_NAME_HINTS", _RERANKER_NAME_HINTS_DEFAULT
+)
+_EMBEDDING_NAME_HINTS = _name_hints(
+    "RAG_EMBEDDING_NAME_HINTS", _EMBEDDING_NAME_HINTS_DEFAULT
+)
+
+
+def _rag_model_kind(model_id: str, *, rag_only: bool) -> Optional[str]:
+    """Тип RAG-модели по её id. None — модель не для RAG-селектора.
+
+    ```rag_only=True``` — шлюз отдаёт только эмбеддеры и реранкеры, поэтому
+    неизвестное имя считаем эмбеддером, а не выбрасываем: иначе ```bge-m3```,
+    ```FRIDA```, ```multilingual-e5-large``` молча исчезают из селектора.
+    ```rag_only=False``` — на шлюзе есть и чат-модели, тип обязан быть виден
+    по имени, иначе в RAG-селектор попадут LLM.
+    """
     n = (model_id or "").lower()
-    if "rerank" in n:
+    if any(h in n for h in _RERANKER_NAME_HINTS):
         return "reranker"
-    if "embed" in n:
+    if any(h in n for h in _EMBEDDING_NAME_HINTS):
         return "embedding"
-    return None  # LLM и прочее в RAG-селекторе не показываем
+    return "embedding" if rag_only else None
 
-async def _phoenix_rag_models(model_type: Optional[str] = None) -> list:
-    """Модели Phoenix (GET /v1/models через llm_providers) для селектора RAG.
+# --- Проверка, что объявленная моделью строка каталога реально работает -----
+# Шлюзы объявляют модели, которые вызвать нельзя: у PHOENIX это битые алиасы
+# вроде "QWEN3 EMBEDDING 8B" (400 Invalid model name), у CORSUR — чат-модели,
+# попадающие в embedding-список из-за rag_only.
+#
+# Но «не ответила» бывает двух совершенно разных сортов, и путать их нельзя:
+#   * шлюз ВНЯТНО отверг модель (400/422, или 200 без вектора) — прячем;
+#   * шлюз недоступен, тормозит, отдаёт 5xx или таймаут — НЕ прячем.
+# Второе — состояние шлюза, а не модели. 31.07 из-за этого селектор опустел
+# целиком: у PHOENIX рабочая qwen3-embedding-06b-f16 не уложилась в таймаут,
+# и единственный живой эмбеддер исчез из UI.
+_PROBE_TTL_SECONDS = float(os.getenv("RAG_MODEL_PROBE_TTL", "600") or 600)
+# Неопределённый результат кешируем ненадолго: шлюз мог просто моргнуть.
+_PROBE_TTL_UNKNOWN = float(os.getenv("RAG_MODEL_PROBE_TTL_UNKNOWN", "120") or 120)
+_PROBE_TIMEOUT = float(os.getenv("RAG_MODEL_PROBE_TIMEOUT", "15") or 15)
+_PROBE_MAX_PARALLEL = 8
 
-    Это и есть discovery без curl: реальные id моделей видны в UI и в логе.
+_PROBE_OK = "ok"
+_PROBE_BAD = "bad"          # модель заведомо не работает — прятать
+_PROBE_UNKNOWN = "unknown"  # шлюз не в форме — оставить как есть
+
+# (provider_id, model_id) -> (статус, dim, причина, monotonic-время проверки)
+_embedding_probe_cache: dict = {}
+
+# Кэш полного RAG-каталога (как MODELS_AVAILABLE_CACHE у LLM).
+# current из user settings поверх кэша на каждом запросе — не кэшируется.
+_rag_models_catalog_cache: Optional[list] = None
+_rag_models_catalog_cache_ts: float = 0.0
+_rag_models_catalog_cache_lock = asyncio.Lock()
+
+
+def _rag_models_cache_seconds() -> int:
+    """TTL каталога /api/rag/models. ENV: RAG_MODELS_CACHE_SECONDS, иначе как у LLM."""
+    raw = (os.getenv("RAG_MODELS_CACHE_SECONDS", "") or "").strip()
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    try:
+        from backend.settings import get_settings
+
+        return max(1, int(get_settings().model_health.models_available_cache_seconds))
+    except Exception:
+        return 60
+
+
+def _invalidate_rag_models_catalog_cache() -> None:
+    global _rag_models_catalog_cache, _rag_models_catalog_cache_ts
+    _rag_models_catalog_cache = None
+    _rag_models_catalog_cache_ts = 0.0
+
+
+def _probe_enabled() -> bool:
+    return str(os.getenv("RAG_MODEL_PROBE", "1")).strip().lower() not in {
+        "0",
+        "false",
+        "no",
+    }
+
+def _hide_unavailable() -> bool:
+    """Прятать неработающие модели из селектора (по умолчанию да).
+
+    RAG_MODEL_PROBE_HIDE_UNAVAILABLE=0 — показывать их с available=false и
+    причиной, если фронт умеет рисовать недоступную строку.
+    """
+    return str(os.getenv("RAG_MODEL_PROBE_HIDE_UNAVAILABLE", "1")).strip().lower() not in {
+        "0",
+        "false",
+        "no",
+    }
+
+def _first_vector_len(value, depth: int = 0) -> int:
+    """Длина первого списка чисел в ответе. 0 — вектора нет.
+
+    Рекурсивно, а не по известным ключам: через bifrost-passthrough вектор
+    приходит завёрнутым в chat-ответ, и точную форму снаружи знать нельзя.
+    """
+    if depth > 6:
+        return 0
+    if isinstance(value, list):
+        if len(value) >= 8 and all(isinstance(x, (int, float)) for x in value[:8]):
+            return len(value)
+        for item in value[:3]:
+            found = _first_vector_len(item, depth + 1)
+            if found:
+                return found
+        return 0
+    if isinstance(value, dict):
+        for item in value.values():
+            found = _first_vector_len(item, depth + 1)
+            if found:
+                return found
+    return 0
+
+def _classify_probe_response(resp) -> tuple:
+    """(статус, dim, причина) по одному ответу шлюза."""
+    if resp.status_code == 200:
+        try:
+            dim = _first_vector_len(resp.json())
+        except Exception:
+            return _PROBE_BAD, 0, "200, но тело не JSON"
+        if dim:
+            return _PROBE_OK, dim, ""
+        # 200 без вектора — это чат-модель, попавшая в embedding-список.
+        return _PROBE_BAD, 0, "200, но вектора в ответе нет (это не эмбеддер)"
+    body = (resp.text or "")[:160]
+    if resp.status_code in (400, 401, 403, 422):
+        return _PROBE_BAD, 0, f"HTTP {resp.status_code}: {body}"
+    # 404/405 — маршрута нет; 5xx — шлюзу плохо. И то и другое про шлюз.
+    return _PROBE_UNKNOWN, 0, f"HTTP {resp.status_code}: {body}"
+
+async def _probe_embedding_model(provider, model_id: str) -> tuple:
+    """Пробный вектор. Возвращает (статус, dim, причина).
+
+    Два захода, потому что эмбеддер может быть опубликован по-разному:
+      1. штатный POST /v1/embeddings;
+      2. если там нет маршрута (404/405) — тоннель через /v1/chat/completions
+         с ```x-bf-passthrough-extra-params```. Так эмбеддинги ходят на CORSUR,
+         где отдельного embeddings-маршрута на шлюзе нет. Без этого захода
+         рабочий embed/FRIDA помечался недоступным и пропадал из UI.
+
+    Кеш: успех и внятный отказ — на RAG_MODEL_PROBE_TTL, неопределённость —
+    на RAG_MODEL_PROBE_TTL_UNKNOWN (шлюз мог просто моргнуть).
+    """
+    import time
+
+    provider_id = str(getattr(provider, "id", "") or "")
+    key = (provider_id, model_id)
+    now = time.monotonic()
+    cached = _embedding_probe_cache.get(key)
+    if cached:
+        ttl = _PROBE_TTL_UNKNOWN if cached[0] == _PROBE_UNKNOWN else _PROBE_TTL_SECONDS
+        if (now - cached[3]) < ttl:
+            return cached[0], cached[1], cached[2]
+
+    base_url = str(getattr(provider, "base_url", "") or "").rstrip("/")
+    if not base_url:
+        # проверить нечем — не прячем модель на всякий случай
+        return _PROBE_UNKNOWN, 0, "base_url не задан"
+
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    try:
+        api_key = str(provider.get_api_key() or "")
+    except Exception:
+        api_key = ""
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+        headers["X-API-Key"] = api_key
+    verify_fn = getattr(provider, "_http_verify", None)
+    verify = verify_fn() if callable(verify_fn) else True
+
+    status, dim, reason = _PROBE_UNKNOWN, 0, ""
+    try:
+        async with httpx.AsyncClient(timeout=_PROBE_TIMEOUT, verify=verify) as client:
+            resp = await client.post(
+                f"{base_url}/v1/embeddings",
+                headers=headers,
+                json={"model": model_id, "input": ["ping"]},
+            )
+            status, dim, reason = _classify_probe_response(resp)
+
+            if status != _PROBE_OK and resp.status_code in (404, 405):
+                tunnel_headers = dict(headers)
+                tunnel_headers["x-bf-passthrough-extra-params"] = "true"
+                resp = await client.post(
+                    f"{base_url}/v1/chat/completions",
+                    headers=tunnel_headers,
+                    json={
+                        # Только texts, без input: тело с обоими непустыми
+                        # полями шлюз отвергает с 400 (проверено 31.07 20:10).
+                        "model": model_id,
+                        "messages": [{"role": "user", "content": "Send request"}],
+                        "texts": ["ping"],
+                        "kind": "query",
+                    },
+                )
+                status, dim, reason = _classify_probe_response(resp)
+                if status == _PROBE_OK:
+                    reason = ""
+    except Exception as e:
+        status, dim, reason = _PROBE_UNKNOWN, 0, f"{type(e).__name__}: {e}"
+
+    _embedding_probe_cache[key] = (status, dim, reason, now)
+    return status, dim, reason
+
+async def _annotate_availability(provider, rows: list, source: str) -> list:
+    """Проставить строкам каталога реальную доступность (и dim).
+
+    Прячем ТОЛЬКО заведомо нерабочие модели. Если шлюз не в форме (таймаут,
+    5xx), модель остаётся в селекторе: пустой список хуже, чем список с
+    моделью, которая, возможно, заработает через минуту.
+    """
+    targets = [r for r in rows if r.get("kind") == "embedding"]
+    if not targets or not _probe_enabled():
+        return rows
+
+    semaphore = asyncio.Semaphore(_PROBE_MAX_PARALLEL)
+
+    async def _one(row: dict) -> None:
+        async with semaphore:
+            status, dim, reason = await _probe_embedding_model(provider, row["name"])
+        row["probe_status"] = status
+        row["available"] = status != _PROBE_BAD
+        if dim:
+            row["dim"] = dim
+        if reason:
+            row["probe_note"] = reason
+
+    await asyncio.gather(*(_one(row) for row in targets))
+
+    bad = [(r["path"], r.get("probe_note", "")) for r in targets if r.get("probe_status") == _PROBE_BAD]
+    unknown = [(r["path"], r.get("probe_note", "")) for r in targets if r.get("probe_status") == _PROBE_UNKNOWN]
+    if bad:
+        # Молча не выбрасываем: иначе непонятно, почему селектор поредел.
+        logger.warning(
+            "[RAG-CATALOG] %s: скрыты — шлюз внятно отверг модель: %s", source, bad
+        )
+    if unknown:
+        logger.warning(
+            "[RAG-CATALOG] %s: оставлены в селекторе, но проверка не удалась "
+            "(состояние шлюза, не модели): %s",
+            source,
+            unknown,
+        )
+    if _hide_unavailable():
+        return [r for r in rows if r.get("kind") != "embedding" or r.get("available")]
+    return rows
+
+
+async def _openai_compat_rag_models(
+    *,
+    provider_id: str,
+    path_prefix: str,
+    source: str,
+    description: str,
+    model_type: Optional[str] = None,
+    rag_only: bool = False,
+) -> list:
+    """Модели OpenAI-совместимого провайдера (GET /v1/models) для селектора RAG.
+
+    Список берётся из живого ```GET /v1/models``` шлюза — ничего не захардкожено.
+    Эмбеддеры дополнительно проверяются пробным вектором: в селектор попадают
+    только те, что реально отвечают (см. ```_probe_embedding_model```).
     """
     from backend.llm_providers.registry import get_registry
 
     registry = await get_registry()
-    if not registry.contains(PHOENIX_PROVIDER_ID):
+    if not registry.contains(provider_id):
         logger.warning(
-            "[PHOENIX] провайдер %r не найден в реестре LLM — phoenix-модели в каталоге не появятся",
-            PHOENIX_PROVIDER_ID,
+            "[RAG-CATALOG] провайдер %r не найден в реестре LLM — модели %s не появятся",
+            provider_id,
+            source,
         )
         return []
-    provider = registry.get(PHOENIX_PROVIDER_ID)
+    provider = registry.get(provider_id)
     infos = await provider.list_models()
     rows: list = []
-    logger.info("[PHOENIX] сырые модели: %s", [getattr(i, "model_id", "") for i in (infos or [])])
+    logger.info(
+        "[RAG-CATALOG] %s сырые модели: %s",
+        source,
+        [getattr(i, "model_id", "") for i in (infos or [])],
+    )
+    skipped: list = []
     for info in infos or []:
         model_id = str(getattr(info, "model_id", "") or "").strip()
         if not model_id:
             continue
-        kind = _phoenix_guess_kind(model_id)
-        if kind is None or (model_type and kind != model_type):
+        kind = _rag_model_kind(model_id, rag_only=rag_only)
+        if kind is None:
+            # Раньше отбрасывалось молча — и было не понять, почему селектор пуст.
+            skipped.append(model_id)
+            continue
+        if model_type and kind != model_type:
             continue
         rows.append(
             {
-                "path": f"phoenix/{model_id}",
+                "path": f"{path_prefix}/{model_id}",
                 "name": model_id,
                 "display_name": model_id,
-                "source": "phoenix",
+                "source": source,
                 "kind": kind,
-                "description": "Модель Phoenix (LiteLLM)",
+                "description": description,
                 "available": True,
             }
         )
-    logger.info("[PHOENIX] RAG-каталог: %s", [r["path"] for r in rows])
+    if skipped:
+        logger.info(
+            "[RAG-CATALOG] %s не распознаны как RAG-модели (тип не виден по имени): %s",
+            source,
+            skipped,
+        )
+    rows = await _annotate_availability(provider, rows, source)
+    logger.info("[RAG-CATALOG] %s RAG-каталог: %s", source, [r["path"] for r in rows])
     return rows
+
+
+async def _phoenix_rag_models(model_type: Optional[str] = None) -> list:
+    """Обратная совместимость: только Phoenix."""
+    return await _openai_compat_rag_models(
+        provider_id=PHOENIX_PROVIDER_ID,
+        path_prefix="phoenix",
+        source="phoenix",
+        description="Модель Phoenix (LiteLLM)",
+        model_type=model_type,
+    )
+
+
+async def _external_rag_models(model_type: Optional[str] = None) -> list:
+    """Phoenix + CORSUR (и другие из _EXTERNAL_RAG_CATALOG). Шлюзы — параллельно."""
+
+    async def _one(entry: dict) -> list:
+        try:
+            return await _openai_compat_rag_models(
+                provider_id=entry["provider_id"],
+                path_prefix=entry["path_prefix"],
+                source=entry["source"],
+                description=entry["description"],
+                model_type=model_type,
+                rag_only=bool(entry.get("rag_only", False)),
+            )
+        except Exception:
+            logger.exception(
+                "Каталог %s недоступен — пропускаю", entry.get("source")
+            )
+            return []
+
+    parts = await asyncio.gather(*(_one(entry) for entry in _EXTERNAL_RAG_CATALOG))
+    rows: list = []
+    for part in parts:
+        rows.extend(part)
+    return rows
+
+
+async def _external_rag_models_cached(model_type: Optional[str] = None) -> list:
+    """Полный каталог с TTL (как /api/models/available), затем фильтр по type."""
+    global _rag_models_catalog_cache, _rag_models_catalog_cache_ts
+
+    cache_seconds = _rag_models_cache_seconds()
+    now = time.monotonic()
+    if (
+        _rag_models_catalog_cache is not None
+        and (now - _rag_models_catalog_cache_ts) < cache_seconds
+        and _rag_models_catalog_cache
+    ):
+        rows = _rag_models_catalog_cache
+    else:
+        async with _rag_models_catalog_cache_lock:
+            now = time.monotonic()
+            if (
+                _rag_models_catalog_cache is not None
+                and (now - _rag_models_catalog_cache_ts) < cache_seconds
+                and _rag_models_catalog_cache
+            ):
+                rows = _rag_models_catalog_cache
+            else:
+                rows = await _external_rag_models(None)
+                if rows:
+                    _rag_models_catalog_cache = rows
+                    _rag_models_catalog_cache_ts = time.monotonic()
+
+    if not model_type:
+        return list(rows)
+    return [r for r in rows if (r.get("kind") or "embedding") == model_type]
 
 
 @router.get("/api/rag/models")
@@ -858,34 +1292,55 @@ async def list_rag_models(
     type: str | None = None,
     scope: Optional[str] = None,
 ):
-    """Список моделей эмбеддингов и cross-encoder из SVC-RAG-MODELS."""
-    require_service("rag_models")
-    if not rag_models_client:
-        raise HTTPException(status_code=503, detail="RAG-models service недоступен")
+    """Каталог embedding/reranker для UI: local (svc-rag-models) + CORSUR/PHOENIX.
+
+    ```scope``` — чей выбор подсвечивать как current: project (по умолчанию) или agent.
+    Внешний каталог кэшируется (RAG_MODELS_CACHE_SECONDS);
+    current всегда из персональных настроек пользователя (с fallback на cluster_default).
+    """
     try:
-        data = await rag_models_client.list_models(type)
-        # Только local (+ phoenix ниже); внешние каталоги отфильтровываем
-        models = data.get("models") or {}
-        for kind_key in ("embedding", "reranker"):
-            rows = models.get(kind_key) or []
-            models[kind_key] = [
-                r
-                for r in rows
-                if str((r or {}).get("source") or "").lower() in ("local", "")
-                or str((r or {}).get("path") or "").lower().startswith("local/")
-            ]
-        data["models"] = models
+        data: dict = {
+            "models": {"embedding": [], "reranker": []},
+            "offline": True,
+            "cluster_default": {},
+        }
+        # 1) Локальные папки из SVC-RAG-MODELS (models/rag/*) — основной каталог memo.
+        if rag_models_client:
+            try:
+                local = await rag_models_client.list_models(type)
+                if isinstance(local, dict):
+                    data["offline"] = bool(local.get("offline", True))
+                    if isinstance(local.get("cluster_default"), dict):
+                        data["cluster_default"] = local["cluster_default"]
+                    if isinstance(local.get("current"), dict) and not data["cluster_default"]:
+                        data["cluster_default"] = local["current"]
+                    local_models = local.get("models") or {}
+                    for kind_key in ("embedding", "reranker"):
+                        if type and kind_key != type:
+                            continue
+                        for row in local_models.get(kind_key) or []:
+                            if not isinstance(row, dict) or not row.get("path"):
+                                continue
+                            row = dict(row)
+                            row.setdefault("source", "local")
+                            row.setdefault("kind", kind_key)
+                            data["models"].setdefault(kind_key, []).append(row)
+            except Exception:
+                logger.exception("Каталог локальных RAG-моделей (svc-rag-models) недоступен")
+        # 2) Внешние шлюзы (CORSUR / PHOENIX) — опционально, если настроены.
         try:
-            phoenix_rows = await _phoenix_rag_models(type)
-            if phoenix_rows:
-                models = data.get("models") or {}
-                for row in phoenix_rows:
-                    models.setdefault(row["kind"], []).append(row)
-                data["models"] = models
+            external_rows = await _external_rag_models_cached(type)
+            for row in external_rows or []:
+                kind_key = row.get("kind") or "embedding"
+                data["models"].setdefault(kind_key, []).append(row)
         except Exception:
-            logger.exception("Каталог Phoenix недоступен - показываю только локальные")
+            logger.exception("Каталог внешних RAG-моделей недоступен")
         user_id = str(current_user.get("user_id") or "").strip()
-        user_rag = await get_user_rag_settings(user_id, normalize_scope(scope)) if user_id else {}
+        user_rag = (
+            await get_user_rag_settings(user_id, normalize_scope(scope))
+            if user_id
+            else {}
+        )
         return _overlay_user_model_current(data, user_rag)
     except Exception as e:
         logger.exception("list_rag_models error")
@@ -894,16 +1349,30 @@ async def list_rag_models(
 
 @router.get("/api/rag/models/current")
 async def get_rag_models_current(
-    current_user: Annotated[dict, Depends(get_current_user)],
+    current_user: Annotated[dict, Depends(get_current_user)], 
     scope: Optional[str] = None,
 ):
-    require_service("rag_models")
-    if not rag_models_client:
-        raise HTTPException(status_code=503, detail="RAG-models service недоступен")
     try:
-        data = await rag_models_client.get_current()
+        # Кластерная «текущая модель» есть только у svc-rag-models. Для шлюзовых
+        # провайдеров источник истины — персональные настройки пользователя.
+        data: dict = {}
+        if rag_models_client:
+            try:
+                data = await rag_models_client.get_current()
+            except Exception:
+                logger.warning(
+                    "[RAG-CATALOG] /models/current недоступен — отдаю только выбор пользователя",
+                    exc_info=True,
+                )
+                data = {}
+        if not isinstance(data, dict):
+            data = {}
         user_id = str(current_user.get("user_id") or "").strip()
-        user_rag = await get_user_rag_settings(user_id, normalize_scope(scope)) if user_id else {}
+        user_rag = (
+            await get_user_rag_settings(user_id, normalize_scope(scope)) 
+            if user_id 
+            else {}
+        )
         return _overlay_user_model_current(data, user_rag)
     except Exception as e:
         logger.exception("get_rag_models_current error")
@@ -923,32 +1392,44 @@ async def _current_cluster_embedding_dim() -> Optional[int]:
     return None
 
 
-async def _select_phoenix_rag_model(
-    model_type: str, model_path: str, user_id: str, scope: Optional[str] = None
+async def _select_external_rag_model(
+    model_type: str,
+    model_path: str,
+    user_id: str,
+    *,
+    path_prefix: str,
+    source_label: str,
+    scope: Optional[str] = None,
 ):
-    """Персональный выбор Phoenix-модели.
+    """Персональный выбор внешней OpenAI-совместимой модели (phoenix/…, corsur/…).
 
-    Кластер НЕ переключаем: после B2/B3 модель едет в теле каждого запроса, а
-    вектора ложатся в таблицу своей размерности. Прежний set_models_provider
-    менял провайдера всем сразу, а 409-гард запрещал чужую dim — теперь
-    запрещать нечего.
+    Кластер НЕ переключаем: после B2/B3 модель едет в теле каждого запроса.
     """
     if not rag_client:
         raise HTTPException(status_code=503, detail="RAG service недоступен")
+    prefix = f"{path_prefix}/"
+    if not model_path.lower().startswith(prefix):
+        raise HTTPException(status_code=400, detail=f"Ожидался путь {prefix}<id>")
     model_id = model_path.split("/", 1)[1].strip()
     if not model_id:
-        raise HTTPException(status_code=400, detail="Пустой id модели Phoenix")
+        raise HTTPException(
+            status_code=400, detail=f"Пустой id модели {source_label}"
+        )
 
     try:
-        phoenix_rows = await _phoenix_rag_models(model_type)
+        catalog = await _external_rag_models(model_type)
     except Exception as e:
-        logger.exception("Phoenix catalog error")
+        logger.exception("%s catalog error", source_label)
         raise HTTPException(status_code=502, detail=str(e)) from e
-    paths = {str((r or {}).get("path") or "").strip() for r in (phoenix_rows or [])}
+    paths = {
+        str((r or {}).get("path") or "").strip()
+        for r in (catalog or [])
+        if str((r or {}).get("path") or "").lower().startswith(prefix)
+    }
     if paths and model_path not in paths:
         raise HTTPException(
             status_code=400,
-            detail=f"Модель Phoenix {model_path!r} не найдена в каталоге",
+            detail=f"Модель {source_label} {model_path!r} не найдена в каталоге",
         )
     result: dict = {
         "success": True,
@@ -962,21 +1443,18 @@ async def _select_phoenix_rag_model(
             user_id, {"rag_embedding_model_path": model_path}, scope
         )
         if _reindex_on_model_change():
-            # Документы пользователя переезжают в таблицу новой размерности;
-            # чужие вектора и Библиотека не затрагиваются.
             asyncio.create_task(
                 _run_background_reindex_for_user(
                     user_id, chunk_params_from_rag_settings(merged), scope
                 )
             )
     else:
-        await save_user_rag_settings(
-            user_id, {"rag_reranker_model_path": model_path}, scope
-        )
+        await save_user_rag_settings(user_id, {"rag_reranker_model_path": model_path}, scope)
     bump_rag_semantic_cache()
     logger.info(
-        "[RAG-CFG] персональный выбор Phoenix user=%s type=%s path=%s "
+        "[RAG-CFG] персональный выбор %s user=%s type=%s path=%s "
         "(кластер и Библиотека не меняются)",
+        source_label,
         user_id,
         model_type,
         model_path,
@@ -984,6 +1462,20 @@ async def _select_phoenix_rag_model(
     result["message"] = "Модель сохранена в ваших настройках"
     result["reindexed"] = model_type == "embedding" and _reindex_on_model_change()
     return result
+
+
+async def _select_phoenix_rag_model(
+    model_type: str, model_path: str, user_id: str, 
+    scope: Optional[str] = None,
+):
+    return await _select_external_rag_model(
+        model_type,
+        model_path,
+        user_id,
+        path_prefix="phoenix",
+        source_label="Phoenix",
+        scope=scope,
+    )
 
 
 @router.post("/api/rag/models/select")
@@ -998,9 +1490,6 @@ async def select_rag_model(
     - Смена dim из UI запрещена.
     - При той же dim — scoped reindex только project + agent KB этого пользователя.
     """
-    require_service("rag_models")
-    if not rag_models_client:
-        raise HTTPException(status_code=503, detail="RAG-models service недоступен")
     user_id = str(current_user.get("user_id") or "").strip()
     if not user_id:
         raise HTTPException(status_code=401, detail="Требуется авторизация")
@@ -1021,10 +1510,39 @@ async def select_rag_model(
     if model_path.lower().startswith("huggingface/"):
         raise HTTPException(
             status_code=400,
-            detail="Источник huggingface отключён: выберите local/<папка> из models/rag",
+            detail="Источник huggingface отключён: выберите CORSUR / PHOENIX / PHOENIX_Embeddings",
+        )
+    if model_path.lower().startswith("phoenix_embeddings/"):
+        return await _select_external_rag_model(
+            model_type,
+            model_path,
+            user_id,
+            path_prefix="phoenix_embeddings",
+            source_label="PHOENIX_Embeddings",
+            scope=scope,
         )
     if model_path.lower().startswith("phoenix/"):
-        return await _select_phoenix_rag_model(model_type, model_path, user_id, scope)
+        return await _select_external_rag_model(
+            model_type,
+            model_path,
+            user_id,
+            path_prefix="phoenix",
+            source_label="PHOENIX",
+            scope=scope,
+        )
+    if model_path.lower().startswith("corsur/"):
+        return await _select_external_rag_model(
+            model_type,
+            model_path,
+            user_id,
+            path_prefix="corsur",
+            source_label="CORSUR",
+            scope=scope,
+        )
+    # local/* — нужен svc-rag-models
+    require_service("rag_models")
+    if not rag_models_client:
+        raise HTTPException(status_code=503, detail="RAG-models service недоступен")
     try:
         await _validate_local_model_path(model_type, model_path)
         # Кластер не трогаем: модель едет в теле запроса, svc-rag-models поднимет
@@ -1057,7 +1575,7 @@ async def select_rag_model(
             await save_user_rag_settings(
                 user_id, {"rag_reranker_model_path": model_path}, scope
             )
-        bump_rag_semantic_cache()
+            bump_rag_semantic_cache()
         result["message"] = "Модель сохранена в ваших настройках"
         result["reindexed"] = (
             model_type == "embedding" and _reindex_on_model_change()
@@ -1128,7 +1646,9 @@ async def kb_upload_document(
 
         # Чанкинг: настройки владельца агента (он же контролирует rechunk)
         settings_user = owner_user_id or uploader_id
-        user_rag = await get_user_rag_settings(settings_user, "agent") if settings_user else {}
+        user_rag = (
+            await get_user_rag_settings(settings_user, "agent") if settings_user else {}
+        )
         chunk_params = chunk_params_from_rag_settings(user_rag) if user_rag else get_rag_chunk_index_params()
         strategy = (chunking_strategy or "").strip().lower()
         if strategy and strategy in _VALID_CHUNKING_STRATEGIES | {"universal"}:
@@ -1244,7 +1764,7 @@ async def memory_rag_upload(
                 fn,
                 scope="memory",
                 username=username,
-                prefix="memrag_",
+                prefix="memrag*",
                 content_type=file.content_type or "application/octet-stream",
             )
             if not file_object_name:
@@ -1258,7 +1778,7 @@ async def memory_rag_upload(
             if minio_client:
                 try:
                     minio_client.ensure_bucket(memory_bucket)
-                    file_object_name = minio_client.generate_object_name(prefix="memrag_", extension=ext)
+                    file_object_name = minio_client.generate_object_name(prefix="memrag*", extension=ext)
                     minio_client.upload_file(
                         content,
                         file_object_name,
