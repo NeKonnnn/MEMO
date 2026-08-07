@@ -17,6 +17,20 @@ log = get_logger(__name__)
 HttpxClientFactory = Callable[..., Any]
 
 
+def _tool_parameters(tool: Any) -> Dict[str, Any]:
+    schema = getattr(tool, "input_schema", None) or getattr(tool, "inputSchema", None)
+    if schema is None and hasattr(tool, "model_dump"):
+        dumped = tool.model_dump(mode="json", by_alias=True)
+        schema = dumped.get("inputSchema") or dumped.get("input_schema")
+    return schema or {}
+
+
+def _call_tool_is_error(result: Any) -> bool:
+    if hasattr(result, "is_error"):
+        return bool(result.is_error)
+    return bool(getattr(result, "isError", False))
+
+
 def _build_httpx_client(
     headers=None,
     timeout=None,
@@ -82,7 +96,7 @@ class McpClient:
                 {
                     "name": tool.name,
                     "description": tool.description or "",
-                    "parameters": tool.inputSchema or {},
+                    "parameters": _tool_parameters(tool),
                 }
             )
         return specs
@@ -95,7 +109,7 @@ class McpClient:
             raise RuntimeError("No result returned from MCP tool call.")
         result_dict = result.model_dump(mode="json")
         content = result_dict.get("content", result_dict)
-        if result.isError:
+        if _call_tool_is_error(result):
             raise RuntimeError(str(content))
         return content
 

@@ -17,16 +17,113 @@ import {
 } from '../constants/menuStyles';
 import type { Agent } from './AgentSelector';
 import { getActiveAgentFromStorage } from './AgentSelector';
-import { applyAgentModelAndSettings } from '../utils/applyAgentServer';
+import { loadAgentModelOnly } from '../utils/applyAgentServer';
 import { persistAgentMcpConfig } from '../utils/applyAgentMcp';
-import { MODEL_SETTINGS_DEFAULT } from '../constants/modelSettingsStyles';
+import { clearActiveAgent } from '../utils/clearActiveAgent';
+import ChatGearAgentReindexHint from './ChatGearAgentReindexHint';
 
 const STORAGE_AGENT_ID = 'active_agent_id';
 const STORAGE_AGENT_NAME = 'active_agent_name';
 const STORAGE_AGENT_PROMPT = 'active_agent_prompt';
 
-interface ChatGearGalleryAgentsTabProps {
+interface GalleryAgentMenuItemProps {
+  agent: Agent;
+  activeAgent: ReturnType<typeof getActiveAgentFromStorage>;
+  isLoadingModel: boolean;
+  loadingAgentId: number | null;
   isDarkMode: boolean;
+  dropdownItemSx: ReturnType<typeof getDropdownItemSx>;
+  mutedTextColor: string;
+  iconColor: string;
+  subtleColor: string;
+  onSelect: (agent: Agent) => void;
+  onRemove: (agent: Agent, e: React.MouseEvent) => void;
+}
+
+function GalleryAgentMenuItem({
+  agent,
+  activeAgent,
+  isLoadingModel,
+  loadingAgentId,
+  isDarkMode,
+  dropdownItemSx,
+  mutedTextColor,
+  iconColor,
+  subtleColor,
+  onSelect,
+  onRemove,
+}: GalleryAgentMenuItemProps) {
+  return (
+    <Box
+      onClick={() => {
+        if (!isLoadingModel) onSelect(agent);
+      }}
+      sx={{
+        ...dropdownItemSx,
+        display: 'flex',
+        alignItems: 'center',
+        gap: 1,
+        color: activeAgent?.id === agent.id ? mutedTextColor : iconColor,
+        fontWeight: activeAgent?.id === agent.id ? 600 : 400,
+        bgcolor:
+          activeAgent?.id === agent.id
+            ? isDarkMode
+              ? 'rgba(255,255,255,0.06)'
+              : 'rgba(0,0,0,0.04)'
+            : 'transparent',
+        borderRadius: 1,
+        py: 0.75,
+        px: 0.75,
+        opacity: isLoadingModel ? 0.6 : 1,
+        pointerEvents: isLoadingModel ? 'none' : 'auto',
+        cursor: 'pointer',
+      }}
+    >
+      <AgentIcon sx={{ fontSize: 18, color: iconColor, flexShrink: 0 }} />
+      <Box sx={{ flex: 1, minWidth: 0 }}>
+        <Typography
+          sx={{
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+            fontSize: MENU_ACTION_TEXT_SIZE,
+          }}
+        >
+          {agent.name}
+        </Typography>
+        <Typography
+          sx={{
+            fontSize: '0.65rem',
+            color: subtleColor,
+            lineHeight: 1.2,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          от {agent.author_name || agent.author_id || 'автора'}
+        </Typography>
+      </Box>
+      <ChatGearAgentReindexHint agentId={agent.id} />
+      <Tooltip title="Убрать из галереи">
+        <IconButton
+          size="small"
+          onClick={(e) => onRemove(agent, e)}
+          sx={{ p: 0.25, color: subtleColor, flexShrink: 0 }}
+        >
+          <RemoveIcon sx={{ fontSize: 16 }} />
+        </IconButton>
+      </Tooltip>
+      {loadingAgentId === agent.id ? (
+        <CircularProgress size={14} sx={{ flexShrink: 0, color: 'primary.main' }} />
+      ) : activeAgent?.id === agent.id ? (
+        <CheckIcon sx={{ fontSize: 16, color: 'primary.main', flexShrink: 0 }} />
+      ) : null}
+    </Box>
+  );
+}
+
+interface ChatGearGalleryAgentsTabProps {  isDarkMode: boolean;
   searchQuery: string;
   visible: boolean;
 }
@@ -80,12 +177,8 @@ export default function ChatGearGalleryAgentsTab({
   }, []);
 
   const handleClearAgent = useCallback(() => {
-    localStorage.removeItem(STORAGE_AGENT_ID);
-    localStorage.removeItem(STORAGE_AGENT_NAME);
-    localStorage.removeItem(STORAGE_AGENT_PROMPT);
-    persistAgentMcpConfig(null);
+    clearActiveAgent();
     setActiveAgent(null);
-    window.dispatchEvent(new CustomEvent('agentSelected', { detail: null }));
     showNotification('info', 'Агент снят');
   }, [showNotification]);
 
@@ -136,10 +229,6 @@ export default function ChatGearGalleryAgentsTab({
         .trim()
         .replace(/^1lm-svc:\/\//i, 'llm-svc://')
         .replace(/\s+/g, '');
-      const rawSettings = {
-        ...MODEL_SETTINGS_DEFAULT,
-        ...((cfg.model_settings as Record<string, unknown>) || {}),
-      };
 
       const persistLocal = () => {
         localStorage.setItem(STORAGE_AGENT_ID, String(full.id));
@@ -163,11 +252,7 @@ export default function ChatGearGalleryAgentsTab({
         modelPath ? `Загрузка модели агента «${full.name}»…` : `Применение настроек агента «${full.name}»…`,
       );
       try {
-        const applied = await applyAgentModelAndSettings(token, {
-          system_prompt: full.system_prompt || '',
-          model_path: modelPath || null,
-          model_settings: rawSettings,
-        });
+        const applied = await loadAgentModelOnly(token, modelPath || null);
         if (!applied.ok) {
           showNotification('error', `Агент не активирован: ${applied.message}`);
           return;
@@ -176,8 +261,8 @@ export default function ChatGearGalleryAgentsTab({
         showNotification(
           'success',
           modelPath
-            ? `Агент «${full.name}»: модель загружена, настройки и промпт применены`
-            : `Агент «${full.name}»: настройки и промпт применены (модель в агенте не задана)`,
+            ? `Агент «${full.name}»: модель загружена, промпт и настройки применятся в чате`
+            : `Агент «${full.name}» активирован — промпт и настройки из карточки агента`,
         );
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -241,73 +326,21 @@ export default function ChatGearGalleryAgentsTab({
             {!activeAgent && <CheckIcon sx={{ fontSize: 16, color: 'primary.main', flexShrink: 0 }} />}
           </Box>
           {filteredAgents.map((agent) => (
-            <Box
+            <GalleryAgentMenuItem
               key={agent.id}
-              onClick={() => {
-                if (!isLoadingModel) void handleSelectAgent(agent);
-              }}
-              sx={{
-                ...dropdownItemSx,
-                display: 'flex',
-                alignItems: 'center',
-                gap: 1,
-                color: activeAgent?.id === agent.id ? mutedTextColor : iconColor,
-                fontWeight: activeAgent?.id === agent.id ? 600 : 400,
-                bgcolor:
-                  activeAgent?.id === agent.id
-                    ? isDarkMode
-                      ? 'rgba(255,255,255,0.06)'
-                      : 'rgba(0,0,0,0.04)'
-                    : 'transparent',
-                borderRadius: 1,
-                py: 0.75,
-                px: 0.75,
-                opacity: isLoadingModel ? 0.6 : 1,
-                pointerEvents: isLoadingModel ? 'none' : 'auto',
-              }}
-            >
-              <AgentIcon sx={{ fontSize: 18, color: iconColor, flexShrink: 0 }} />
-              <Box sx={{ flex: 1, minWidth: 0 }}>
-                <Typography
-                  sx={{
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                    fontSize: MENU_ACTION_TEXT_SIZE,
-                  }}
-                >
-                  {agent.name}
-                </Typography>
-                <Typography
-                  sx={{
-                    fontSize: '0.65rem',
-                    color: subtleColor,
-                    lineHeight: 1.2,
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  от {agent.author_name || agent.author_id || 'автора'}
-                </Typography>
-              </Box>
-              <Tooltip title="Убрать из галереи">
-                <IconButton
-                  size="small"
-                  onClick={(e) => void handleRemoveFromGallery(agent, e)}
-                  sx={{ p: 0.25, color: subtleColor, flexShrink: 0 }}
-                >
-                  <RemoveIcon sx={{ fontSize: 16 }} />
-                </IconButton>
-              </Tooltip>
-              {loadingAgentId === agent.id ? (
-                <CircularProgress size={14} sx={{ flexShrink: 0, color: 'primary.main' }} />
-              ) : activeAgent?.id === agent.id ? (
-                <CheckIcon sx={{ fontSize: 16, color: 'primary.main', flexShrink: 0 }} />
-              ) : null}
-            </Box>
-          ))}
-          {!loadingAgents && filteredAgents.length === 0 && !searchQuery.trim() && (
+              agent={agent}
+              activeAgent={activeAgent}
+              isLoadingModel={isLoadingModel}
+              loadingAgentId={loadingAgentId}
+              isDarkMode={isDarkMode}
+              dropdownItemSx={dropdownItemSx}
+              mutedTextColor={mutedTextColor}
+              iconColor={iconColor}
+              subtleColor={subtleColor}
+              onSelect={(a) => void handleSelectAgent(a)}
+              onRemove={(a, e) => void handleRemoveFromGallery(a, e)}
+            />
+          ))}          {!loadingAgents && filteredAgents.length === 0 && !searchQuery.trim() && (
             <Typography
               variant="body2"
               sx={{ color: subtleColor, fontSize: MENU_ACTION_TEXT_SIZE, px: 0.5, py: 1, textAlign: 'center' }}

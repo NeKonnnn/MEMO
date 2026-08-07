@@ -8,9 +8,9 @@ from typing import Annotated, Optional
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 
 from backend.app_state import minio_client, rag_client, get_rag_chunk_index_params, settings
-from backend.auth.jwt_handler import get_current_user
+from backend.auth.jwt_handler import get_current_user, get_optional_user
 from backend.rag_query.semantic_cache import bump_rag_semantic_cache
-from backend.services.user_rag_settings import chunk_params_from_rag_settings, get_user_rag_settings
+from backend.services.user_rag_settings import chunk_params_from_rag_settings, get_entity_rag_settings
 from backend.settings.logging import get_logger
 from backend.settings.logging.errors import logged_suppress
 from backend.settings.service_toggles import is_service_enabled, require_service
@@ -64,6 +64,39 @@ async def project_rag_upload(
             raise HTTPException(status_code=400, detail="Файл пустой")
         fn = file.filename or "unknown"
         ext = os.path.splitext(fn)[1] or ".bin"
+
+        # Модели — до записи в PVC/MinIO, чтобы не оставлять «сирот» при 400.
+        user_id = str(current_user.get("user_id") or "").strip()
+        project_rag = await get_entity_rag_settings("project", project_id)
+        from backend.services.user_rag_settings import (
+            embedding_fields_from_rag_settings,
+            reranker_fields_from_rag_settings,
+        )
+
+        emb_fields = embedding_fields_from_rag_settings(project_rag)
+        if not emb_fields.get("embedding_model"):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Сначала выберите модель эмбеддингов в настройках РАГ для проекта"
+                ),
+            )
+        if bool(project_rag.get("rag_reranking_enabled", True)):
+            rer_fields = reranker_fields_from_rag_settings(project_rag)
+            if not rer_fields.get("reranker_model"):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Сначала выберите модель реранкера в настройках РАГ для проекта"
+                    ),
+                )
+
+        chunk_params = (
+            chunk_params_from_rag_settings(project_rag)
+            if project_rag
+            else get_rag_chunk_index_params()
+        )
+
         file_object_name = None
         project_bucket = None
         if use_rag_pvc():
@@ -97,15 +130,8 @@ async def project_rag_upload(
                     logger.exception("MinIO загрузка project-rag")
                     raise HTTPException(status_code=500, detail=f"MinIO: {e}") from e
         try:
-            # Project RAG: UI-стратегия чанкования из персональных настроек пользователя
-            user_id = str(current_user.get("user_id") or "").strip()
-            user_rag = await (
-                get_user_rag_settings(user_id, "project") if user_id else {}
-            )
-            chunk_params = chunk_params_from_rag_settings(user_rag) if user_rag else get_rag_chunk_index_params()
-            from backend.services.user_rag_settings import (
-                embedding_fields_from_rag_settings,
-            )
+            # Нарезка и модель — из настроек САМОГО проекта: файл должен лечь
+            # теми же параметрами, которыми проект потом будет искать.
             result = await rag_client.project_rag_upload_document(
                 file_bytes=content,
                 filename=fn,
@@ -114,8 +140,13 @@ async def project_rag_upload(
                 minio_bucket=project_bucket if file_object_name else None,
                 owner_user_id=user_id or None,
                 **chunk_params,
-                **embedding_fields_from_rag_settings(user_rag),
+                **emb_fields,
             )
+        except HTTPException:
+            if file_object_name and project_bucket:
+                with logged_suppress(logger):
+                    _delete_rag_source_file(file_object_name, project_bucket)
+            raise
         except Exception as e:
             if file_object_name and project_bucket:
                 with logged_suppress(logger):
@@ -192,12 +223,15 @@ async def project_rag_search(project_id: str, body: dict):
 
 
 @router.delete("/api/projects/{project_id}")
-async def delete_project(project_id: str):
+async def delete_project(
+    project_id: str,
+    current_user: Annotated[Optional[dict], Depends(get_optional_user)] = None,
+):
     """
     Оркестрационное удаление проекта:
     1. Удаляет все RAG-документы из SVC-RAG (Postgres) и PVC/MinIO
     2. Удаляет все диалоги проекта из MongoDB
-    Сам проект хранится во фронтенд-localStorage — там он тоже должен быть удалён
+    3. Удаляет метаданные проекта (инструкции и т.д.) из PostgreSQL
     """
     errors = []
     if rag_client and is_service_enabled("rag"):
@@ -222,4 +256,18 @@ async def delete_project(project_id: str):
     except Exception as e:
         logger.exception("Ошибка удаления MongoDB диалогов проекта")
         errors.append(f"MongoDB: {e}")
+    try:
+        from backend.database.init_db import get_project_repository
+
+        repo = get_project_repository()
+        user_id = str((current_user or {}).get("user_id") or "").strip()
+        if user_id:
+            deleted_meta = await repo.delete(user_id, project_id)
+        else:
+            deleted_meta = await repo.delete_by_id(project_id)
+        if deleted_meta:
+            logger.info("project_id=%s: удалены метаданные проекта из PostgreSQL", project_id)
+    except Exception as e:
+        logger.exception("Ошибка удаления метаданных проекта")
+        errors.append(f"PostgreSQL: {e}")
     return {"ok": len(errors) == 0, "project_id": project_id, "errors": errors}

@@ -5,6 +5,10 @@ app:
   name: "astrachat Frontend"
   version: "1.0.0"
   description: "Frontend service for astrachat"
+  # Интервал опроса /api/llm/status в секундах
+  llm_status_poll_seconds: 3600
+  # Логировать в браузерной консоли каждый poll /api/llm/status
+  llm_status_poll_trace: false
   # Интервал опроса /api/rag/reindex-status в секундах
   rag_reindex_status_poll_seconds: 10
 

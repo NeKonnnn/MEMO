@@ -2,7 +2,6 @@
 Тонкий async-клиент для SVC-RAG.
 """
 
-import asyncio
 import os
 import uuid
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -105,20 +104,20 @@ def _log_backend_rag_strategy_banner(
 ) -> None:
     """Видно в `docker compose logs -f astrachat-backend` без svc-rag."""
     bar = "*" * 72
-    logger.info(bar)
-    logger.info("[astrachat-backend RAG] Использована стратегия в запросе к SVC-RAG: %s", strategy or "(default)")
-    logger.info(
+    logger.debug(bar)
+    logger.debug("[astrachat-backend RAG] Использована стратегия в запросе к SVC-RAG: %s", strategy or "(default)")
+    logger.debug(
         "[astrachat-backend RAG] endpoint=%s k=%s document_id=%s use_reranking=%s", path, k, document_id, use_reranking
     )
-    logger.info("[astrachat-backend RAG] хитов после ответа=%s %s", hits, "(из кэша)" if from_cache else "")
-    logger.info("[astrachat-backend RAG] запрос: %s", query_preview)
+    logger.debug("[astrachat-backend RAG] хитов после ответа=%s %s", hits, "(из кэша)" if from_cache else "")
+    logger.debug("[astrachat-backend RAG] запрос: %s", query_preview)
     if prep_suffix:
-        logger.info("[astrachat-backend RAG] %s", prep_suffix.strip())
-    logger.info(
+        logger.debug("[astrachat-backend RAG] %s", prep_suffix.strip())
+    logger.debug(
         "[astrachat-backend RAG] Реальный пайплайн (косинус / BM25 / реранк / graph) смотрите в логах контейнера svc-rag — блок из %s звёздочек «Использована стратегия поиска».",
         len(bar),
     )
-    logger.info(bar)
+    logger.debug(bar)
 
 
 class RagClient:
@@ -230,15 +229,37 @@ class RagClient:
 
     @staticmethod
     def _parse_hits(resp: Any) -> List[Tuple[str, float, Optional[int], Optional[int]]]:
-        hits = resp.get("hits", []) if isinstance(resp, dict) else []
-        return [
-            (h.get("content", ""), float(h.get("score", 0.0)), h.get("document_id"), h.get("chunk_index")) for h in hits
-        ]
+        """Хиты из ответа SVC-RAG.
 
+        ```cosine``` — сырая косинусная близость чанка, необязательное поле:
+        старый SVC-RAG его не присылает, лексическая стратегия не считает.
+        Едет отдельно от ```score```, потому что тот в шкале стратегии
+        (RRF / логит реранкера), и процент релевантности по нему считать нельзя.
+        """
+        from backend.rag_query.hit_types import RagHit
+
+        hits = resp.get("hits", []) if isinstance(resp, dict) else []
+        out: List[Tuple[str, float, Optional[int], Optional[int]]] = []
+        for h in hits:
+            raw_cosine = h.get("cosine")
+            try:
+                cosine = None if raw_cosine is None else float(raw_cosine)
+            except (TypeError, ValueError):
+                cosine = None
+            out.append(
+                RagHit(
+                    h.get("content", ""),
+                    float(h.get("score", 0.0)),
+                    h.get("document_id"),
+                    h.get("chunk_index"),
+                    cosine,
+                )
+            )
+        return out
+        
     async def _merge_variant_searches(
         self, path: str, base_body: Dict[str, Any], variants: List[str], k: int
     ) -> List[Tuple[str, float, Optional[int], Optional[int]]]:
-        """Параллельный multi-query: варианты ищутся concurrently, hits мержатся по max score."""
         merged: Dict[Tuple[Optional[int], Optional[int]], Tuple[str, float, Optional[int], Optional[int]]] = {}
         order_q: List[str] = []
         for q in [base_body["query"]] + list(variants):
@@ -246,25 +267,14 @@ class RagClient:
             if t and t not in order_q:
                 order_q.append(t)
         vq = base_body.get("vector_query")
-
-        async def _one(idx: int, qtext: str) -> List[Tuple[str, float, Optional[int], Optional[int]]]:
+        for idx, qtext in enumerate(order_q):
             body = {**base_body, "query": qtext}
             if idx > 0 or not vq:
                 body.pop("vector_query", None)
             resp = await self._request(
                 "POST", path, json=body, http_timeout=_svc_rag_search_timeout()
             )
-            return self._parse_hits(resp)
-
-        results = await asyncio.gather(
-            *(_one(idx, qtext) for idx, qtext in enumerate(order_q)),
-            return_exceptions=True,
-        )
-        for res in results:
-            if isinstance(res, BaseException):
-                logger.warning("[RAG] multi-query variant failed: %s", res)
-                continue
-            for tup in res:
+            for tup in self._parse_hits(resp):
                 key = (tup[2], tup[3])
                 prev = merged.get(key)
                 if prev is None or float(tup[1]) > float(prev[1]):
@@ -389,8 +399,8 @@ class RagClient:
             rerank_top_n = 0
         rerank_top_n = max(0, min(rerank_top_n, 64))
         body["use_reranking"] = effective_reranking
-        logger.info(
-            "[RAG-SEARCH] mode=%s strategy=%s k=%s reranking=%s rerank_top_n=%s "
+        logger.debug(
+            "[RAG-SEARCH] mode=%s strategy=%s k=%s reranking=%s rerank_top_n=%s"
             "fix_typos=%s multi_query=%s hyde=%s document_id=%s project_id=%s",
             path,
             strategy,
@@ -698,8 +708,13 @@ class RagClient:
         document_ids: Optional[list] = None,
         embedding_model: Optional[str] = None,
         embedding_provider: Optional[str] = None,
+        agent_id: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """Перечанкировать Базу Знаний (опционально только документы владельца)."""
+        """Перечанкировать Базу Знаний (опционально только документы владельца).
+
+        ```agent_id``` — ключ очереди в svc-rag: у двух агентов одного владельца
+        пересборки идут независимо и не прерывают друг друга.
+        """
         body: Dict[str, Any] = {}
         if chunk_size is not None:
             body["chunk_size"] = int(chunk_size)
@@ -707,11 +722,14 @@ class RagClient:
             body["chunk_overlap"] = int(chunk_overlap)
         if chunking_strategy is not None:
             body["chunking_strategy"] = str(chunking_strategy)
-        from backend.services.memory_rag_env import get_memory_embedding_fields
-
-        body.update(get_memory_embedding_fields())
+        # Модель приходит от вызывающего — из настроек агента. Библиотека тут ни
+        # при чём: её RAG_MEMORY_EMBEDDING_MODEL уводила вектора агентов в чужую
+        # таблицу размерности, пока поиск по агенту смотрел в свою.
+        # Не передана — svc-rag берёт кластерную, как у проектов.
         if owner_user_id:
             body["owner_user_id"] = str(owner_user_id).strip().lower()
+        if agent_id is not None:
+            body["agent_id"] = int(agent_id)
         if document_ids:
             body["document_ids"] = [int(x) for x in document_ids if x is not None]
         if embedding_model:
@@ -893,6 +911,7 @@ class RagClient:
             use_reranking=use_reranking,
             strategy=strategy,
             project_id=project_id,
+            settings_source="project",
         )
 
     async def project_rag_reindex_all(
@@ -901,10 +920,11 @@ class RagClient:
         chunk_overlap: Optional[int] = None,
         chunking_strategy: Optional[str] = None,
         owner_user_id: Optional[str] = None,
+        project_id: Optional[str] = None,
         embedding_model: Optional[str] = None,
         embedding_provider: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Перечанкировать проекты (опционально только документы пользователя)."""
+        """Перечанкировать проекты (один project_id или все проекты пользователя)."""
         body: Dict[str, Any] = {}
         if chunk_size is not None:
             body["chunk_size"] = int(chunk_size)
@@ -914,6 +934,8 @@ class RagClient:
             body["chunking_strategy"] = str(chunking_strategy)
         if owner_user_id:
             body["owner_user_id"] = str(owner_user_id).strip().lower()
+        if project_id:
+            body["project_id"] = str(project_id).strip()
         if embedding_model:
             # Регистр НЕ понижаем: шлюз чувствителен к нему (embed/FRIDA != embed/frida)
             body["embedding_model"] = str(embedding_model).strip()

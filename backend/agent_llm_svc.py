@@ -491,9 +491,12 @@ def ask_agent(
         should_use_llm_svc_direct,
     )
     import httpx
+    from backend.services.user_llm_settings import get_active_model_settings
 
-    eff_max_tokens = max_tokens or (model_settings.get("output_tokens") if model_settings else 1024)
-    eff_temperature = float(temperature if temperature is not None else (model_settings.get("temperature") or 0.7))
+    eff_max_tokens = max_tokens or get_active_model_settings().get("output_tokens") or 1024
+    eff_temperature = float(
+        temperature if temperature is not None else get_active_model_settings().get("temperature") or 0.7
+    )
     eff_system_prompt = merge_context_prompt_into_system(
         system_prompt, model_path=model_path, custom_prompt_id=custom_prompt_id
     )
@@ -538,7 +541,7 @@ def ask_agent(
         else:
             max_tokens = eff_max_tokens
         if temperature is None:
-            temperature = float(model_settings.get("temperature") or 0.7)
+            temperature = eff_temperature
         
         try:
             # Используем llm_client для генерации

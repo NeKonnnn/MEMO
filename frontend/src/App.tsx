@@ -25,6 +25,7 @@ import PrivateRoute from './components/PrivateRoute';
 import SessionTimeoutWatcher from './components/SessionTimeoutWatcher';
 import SessionValidityWatcher from './components/SessionValidityWatcher';
 import LoginPage from './pages/LoginPage';
+import SsoCallbackPage from './pages/SsoCallbackPage';
 import ProfilePage from './pages/ProfilePage';
 import CreationsPage from './pages/CreationsPage';
 import ShareViewPage from './pages/ShareViewPage';
@@ -230,16 +231,17 @@ function App() {
       <LlmStatusBanner />
       <AuthProvider>
         <AppProvider>
-          <SocketProvider>
-            <TabNotificationWatcher />
-            <Router>
+          <Router>
             <RagReindexStatusProvider>
               <RagReindexStatusBanner />
-              <SessionTimeoutWatcher />
-              <SessionValidityWatcher />
-              <Routes>
+              <SocketProvider>
+                <TabNotificationWatcher />
+                <SessionTimeoutWatcher />
+                <SessionValidityWatcher />
+                <Routes>
                 {/* Публичный маршрут для логина */}
                 <Route path="/login" element={<LoginPage />} />
+                <Route path="/login/sso-callback" element={<SsoCallbackPage />} />
                 
                 {/* Публичный маршрут для просмотра публичных ссылок */}
                 <Route path="/share/:shareId" element={<ShareViewPage />} />
@@ -339,10 +341,10 @@ function App() {
                     </PrivateRoute>
                   }
                 />
-              </Routes>
+                </Routes>
+              </SocketProvider>
             </RagReindexStatusProvider>
-            </Router>
-          </SocketProvider>
+          </Router>
         </AppProvider>
       </AuthProvider>
     </ThemeProvider>

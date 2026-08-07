@@ -27,8 +27,6 @@ from app.services.stage_timer import StageTimer
 
 logger = get_logger(__name__)
 
-_project_reindex_generation = 0
-
 
 def _doc_actors(doc):
     """(owner, uploader, filename) из документа. Принимает и объект, и dict."""
@@ -49,13 +47,27 @@ def _doc_actors(doc):
     return owner, uploader, name
 
 
-def bump_project_reindex_generation() -> int:
-    global _project_reindex_generation
-    _project_reindex_generation += 1
-    return _project_reindex_generation
+def bump_project_reindex_generation(key: str = "*") -> int:
+    """Новое поколение реиндекса проектов — сигнал проходу ЭТОГО ключа прерваться.
 
-def current_project_reindex_generation() -> int:
-    return _project_reindex_generation
+    Ключ — конкретный проект (``project:<pid>``, ``owner:<uid>``) либо ``*`` для
+    кластерного прогона. Раньше счётчик был один на сервис, и пересборка одного
+    проекта прерывала пересборку другого на полпути.
+    """
+    from app.services.reindex_queue import project_queue
+
+    return project_queue.bump(key)
+
+def current_project_reindex_generation(key: str = "*") -> int:
+    from app.services.reindex_queue import project_queue
+
+    return project_queue.current(key)
+
+def project_generation_is_current(key: str, generation: Optional[int]) -> bool:
+    """Актуален ли проход. ``generation=None`` — прерывание не запрашивалось."""
+    from app.services.reindex_queue import project_queue
+
+    return project_queue.is_current(key, generation)
 
 
 class ProjectRagService:
@@ -417,6 +429,7 @@ class ProjectRagService:
         chunk_overlap: Optional[int] = None,
         chunking_strategy: Optional[str] = None,
         generation: Optional[int] = None,
+        generation_key: str = "*",
         model: Optional[str] = None,
         provider: Optional[str] = None,
         route=None,
@@ -438,11 +451,12 @@ class ProjectRagService:
         n_chunks = 0
         n_errors = 0
         for d in docs:
-            if generation is not None and generation != _project_reindex_generation:
+            if not project_generation_is_current(generation_key, generation):
                 logger.info(
-                    "[REINDEX project] прерван: начат новый реиндекс (gen %s→%s)",
+                    "[REINDEX project] %s прерван: начат новый реиндекс этой же сущности (gen %s→%s)",
+                    generation_key,
                     generation,
-                    _project_reindex_generation,
+                    current_project_reindex_generation(generation_key),
                 )
                 break
             try:
@@ -491,6 +505,7 @@ class ProjectRagService:
         chunk_overlap: Optional[int] = None,
         chunking_strategy: Optional[str] = None,
         generation: Optional[int] = None,
+        generation_key: str = "*",
         owner_user_id: Optional[str] = None,
         model: Optional[str] = None,
         provider: Optional[str] = None,
@@ -519,11 +534,12 @@ class ProjectRagService:
             total_errors = 0
             seen_projects: set = set()
             for d in docs:
-                if generation is not None and generation != _project_reindex_generation:
+                if not project_generation_is_current(generation_key, generation):
                     logger.info(
-                        "[REINDEX project OWNER] прерван: начат новый реиндекс (gen %s→%s)",
+                        "[REINDEX project OWNER] %s прерван: начат новый реиндекс этой же сущности (gen %s→%s)",
+                        generation_key,
                         generation,
-                        _project_reindex_generation,
+                        current_project_reindex_generation(generation_key),
                     )
                     break
                 try:
@@ -574,11 +590,12 @@ class ProjectRagService:
         total_docs = 0
         total_chunks = 0
         for pid in project_ids:
-            if generation is not None and generation != _project_reindex_generation:
+            if not project_generation_is_current(generation_key, generation):
                 logger.info(
-                    "[REINDEX project ALL] прерван: начат новый реиндекс (gen %s→%s)",
+                    "[REINDEX project ALL] %s прерван: начат новый реиндекс этой же сущности (gen %s→%s)",
+                    generation_key,
                     generation,
-                    _project_reindex_generation,
+                    current_project_reindex_generation(generation_key),
                 )
                 break
             try:
@@ -588,6 +605,7 @@ class ProjectRagService:
                     chunk_overlap=chunk_overlap,
                     chunking_strategy=chunking_strategy,
                     generation=generation,
+                    generation_key=generation_key,
                     route=(prof, repo),
                 )
                 total_docs += r["documents"]

@@ -23,7 +23,6 @@ def _rag_env_flag(name: str, default: bool) -> bool:
         return default
     return raw in ("1", "true", "yes", "on")
 
-
 def memory_rag_enabled() -> bool:
     """Глобальный выключатель Библиотеки: ```RAG_MEMORY_ENABLED=0```
 
@@ -206,12 +205,38 @@ async def rag_reindex_blocks_active_sources(
     return False
 
 
+def _entity_titles(active: Optional[list]) -> list:
+    """«агента «Юрист»» / «проекта «Отчётность»» — по одной строке на сущность."""
+    out: list = []
+    for item in active or []:
+        if not isinstance(item, dict):
+            continue
+        kind = "агента" if str(item.get("scope") or "") == "agent" else "проекта"
+        name = str(item.get("name") or "").strip()
+        eid = str(item.get("entity_id") or "").strip()
+        title = f"{kind} «{name}»" if name else f"{kind} {eid}".strip()
+        if title not in out:
+            out.append(title)
+    return out
+
+
 def build_reindex_status_message(
     *,
     memory_reindexing: bool,
     project_reindexing: bool,
     kb_reindexing: bool,
+    active: Optional[list] = None,
 ) -> str:
+    # Пересобирается конкретная сущность — называем её: плашка видна всем, кто с
+    # ней работает, и «идёт перечанковка базы знаний агента» без имени в такой
+    # ситуации не отвечает на вопрос «какого именно».
+    titles = _entity_titles(active)
+    if titles and not memory_reindexing:
+        stores = titles[0] if len(titles) == 1 else ", ".join(titles[:-1]) + f" и {titles[-1]}"
+        return (
+            f"Идёт пересборка {stores}. "
+            "Поиск по ним временно недоступен — дождитесь завершения, иначе ответ может быть «Не знаю»."
+        )
     parts: list[str] = []
     if memory_reindexing:
         parts.append("Библиотеки")
@@ -233,8 +258,11 @@ def build_reindex_status_message(
     )
 
 
-def rag_guard_env() -> Tuple[float, bool]:
+def rag_guard_env(scope: Optional[str] = None) -> Tuple[float, bool]:
     """(min_similarity, block_on_no_evidence).
+
+    ``scope`` — стор, чьи хиты фильтруем: "agent" или "project". Порог теперь
+    у каждой сущности свой, и общий на оба стора обрезал бы выдачу не тем числом.
 
     ВАЖНО: по умолчанию backend НЕ отсекает по score (min_sim=0), потому что SVC-RAG уже
     применил ``min_vector_similarity`` + rescue top-N, и результат может быть в разных
@@ -250,7 +278,7 @@ def rag_guard_env() -> Tuple[float, bool]:
     try:
         from backend.services.user_rag_settings import runtime_rag_similarity_threshold
 
-        min_sim = float(runtime_rag_similarity_threshold())
+        min_sim = float(runtime_rag_similarity_threshold(scope))
     except Exception:
         logger.exception("RAG similarity threshold runtime read")
         min_sim = None
@@ -292,7 +320,7 @@ def filter_rag_hits_by_score(
     if not out and raw_scores:
         mx = max(raw_scores)
         if mx < min_score and mx < 0.0:
-            logger.info(
+            logger.debug(
                 "[RAG] Порог RAG_MIN_SIMILARITY=%s не применён: шкала похожа на реранк (max score=%.4f < 0). Оставляем хиты как отдал SVC-RAG; при необходимости задайте RAG_RERANK_MIN_SCORE в svc-rag.",
                 min_score,
                 mx,
@@ -306,14 +334,14 @@ def filter_rag_hits_by_score(
             rescue = max(4, min(rescue, 24))
             ranked = sorted([h for h in hits if len(h) > 1], key=lambda h: float(h[1]), reverse=True)
             if ranked:
-                logger.info(
+                logger.debug(
                     "[RAG] max score=%.4f < RAG_MIN_SIMILARITY=%s — спасение recall: топ-%s чанков.",
                     mx,
                     min_score,
                     rescue,
                 )
                 return ranked[:rescue]
-        logger.info(
+        logger.debug(
             "[RAG] Все %s хитов отсечены порогом RAG_MIN_SIMILARITY=%s (макс. score до фильтра: %.4f). Уменьшите RAG_MIN_SIMILARITY в окружении, если ответы есть в документах, но контекст пуст.",
             len(hits),
             min_score,
@@ -336,9 +364,17 @@ def _format_single_fragment(
     title = rag_document_label(doc_id, id_to_name)
     if include_chunk_meta:
         try:
-            from backend.rag_query.relevance import score_to_relevance_percent
+            from backend.rag_query.relevance import (
+                relevance_percent_or_none,
+                score_to_relevance_percent,
+            )
 
-            sc_pct = score_to_relevance_percent(score)
+            # По сырому cosine, если он доехал из SVC-RAG: score здесь может
+            # быть в шкале стратегии (RRF / логит реранкера), и процент по нему
+            # ввёл бы модель в заблуждение.
+            sc_pct = relevance_percent_or_none(row)
+            if sc_pct is None:
+                sc_pct = score_to_relevance_percent(score)
         except Exception:
             sc_pct = 1
         return f"Фрагмент {number} (документ «{title}», чанк {chunk_idx}, релевантность: {sc_pct}%):\n{content}\n"
@@ -464,7 +500,7 @@ def format_rag_fragments(
     metrics["dropped"] = max(0, len(indexed) - used_count)
     metrics["total_chars"] = total
     metrics["documents_in_prompt"] = len(selected_doc_ids)
-    logger.info(
+    logger.debug(
         "[RAG/fragments] store=%s: получено=%d, попало_в_промпт_целиком=%d, документов_в_промпт=%d/%d, последний_обрезан=%d, отброшено_после_лимита=%d, длина=%d/%d",
         store_label,
         metrics["received"],
@@ -518,9 +554,14 @@ def _log_selected_chunks(
             mark = "▲"  # попал, но обрезан по бюджету
         title = id_to_name.get(d_id, f"doc*{d_id}") if d_id is not None else "?"
         preview = " ".join(str(content or "").split())[:80]
+        # score — в шкале отработавшей стратегии, cosine — абсолютная близость.
+        # Рядом видно и то, и другое: иначе по логу не понять, был ли чанк
+        # действительно похож на запрос или просто оказался высоко по рангу.
+        cos = getattr(row, "cosine", None)
+        cos_text = "cos=н/д  " if cos is None else f"cos={float(cos):.4f}"
         lines.append(
-            f"    {mark} фрагмент {num:>2}  score={float(score or 0):.4f}  "
-            f"чанк {chunk_idx}  «{title}»  {preview}…"
+            f"{mark} фрагмент {num:>2}  score={float(score or 0):.4f}"
+            f"{cos_text}чанк {chunk_idx}  «{title}»  {preview}…"
         )
     logger.debug(
         "[RAG/выбор] store=%s: что ушло в CONTEXT (✓ целиком, ▲ обрезан, ✗ не поместился):\n%s",

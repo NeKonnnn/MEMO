@@ -1,27 +1,41 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   Box,
   Typography,
   Popover,
   Tooltip,
   CircularProgress,
+  FormControl,
+  InputLabel,
+  OutlinedInput,
+  InputAdornment,
+  IconButton,
 } from '@mui/material';
+import type { SxProps, Theme } from '@mui/material';
 import {
   Search as SearchIcon,
   ExpandMore as ExpandMoreIcon,
   ChevronRight as ChevronRightIcon,
   Computer as ComputerIcon,
   Check as CheckIcon,
+  HelpOutline as HelpOutlineIcon,
 } from '@mui/icons-material';
 import { useAppActions } from '../contexts/AppContext';
 import { getApiUrl, getAuthFetchHeaders } from '../config/api';
 import {
   getDropdownItemSx,
-  DROPDOWN_CHEVRON_SX,
+  getDropdownChevronSx,
   getDropdownPanelSx,
   getMenuColors,
   MENU_ACTION_TEXT_SIZE,
+  getCategoryFieldSx,
+  flattenSx,
+  AGENT_CONSTRUCTOR_FIELD_INPUT_PROPS,
+  AGENT_CONSTRUCTOR_OUTLINED_INPUT_SX,
 } from '../constants/menuStyles';
+import {
+  MODEL_SETTINGS_HELP_ICON_BUTTON_SX,
+} from '../constants/modelSettingsStyles';
 
 export type RagModelKind = 'embedding' | 'reranker';
 
@@ -43,6 +57,25 @@ interface RagModelSelectorProps {
   onModelSelect?: (modelPath: string) => void;
   /** Для каждого стора выбирается модель: проекты | агенты. У них свои модели. */
   scope?: 'project' | 'agent';
+  /** Конкретный проект/агент — подсветка выбранной модели из его настроек. */
+  entityId?: string | number | null;
+  onResolveEntityId?: () => string | number | Promise<string | number>;
+  /** Плавающая подпись поля (как «Категория» в конструкторе агента). */
+  label?: string;
+  /** Подсказка у иконки «?» рядом с подписью. */
+  helpTooltip?: string;
+  /**
+   * Не вызывать API сразу: только обновить UI и onModelSelect.
+   * Применение (POST /api/rag/models/select) — снаружи по «Сохранить».
+   */
+  deferApply?: boolean;
+  /** Стили поля-триггера (как «Категория» в конструкторе агента). */
+  fieldSx?: SxProps<Theme>;
+  /**
+   * Путь из черновика родителя. Важнее cluster/current с сервера —
+   * иначе после «Применить» и повторного открытия снова «Выбрать эмбеддинг».
+   */
+  preferredPath?: string | null;
 }
 
 const SOURCE_LABELS: Record<string, string> = {
@@ -72,6 +105,13 @@ export default function RagModelSelector({
   triggerMaxWidth = 220,
   onModelSelect,
   scope = 'project',
+  entityId,
+  onResolveEntityId,
+  label,
+  helpTooltip,
+  deferApply = false,
+  fieldSx: fieldSxProp,
+  preferredPath = null,
 }: RagModelSelectorProps) {
   const [models, setModels] = useState<RagModelRow[]>([]);
   const [selectedPath, setSelectedPath] = useState('');
@@ -83,11 +123,27 @@ export default function RagModelSelector({
   const [modelSearch, setModelSearch] = useState('');
   const [sourcesSubmenuOpen, setSourcesSubmenuOpen] = useState(false);
   const [activeSource, setActiveSource] = useState<string | null>(null);
+  const outlinedRef = useRef<HTMLDivElement>(null);
   const { showNotification } = useAppActions();
 
   const { menuItemColor, menuItemHover, menuDividerBorder } = getMenuColors(isDarkMode);
   const windowSx = { ...getDropdownPanelSx(isDarkMode) } as Record<string, unknown>;
   const dropdownItemSx = useMemo(() => getDropdownItemSx(isDarkMode), [isDarkMode]);
+  const dropdownChevronSx = useMemo(() => getDropdownChevronSx(isDarkMode), [isDarkMode]);
+  const fieldSx = useMemo(
+    () =>
+      flattenSx(fieldSxProp ?? getCategoryFieldSx(isDarkMode), {
+        flex: 1,
+        minWidth: 0,
+        maxWidth: triggerMaxWidth ?? '100%',
+        opacity: disabled || isSelecting ? 0.9 : 1,
+        pointerEvents: disabled ? 'none' : 'auto',
+        '& .MuiOutlinedInput-root': {
+          cursor: disabled || isSelecting ? 'default' : 'pointer',
+        },
+      }),
+    [fieldSxProp, isDarkMode, triggerMaxWidth, disabled, isSelecting],
+  );
   const iconColor = isDarkMode ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.6)';
   const mutedTextColor = isDarkMode ? 'rgba(255,255,255,0.9)' : 'rgba(0,0,0,0.85)';
   const placeholderColor = isDarkMode ? 'rgba(255,255,255,0.3)' : 'rgba(0,0,0,0.35)';
@@ -96,9 +152,22 @@ export default function RagModelSelector({
   const loadModels = useCallback(async () => {
     try {
       setLoadingModels(true);
-      const response = await fetch(getApiUrl(`/api/rag/models?type=${kind}&scope=${scope}`), 
-      { headers: getAuthFetchHeaders() },
-    );
+      let resolvedEntityId = entityId;
+      if ((resolvedEntityId == null || resolvedEntityId === '') && onResolveEntityId) {
+        resolvedEntityId = await Promise.resolve(onResolveEntityId());
+      }
+      const entityQuery =
+        scope === 'project'
+          ? resolvedEntityId != null && resolvedEntityId !== ''
+            ? `&project_id=${encodeURIComponent(String(resolvedEntityId))}`
+            : ''
+          : resolvedEntityId != null && resolvedEntityId !== ''
+            ? `&agent_id=${encodeURIComponent(String(resolvedEntityId))}`
+            : '';
+      const response = await fetch(
+        getApiUrl(`/api/rag/models?type=${kind}&scope=${scope}${entityQuery}`),
+        { headers: getAuthFetchHeaders() },
+      );
       if (!response.ok) return;
       const data = await response.json();
       const rows: RagModelRow[] = (data?.models?.[kind] ?? []).filter(
@@ -113,7 +182,10 @@ export default function RagModelSelector({
       );
       const current = data?.current?.[kind];
       const clusterDefault = data?.cluster_default?.[kind];
-      if (current?.path) {
+      const preferred = String(preferredPath || '').trim();
+      if (preferred) {
+        setSelectedPath(preferred);
+      } else if (current?.path) {
         setSelectedPath(current.path);
       } else if (clusterDefault?.path) {
         setSelectedPath(String(clusterDefault.path));
@@ -123,13 +195,17 @@ export default function RagModelSelector({
     } finally {
       setLoadingModels(false);
     }
-    // scope в зависимостях: при переключении "Проекты / Агенты" подсветка
-    // выбранной модели должна перечитаться - у сторов свои модели.
-  }, [kind, scope]);
+    // scope / entity в зависимостях: при смене подсветка выбранной модели перечитывается.
+  }, [kind, scope, entityId, onResolveEntityId, preferredPath]);
 
   useEffect(() => {
     loadModels();
   }, [loadModels]);
+
+  useEffect(() => {
+    const preferred = String(preferredPath || '').trim();
+    if (preferred) setSelectedPath(preferred);
+  }, [preferredPath]);
 
   const getDisplayName = useCallback(
     (path: string) => {
@@ -167,9 +243,9 @@ export default function RagModelSelector({
     );
   }, [sources, activeSource, modelSearch]);
 
-  const handleOpen = (event: React.MouseEvent<HTMLElement>) => {
+  const handleOpen = () => {
     if (disabled || isSelecting) return;
-    setAnchorEl(event.currentTarget);
+    setAnchorEl(outlinedRef.current);
     setModelSearch('');
     if (sources.length > 0) {
       const firstWithSelection = sources.find((s) => s.items.some((m) => m.path === selectedPath));
@@ -189,6 +265,15 @@ export default function RagModelSelector({
       handleClose();
       return;
     }
+
+    // Черновик: меняем только UI, API вызовется при «Сохранить настройки».
+    if (deferApply) {
+      setSelectedPath(modelPath);
+      handleClose();
+      onModelSelect?.(modelPath);
+      return;
+    }
+
     const prevPath = selectedPath;
     if (kind === 'embedding') {
       const ok = window.confirm(
@@ -233,6 +318,9 @@ export default function RagModelSelector({
     }
   };
 
+  const fieldLabel =
+    label ?? (kind === 'embedding' ? 'Модель эмбеддингов' : 'Модель реранкера');
+
   const triggerLabel = loadingModelPath
     ? getDisplayName(loadingModelPath)
     : selectedPath
@@ -251,28 +339,6 @@ export default function RagModelSelector({
     bgcolor: active ? menuItemHover : 'transparent',
   });
 
-  const triggerSx = {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 1,
-    px: 1.25,
-    py: 0.75,
-    borderRadius: '10px',
-    bgcolor: isDarkMode ? 'rgba(0,0,0,0.25)' : 'rgba(255,255,255,0.9)',
-    border: isDarkMode ? '1px solid rgba(255,255,255,0.15)' : '1px solid rgba(0,0,0,0.12)',
-    cursor: 'pointer',
-    userSelect: 'none' as const,
-    transition: 'background 0.15s, border-color 0.15s',
-    color: menuItemColor,
-    maxWidth: triggerMaxWidth ?? '100%',
-    width: triggerMaxWidth != null ? `${triggerMaxWidth}px` : '100%',
-    boxSizing: 'border-box' as const,
-    '&:hover': {
-      bgcolor: isDarkMode ? 'rgba(0,0,0,0.35)' : 'rgba(255,255,255,1)',
-      borderColor: isDarkMode ? 'rgba(255,255,255,0.3)' : 'rgba(0,0,0,0.2)',
-    },
-  };
-
   const paperSx = {
     mt: 0.75,
     p: 0,
@@ -287,7 +353,7 @@ export default function RagModelSelector({
 
   if (loadingModels && models.length === 0) {
     return (
-      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, py: 0.5 }}>
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, py: 0.5, maxWidth: '100%', width: '100%' }}>
         <CircularProgress size={16} sx={{ color: subtleColor }} />
         <Typography sx={{ fontSize: MENU_ACTION_TEXT_SIZE, color: subtleColor }}>
           Загрузка моделей…
@@ -298,54 +364,55 @@ export default function RagModelSelector({
 
   if (models.length === 0) {
     return (
-      <Typography sx={{ fontSize: MENU_ACTION_TEXT_SIZE, color: subtleColor }}>
-        Модели {kind === 'embedding' ? 'эмбеддингов' : 'cross-encoder'} недоступны
+      <Typography sx={{ fontSize: MENU_ACTION_TEXT_SIZE, color: subtleColor, maxWidth: '100%', width: '100%' }}>
+        Модели {kind === 'embedding' ? 'эмбеддингов' : 'реранкера'} недоступны
         {offline ? ' (только локальные модели)' : ''}
       </Typography>
     );
   }
 
+  const inputLabelId = `rag-model-${kind}-${scope}`;
+
   return (
-    <Box sx={{ maxWidth: '100%', width: '100%' }}>
-      <Tooltip
-        title={
-          selectedPath
-            ? `${kind === 'embedding' ? 'Эмбеддинг' : 'Cross-encoder'}: ${getDisplayName(selectedPath)}. Наведите на источник в меню`
-            : `Выберите ${kind === 'embedding' ? 'модель эмбеддингов' : 'cross-encoder'}`
-        }
-      >
-        <Box
+    <Box sx={{ maxWidth: '100%', width: '100%', display: 'flex', alignItems: 'center', gap: 0.5 }}>
+      <FormControl variant="outlined" fullWidth size="small" sx={fieldSx}>
+        <InputLabel htmlFor={inputLabelId}>{fieldLabel}</InputLabel>
+        <OutlinedInput
+          ref={outlinedRef}
+          id={inputLabelId}
+          label={fieldLabel}
+          value={triggerLabel}
+          readOnly
+          inputProps={AGENT_CONSTRUCTOR_FIELD_INPUT_PROPS}
+          sx={AGENT_CONSTRUCTOR_OUTLINED_INPUT_SX}
           onClick={isSelecting ? undefined : handleOpen}
-          sx={{
-            ...triggerSx,
-            cursor: disabled || isSelecting ? 'default' : 'pointer',
-            opacity: disabled || isSelecting ? 0.9 : 1,
-            pointerEvents: disabled ? 'none' : 'auto',
-          }}
-        >
-          <ComputerIcon sx={{ fontSize: '1.1rem', color: mutedTextColor, flexShrink: 0 }} />
-          <Typography
-            sx={{
-              fontSize: MENU_ACTION_TEXT_SIZE,
-              fontWeight: 500,
-              flex: 1,
-              minWidth: 0,
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
-            }}
+          endAdornment={
+            <InputAdornment position="end">
+              {isSelecting ? (
+                <CircularProgress size={16} sx={{ color: mutedTextColor }} />
+              ) : (
+                <ExpandMoreIcon
+                  sx={{
+                    ...dropdownChevronSx,
+                    transform: anchorEl ? 'rotate(180deg)' : 'none',
+                  }}
+                />
+              )}
+            </InputAdornment>
+          }
+        />
+      </FormControl>
+      {helpTooltip ? (
+        <Tooltip title={helpTooltip} arrow>
+          <IconButton
+            size="small"
+            sx={MODEL_SETTINGS_HELP_ICON_BUTTON_SX}
+            aria-label={`Справка: ${fieldLabel}`}
           >
-            {triggerLabel}
-          </Typography>
-          {isSelecting ? (
-            <CircularProgress size={16} sx={{ color: mutedTextColor, flexShrink: 0 }} />
-          ) : (
-            <ExpandMoreIcon
-              sx={{ ...DROPDOWN_CHEVRON_SX, transform: anchorEl ? 'rotate(180deg)' : 'none', flexShrink: 0 }}
-            />
-          )}
-        </Box>
-      </Tooltip>
+            <HelpOutlineIcon fontSize="small" color="action" />
+          </IconButton>
+        </Tooltip>
+      ) : null}
 
       <Popover
         open={Boolean(anchorEl)}

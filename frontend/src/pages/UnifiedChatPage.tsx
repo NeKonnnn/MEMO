@@ -69,7 +69,7 @@ import type { SxProps, Theme } from '@mui/material/styles';
 import { useTheme, alpha } from '@mui/material/styles';
 import { useAppContext, useAppActions, Message, MultiLLMResponseSlot } from '../contexts/AppContext';
 import { useSocket } from '../contexts/SocketContext';
-import { getApiUrl, getWsUrl, API_ENDPOINTS } from '../config/api';
+import { getApiUrl, getWsUrl, API_ENDPOINTS, getAuthFetchHeaders } from '../config/api';
 import MessageRenderer from '../components/MessageRenderer';
 import { DocumentSearchPanel } from '../components/DocumentSearchPanel';
 import { useNavigate } from 'react-router-dom';
@@ -83,6 +83,7 @@ import {
   buildOversizedInlineAttachMessage,
   buildUnsupportedInlineAttachMessage,
   isInlineAttachSizeErrorMessage,
+  INLINE_ATTACH_ACCEPT,
 } from '../utils/inlineAttachmentRules';
 import TopErrorBanner from '../components/TopErrorBanner';
 import { logChatAttach, logChatAttachError } from '../utils/chatAttachDebug';
@@ -108,10 +109,12 @@ import type { MessageExportFormat } from '../utils/exportMessageContent';
 import type { MessageFeedback } from '../constants/messageFeedback';
 import { useMyAgentSelection, useOrchestratorAgentsAnyActive } from '../hooks/useChatInputAgentIndicators';
 import { useRagReindexStatus } from '../hooks/useRagReindexStatus';
+import { usePendingAgentConstructorOpen } from '../hooks/usePendingAgentConstructorOpen';
 import {
   MEMORY_RAG_DISABLED_HINT,
   RAG_REINDEX_BLOCK_PLACEHOLDER,
 } from '../utils/ragReindexBlock';
+import { clearActiveAgent } from '../utils/clearActiveAgent';
 import { useChatContextUsage } from '../hooks/useChatContextUsage';
 import { useChatInputMcpIndicators } from '../mcp/hooks/useChatInputMcpIndicators';
 import { useMcpStreamingTools } from '../mcp/hooks/useMcpStreamingTools';
@@ -127,7 +130,11 @@ import {
   estimateLibraryClusterWidthPx,
   getToolsButtonInsetSp,
 } from '../components/chatInputLayout';
-import { getSidebarPanelBackground } from '../constants/sidebarPanelColor';
+import {
+  getSidebarPanelBackground,
+  getSidebarChromeSx,
+  getSidebarForcedContrastSx,
+} from '../constants/sidebarPanelColor';
 import { getWorkZoneBackgroundColor, getWorkZoneCustomImage, isWorkZoneAnimatedMode } from '../constants/workZoneBackground';
 import { useWorkZoneBgMode } from '../hooks/useWorkZoneBgMode';
 import WorkZoneStarrySky from '../components/WorkZoneStarrySky';
@@ -305,6 +312,21 @@ function extractReasoningBlock(
     reasoningContent: reasoningParts.length > 0 ? reasoningParts.join('\n\n') : null,
     isThinkingStreaming,
   };
+}
+
+function getStreamingAssistantVisibleContent(message: Message): string {
+  if (
+    message.alternativeResponses &&
+    message.alternativeResponses.length > 0 &&
+    message.currentResponseIndex !== undefined
+  ) {
+    const ci = message.currentResponseIndex;
+    if (ci >= 0 && ci < message.alternativeResponses.length) {
+      const alt = message.alternativeResponses[ci];
+      if (alt !== undefined) return alt;
+    }
+  }
+  return message.content || '';
 }
 
 interface AgentStatus {
@@ -1635,13 +1657,19 @@ export default function UnifiedChatPage({
     return () => window.removeEventListener('astra_pause_chat_autoscroll', onPauseAutoScroll);
   }, []);
 
+  const openConstructorSidebar = useCallback(() => {
+    startTransition(() => {
+      setRightSidebarHidden(false);
+      setRightSidebarOpen(true);
+      setAgentConstructorOpen(true);
+    });
+  }, []);
+
+  usePendingAgentConstructorOpen(openConstructorSidebar);
+
   useEffect(() => {
     const onAgent = () => {
-      startTransition(() => {
-        setRightSidebarHidden(false);
-        setRightSidebarOpen(true);
-        setAgentConstructorOpen(true);
-      });
+      openConstructorSidebar();
     };
     const onTranscription = () => {
       startTransition(() => {
@@ -1656,7 +1684,7 @@ export default function UnifiedChatPage({
       window.removeEventListener(ASTRA_OPEN_AGENT_CONSTRUCTOR, onAgent);
       window.removeEventListener(ASTRA_OPEN_TRANSCRIPTION_SIDEBAR, onTranscription);
     };
-  }, []);
+  }, [openConstructorSidebar]);
   // Ref со всеми callback-ами для MessageCard (обновляется перед каждым рендером)
   const messageCardDataRef = useRef<MessageCardData>({} as MessageCardData);
 
@@ -1939,7 +1967,10 @@ export default function UnifiedChatPage({
     if (!lastStreamingAssistant) return true;
     // Генерация картинки: в пузыре уже ImageGenerationPlaceholder — не дублируем «думает...»
     if (lastStreamingAssistant.isImageGenerating) return false;
-    const parsed = extractReasoningBlock(lastStreamingAssistant.content || '', true);
+    // Смотрим и content, и активный alternativeResponses[index]
+    // (при перегенерации UI читает пустой слот, content тоже обнулён).
+    const visible = getStreamingAssistantVisibleContent(lastStreamingAssistant);
+    const parsed = extractReasoningBlock(visible || lastStreamingAssistant.content || '', true);
     if (parsed.reasoningContent?.trim()) return false;
     if (parsed.visibleContent.trim()) return false;
     return true;
@@ -2024,6 +2055,11 @@ export default function UnifiedChatPage({
     }
   }, []);
 
+  const handleClearMyAgent = useCallback(() => {
+    clearActiveAgent();
+    showNotification('info', 'Агент снят');
+  }, [showNotification]);
+
   const libraryInputBadge = useMemo(
     () => (
       <ChatInputStatusCluster
@@ -2032,6 +2068,7 @@ export default function UnifiedChatPage({
         onLibraryToggle={toggleKbRag}
         standardAgentsActive={orchestratorAgentsAnyActive}
         myAgentName={myAgentSelection?.name ?? null}
+        onAgentToggle={myAgentSelection?.name ? handleClearMyAgent : undefined}
         activeMcpServers={activeMcpServers}
         onMcpClick={handleOpenMcpGearPanel}
       />
@@ -2042,6 +2079,7 @@ export default function UnifiedChatPage({
       toggleKbRag,
       orchestratorAgentsAnyActive,
       myAgentSelection?.name,
+      handleClearMyAgent,
       activeMcpServers,
       handleOpenMcpGearPanel,
     ],
@@ -3257,6 +3295,7 @@ export default function UnifiedChatPage({
 
       const response = await fetch(uploadUrl, {
         method: 'POST',
+        headers: getAuthFetchHeaders(),
         body: formData,
       });
 
@@ -3753,7 +3792,7 @@ export default function UnifiedChatPage({
           <input
             ref={fileInputRef}
             type="file"
-            accept=".pdf,.docx,.xlsx,.txt,.jpg,.jpeg,.png,.webp"
+            accept={INLINE_ATTACH_ACCEPT}
             onChange={handleFileSelect}
             style={{ display: 'none' }}
           />
@@ -5085,9 +5124,10 @@ export default function UnifiedChatPage({
           '& .MuiDrawer-paper': {
             width: rightSidebarOpen ? 240 : 64,
             boxSizing: 'border-box',
-            background: rightSidebarPanelBg,
-            borderLeft: '1px solid rgba(255,255,255,0.08)',
-            transition: 'width 0.3s ease',
+            ...getSidebarChromeSx(rightSidebarPanelBg),
+            ...getSidebarForcedContrastSx(rightSidebarPanelBg),
+            borderLeft: '1px solid var(--sidebar-border-color, rgba(255,255,255,0.08))',
+            transition: 'width 0.3s ease, background 0.3s ease, color 0.3s ease',
             overflowX: 'hidden',
             overflowY: 'auto',
             display: 'flex',
@@ -5503,18 +5543,15 @@ export default function UnifiedChatPage({
               }}
               sx={{
                 bgcolor: 'transparent',
-                color: 'white',
-                opacity: 1,
-                width: 40,
-                height: 40,
-                borderRadius: 1,
+                color: 'text.primary',
+                opacity: 0.7,
                 '&:hover': {
                   bgcolor: 'transparent',
                   opacity: 1,
                 },
               }}
             >
-              <ChevronRightIcon sx={{ transform: 'rotate(180deg)' }} />
+              <ChevronLeftIcon />
             </IconButton>
           </Tooltip>
         </Box>

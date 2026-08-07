@@ -8,19 +8,15 @@ import {
   Button,
   IconButton,
   Slider,
-  Switch,
-  FormControlLabel,
   FormControl,
   InputLabel,
   OutlinedInput,
   InputAdornment,
-  Divider,
   Popover,
 } from '@mui/material';
 import {
   ArrowBack as ArrowBackIcon,
-  Refresh as RefreshIcon,
-  ContentCopy as CopyIcon,
+  Restore as RestoreIcon,
   Save as SaveIcon,
   ExpandMore as ExpandMoreIcon,
 } from '@mui/icons-material';
@@ -30,6 +26,9 @@ import {
   DROPDOWN_ITEM_SX,
   DROPDOWN_ITEM_HOVER_BG,
   DROPDOWN_CHEVRON_SX,
+  AGENT_CONSTRUCTOR_SAVE_BUTTON_SX,
+  AGENT_CONSTRUCTOR_RESTORE_BUTTON_SX,
+  AGENT_CONSTRUCTOR_SAVE_ICON_SX,
 } from '../constants/menuStyles';
 import { getSidebarPanelBackground } from '../constants/sidebarPanelColor';
 import ModelSettingsFields from './ModelSettingsFields';
@@ -44,17 +43,10 @@ export interface ModelParamsState {
   topP: number;
   frequencyPenalty: number;
   presencePenalty: number;
-  stopSequences: string[];
-  resendFiles: boolean;
-  imageDetails: number;
-  useResponsesApi: boolean;
-  webSearch: boolean;
-  disableStreaming: boolean;
-  fileTokenLimit: string;
 }
 
 const defaultParams: ModelParamsState = {
-  provider: 'local',
+  provider: '',
   model: '',
   contextTokens: 'Системная',
   outputTokens: 'Системная',
@@ -62,13 +54,6 @@ const defaultParams: ModelParamsState = {
   topP: 1,
   frequencyPenalty: 0,
   presencePenalty: 0,
-  stopSequences: [],
-  resendFiles: false,
-  imageDetails: 0.5,
-  useResponsesApi: false,
-  webSearch: false,
-  disableStreaming: false,
-  fileTokenLimit: 'Системная',
 };
 
 export interface ProviderModelOption {
@@ -91,10 +76,12 @@ interface ModelParametersModalProps {
   /** Тонкая настройка модели (из конструктора агента): при задании показывается блок внутри меню и сохраняется через onSaveModelSettings */
   initialModelSettings?: ModelSettingsState;
   onSaveModelSettings?: (s: ModelSettingsState) => void;
-  /** Каталог моделей с провайдерами (id из config, напр. local). Если задан — провайдер выбирается из реальных подключений, модели фильтруются по провайдеру. */
+  /** Каталог моделей с провайдерами (CORSUR/Phoenix …). Если задан — провайдер выбирается из реальных подключений, модели фильтруются по провайдеру. */
   providerModels?: ProviderModelOption[];
   /** Порядок/список id провайдеров для выпадающего списка. */
   providerIds?: string[];
+  /** Только просмотр (роль «Зритель»): без изменения параметров и без кнопок сохранения. */
+  readOnly?: boolean;
 }
 
 /** Провайдер (первый сегмент пути ``<provider>/<model_id>``). */
@@ -139,9 +126,9 @@ const outlinedSelectSx = {
   '& .MuiFormLabel-asterisk': { color: '#f44336' },
 } as const;
 
-/** Fallback, если /api/llm-providers ещё не ответил. Id должен совпадать с config (microservices.llm.hosts[].id). */
 const PROVIDER_OPTIONS = [
-  { value: 'local', label: 'local' },
+  { value: 'OpenAI', label: 'OpenAI' },
+  { value: 'Local', label: 'Local' },
 ];
 
 function formatModelLabel(path: string) {
@@ -160,12 +147,13 @@ export default function ModelParametersModal({
   onSaveModelSettings,
   providerModels,
   providerIds,
+  readOnly = false,
 }: ModelParametersModalProps) {
   const [params, setParams] = useState<ModelParamsState>({ ...defaultParams, model: currentModel });
-  const [stopInput, setStopInput] = useState('');
   const [providerAnchor, setProviderAnchor] = useState<HTMLElement | null>(null);
   const [modelAnchor, setModelAnchor] = useState<HTMLElement | null>(null);
-  const hasModelSettings = initialModelSettings != null && onSaveModelSettings != null;
+  const hasModelSettings =
+    initialModelSettings != null && (onSaveModelSettings != null || readOnly);
   const [modelSettings, setModelSettings] = useState<ModelSettingsState>(() => ({ ...MODEL_SETTINGS_DEFAULT, ...initialModelSettings }));
 
   // ─── Режим провайдеров (CORSUR / Phoenix …) ──────────────────────────────────
@@ -182,7 +170,9 @@ export default function ModelParametersModal({
                 .filter(Boolean),
             ),
           );
-    return ids.map(id => ({ value: id as string, label: id as string }));
+    return ids
+      .filter(id => String(id).toUpperCase() !== 'SC')
+      .map(id => ({ value: id as string, label: id as string }));
   }, [providerMode, providerModels, providerIds]);
 
   const selectedProvider = params.provider || '';
@@ -208,14 +198,17 @@ export default function ModelParametersModal({
   useEffect(() => {
     if (open) {
       const nextModel = currentModel || (initialParams?.model as string) || '';
+      const derivedProvider = providerMode
+        ? providerOfPath(nextModel || '') || (initialParams?.provider as string) || ''
+        : (initialParams?.provider as string) || '';
+      const provider =
+        String(derivedProvider).toUpperCase() === 'SC' ? '' : derivedProvider;
       setParams(prev => ({
         ...defaultParams,
         ...prev,
         ...initialParams,
         model: nextModel || prev.model,
-        provider: providerMode
-          ? providerOfPath(nextModel || prev.model) || (initialParams?.provider as string) || prev.provider
-          : (initialParams?.provider as string) || prev.provider,
+        provider,
       }));
       if (hasModelSettings && initialModelSettings) {
         setModelSettings({ ...MODEL_SETTINGS_DEFAULT, ...initialModelSettings });
@@ -225,22 +218,19 @@ export default function ModelParametersModal({
   }, [open, currentModel, initialParams, hasModelSettings, initialModelSettings, providerMode]);
 
   const handleReset = () => {
+    if (readOnly) return;
     setParams({ ...defaultParams, model: params.model });
     if (hasModelSettings) setModelSettings({ ...MODEL_SETTINGS_DEFAULT });
   };
 
   const handleSave = () => {
-    onSave(params.model, params);
-    if (hasModelSettings) onSaveModelSettings(modelSettings);
-    onClose();
-  };
-
-  const handleStopKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && stopInput.trim()) {
-      e.preventDefault();
-      setParams(prev => ({ ...prev, stopSequences: [...prev.stopSequences, stopInput.trim()] }));
-      setStopInput('');
+    if (readOnly) {
+      onClose();
+      return;
     }
+    onSave(params.model, params);
+    if (hasModelSettings && onSaveModelSettings) onSaveModelSettings(modelSettings);
+    onClose();
   };
 
   const labelSx = { color: 'rgba(255,255,255,0.85)', fontSize: '0.8rem', mb: 0.5, display: 'block' };
@@ -268,7 +258,10 @@ export default function ModelParametersModal({
                 value={providerOptions.find(o => o.value === params.provider)?.label ?? params.provider}
                 readOnly
                 placeholder="Выберите провайдера"
-                onClick={e => setProviderAnchor(e.currentTarget)}
+                onClick={e => {
+                  if (readOnly) return;
+                  setProviderAnchor(e.currentTarget);
+                }}
                 endAdornment={
                   <InputAdornment position="end">
                     <ExpandMoreIcon
@@ -279,7 +272,7 @@ export default function ModelParametersModal({
               />
             </FormControl>
             <Popover
-              open={Boolean(providerAnchor)}
+              open={!readOnly && Boolean(providerAnchor)}
               anchorEl={providerAnchor}
               onClose={() => setProviderAnchor(null)}
               anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
@@ -329,6 +322,7 @@ export default function ModelParametersModal({
                 placeholder={providerMode && !selectedProvider ? 'Сначала выберите провайдера' : 'Выберите модель'}
                 readOnly
                 onClick={e => {
+                  if (readOnly) return;
                   if (providerMode && !selectedProvider) {
                     setProviderAnchor(e.currentTarget);
                     return;
@@ -346,7 +340,7 @@ export default function ModelParametersModal({
               />
             </FormControl>
             <Popover
-              open={Boolean(modelAnchor)}
+              open={!readOnly && Boolean(modelAnchor)}
               anchorEl={modelAnchor}
               onClose={() => setModelAnchor(null)}
               anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
@@ -392,10 +386,10 @@ export default function ModelParametersModal({
 
           {/* Тонкая настройка модели (при открытии из конструктора агента) */}
           {hasModelSettings && (
-            <Box sx={{ mt: 1 }}>
+            <Box sx={{ mt: 1, pointerEvents: readOnly ? 'none' : 'auto', opacity: readOnly ? 0.85 : 1 }}>
               <ModelSettingsFields
                 value={modelSettings}
-                onChange={setModelSettings}
+                onChange={readOnly ? () => undefined : setModelSettings}
                 accordion
                 darkPanel
                 compact
@@ -408,89 +402,72 @@ export default function ModelParametersModal({
             <>
           <Box>
             <Typography sx={labelSx}>Максимальное количество контекстных токенов</Typography>
-            <TextField size="small" fullWidth value={params.contextTokens} onChange={e => setParams(p => ({ ...p, contextTokens: e.target.value }))} sx={inputSx} />
+            <TextField size="small" fullWidth value={params.contextTokens} disabled={readOnly} onChange={e => setParams(p => ({ ...p, contextTokens: e.target.value }))} sx={inputSx} />
           </Box>
           <Box>
             <Typography sx={labelSx}>Максимальное количество выводимых токенов</Typography>
-            <TextField size="small" fullWidth value={params.outputTokens} onChange={e => setParams(p => ({ ...p, outputTokens: e.target.value }))} sx={inputSx} />
+            <TextField size="small" fullWidth value={params.outputTokens} disabled={readOnly} onChange={e => setParams(p => ({ ...p, outputTokens: e.target.value }))} sx={inputSx} />
           </Box>
 
           <Box sx={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 2, alignItems: 'stretch' }}>
             <Box sx={{ display: 'flex', flexDirection: 'column' }}>
               <Typography sx={{ ...labelSx, minHeight: 28, display: 'flex', alignItems: 'center' }}>Температура — {params.temperature.toFixed(2)}</Typography>
-              <Slider size="small" value={params.temperature} min={0} max={2} step={0.01} onChange={(_, v) => setParams(p => ({ ...p, temperature: v as number }))}
+              <Slider size="small" value={params.temperature} min={0} max={2} step={0.01} disabled={readOnly} onChange={(_, v) => setParams(p => ({ ...p, temperature: v as number }))}
                 sx={{ color: '#2196f3', '& .MuiSlider-thumb': { color: '#2196f3' }, '& .MuiSlider-track': { color: '#2196f3' } }} />
             </Box>
             <Box sx={{ display: 'flex', flexDirection: 'column' }}>
               <Typography sx={{ ...labelSx, minHeight: 28, display: 'flex', alignItems: 'center' }}>Top P — {params.topP.toFixed(2)}</Typography>
-              <Slider size="small" value={params.topP} min={0} max={1} step={0.01} onChange={(_, v) => setParams(p => ({ ...p, topP: v as number }))}
+              <Slider size="small" value={params.topP} min={0} max={1} step={0.01} disabled={readOnly} onChange={(_, v) => setParams(p => ({ ...p, topP: v as number }))}
                 sx={{ color: '#2196f3' }} />
             </Box>
             <Box sx={{ display: 'flex', flexDirection: 'column' }}>
               <Typography sx={{ ...labelSx, minHeight: 28, display: 'flex', alignItems: 'center' }}>Штраф за частоту — {params.frequencyPenalty.toFixed(2)}</Typography>
-              <Slider size="small" value={params.frequencyPenalty} min={0} max={2} step={0.01} onChange={(_, v) => setParams(p => ({ ...p, frequencyPenalty: v as number }))}
+              <Slider size="small" value={params.frequencyPenalty} min={0} max={2} step={0.01} disabled={readOnly} onChange={(_, v) => setParams(p => ({ ...p, frequencyPenalty: v as number }))}
                 sx={{ color: '#2196f3' }} />
             </Box>
             <Box sx={{ display: 'flex', flexDirection: 'column' }}>
               <Typography sx={{ ...labelSx, minHeight: 28, display: 'flex', alignItems: 'center' }}>Штраф за присутствие — {params.presencePenalty.toFixed(2)}</Typography>
-              <Slider size="small" value={params.presencePenalty} min={0} max={2} step={0.01} onChange={(_, v) => setParams(p => ({ ...p, presencePenalty: v as number }))}
+              <Slider size="small" value={params.presencePenalty} min={0} max={2} step={0.01} disabled={readOnly} onChange={(_, v) => setParams(p => ({ ...p, presencePenalty: v as number }))}
                 sx={{ color: '#2196f3' }} />
             </Box>
           </Box>
             </>
           )}
-
-          {/* Stop sequences */}
-          <Box>
-            <Typography sx={labelSx}>Стоп-последовательности</Typography>
-            <TextField size="small" fullWidth placeholder="Разделяйте значения нажатием Enter" value={stopInput} onChange={e => setStopInput(e.target.value)} onKeyDown={handleStopKeyDown} sx={inputSx} />
-          </Box>
-
-          <Divider sx={{ borderColor: 'rgba(255,255,255,0.08)' }} />
-
-          {/* Toggles */}
-          <FormControlLabel
-            control={<Switch checked={params.resendFiles} onChange={e => setParams(p => ({ ...p, resendFiles: e.target.checked }))} sx={{ '& .MuiSwitch-switchBase.Mui-checked': { color: '#2196f3' }, '& .MuiSwitch-track': { bgcolor: 'rgba(255,255,255,0.2)' } }} />}
-            label={<Typography sx={{ color: 'rgba(255,255,255,0.85)', fontSize: '0.85rem' }}>Повторить отправку файлов</Typography>}
-          />
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-            <Typography sx={{ ...labelSx, flex: 1 }}>Детали изображения</Typography>
-            <Slider size="small" value={params.imageDetails} min={0} max={1} step={0.1} sx={{ width: 120, color: '#2196f3' }} onChange={(_, v) => setParams(p => ({ ...p, imageDetails: v as number }))} />
-            <Button size="small" sx={{ color: 'rgba(255,255,255,0.6)', fontSize: '0.75rem', textTransform: 'none' }}>Авто</Button>
-          </Box>
-          <FormControlLabel
-            control={<Switch checked={params.useResponsesApi} onChange={e => setParams(p => ({ ...p, useResponsesApi: e.target.checked }))} sx={{ '& .MuiSwitch-switchBase.Mui-checked': { color: '#2196f3' } }} />}
-            label={<Typography sx={{ color: 'rgba(255,255,255,0.85)', fontSize: '0.85rem' }}>Использовать Responses API</Typography>}
-          />
-          <FormControlLabel
-            control={<Switch checked={params.webSearch} onChange={e => setParams(p => ({ ...p, webSearch: e.target.checked }))} sx={{ '& .MuiSwitch-switchBase.Mui-checked': { color: '#2196f3' } }} />}
-            label={<Typography sx={{ color: 'rgba(255,255,255,0.85)', fontSize: '0.85rem' }}>Веб-поиск</Typography>}
-          />
-          <FormControlLabel
-            control={<Switch checked={params.disableStreaming} onChange={e => setParams(p => ({ ...p, disableStreaming: e.target.checked }))} sx={{ '& .MuiSwitch-switchBase.Mui-checked': { color: '#2196f3' } }} />}
-            label={<Typography sx={{ color: 'rgba(255,255,255,0.85)', fontSize: '0.85rem' }}>Отключить потоковую передачу</Typography>}
-          />
-          <Box>
-            <Typography sx={labelSx}>Ограничение на количество токенов файла</Typography>
-            <TextField size="small" fullWidth value={params.fileTokenLimit} onChange={e => setParams(p => ({ ...p, fileTokenLimit: e.target.value }))} sx={inputSx} />
-          </Box>
         </Box>
 
-      {/* Footer: Reset, Copy, Save */}
-      <Box sx={{ borderTop: '1px solid rgba(255,255,255,0.08)', px: 2, py: 1.5, display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap', flexShrink: 0 }}>
-        <Button size="small" startIcon={<RefreshIcon />} onClick={handleReset}
-          sx={{ color: 'rgba(255,255,255,0.7)', border: '1px solid rgba(255,255,255,0.2)', textTransform: 'none', fontSize: '0.8rem', '&:hover': { borderColor: 'rgba(255,255,255,0.4)', bgcolor: 'rgba(255,255,255,0.06)' } }}>
-          Сбросить параметры модели
+      {/* Footer: Restore + Save */}
+      {!readOnly && (
+      <Box
+        sx={{
+          borderTop: '1px solid rgba(255,255,255,0.08)',
+          px: 2,
+          py: 1.5,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 1,
+          flexShrink: 0,
+        }}
+      >
+        <Button
+          variant="outlined"
+          fullWidth
+          startIcon={<RestoreIcon sx={AGENT_CONSTRUCTOR_SAVE_ICON_SX} />}
+          onClick={handleReset}
+          sx={AGENT_CONSTRUCTOR_RESTORE_BUTTON_SX}
+        >
+          Восстановить настройки
         </Button>
-        <IconButton size="small" sx={{ color: 'rgba(255,255,255,0.5)', '&:hover': { color: 'white', bgcolor: 'rgba(255,255,255,0.08)' } }}>
-          <CopyIcon fontSize="small" />
-        </IconButton>
-        <Box sx={{ flex: 1 }} />
-        <Button variant="contained" startIcon={<SaveIcon />} onClick={handleSave}
-          sx={{ bgcolor: '#26a69a', color: 'white', textTransform: 'none', fontWeight: 600, '&:hover': { bgcolor: '#2dbdb3' } }}>
-          Сохранить
+        <Button
+          variant="contained"
+          fullWidth
+          startIcon={<SaveIcon sx={AGENT_CONSTRUCTOR_SAVE_ICON_SX} />}
+          onClick={handleSave}
+          sx={AGENT_CONSTRUCTOR_SAVE_BUTTON_SX}
+        >
+          Сохранить настройки
         </Button>
       </Box>
+      )}
     </>
   );
 

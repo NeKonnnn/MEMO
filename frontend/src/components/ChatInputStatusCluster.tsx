@@ -16,6 +16,8 @@ export interface ChatInputStatusClusterProps {
   standardAgentsActive: boolean;
   /** Выбран пользовательский агент (Мои агенты) */
   myAgentName: string | null;
+  /** Снять выбранного пользовательского агента (клик по иконке робота) */
+  onAgentToggle?: () => void;
   /** Включённые MCP-серверы для текущего чата */
   activeMcpServers?: ActiveMcpServerIndicator[];
   onMcpClick?: () => void;
@@ -31,6 +33,7 @@ export default function ChatInputStatusCluster({
   onLibraryToggle,
   standardAgentsActive,
   myAgentName,
+  onAgentToggle,
   activeMcpServers = [],
   onMcpClick,
 }: ChatInputStatusClusterProps) {
@@ -56,7 +59,11 @@ export default function ChatInputStatusCluster({
     } else if (standardAgentsActive) {
       parts.push('Включены стандартные агенты (Инструменты → Агенты).');
     } else if (myAgentName) {
-      parts.push(`Активен агент «${myAgentName}» (Мои агенты).`);
+      parts.push(
+        onAgentToggle
+          ? `Активен агент «${myAgentName}». Нажмите на робота, чтобы отключить.`
+          : `Активен агент «${myAgentName}» (Мои агенты).`,
+      );
     }
     if (mcpActive) {
       parts.push(
@@ -64,7 +71,7 @@ export default function ChatInputStatusCluster({
       );
     }
     return parts.join(' ');
-  }, [libraryActive, standardAgentsActive, myAgentName, mcpActive, activeMcpServers]);
+  }, [libraryActive, standardAgentsActive, myAgentName, mcpActive, activeMcpServers, onAgentToggle]);
 
   if (!libraryActive && !agentActive && !mcpActive) return null;
 
@@ -136,6 +143,17 @@ export default function ChatInputStatusCluster({
             ) : null}
             {seg === 'agent' ? (
               <Box
+                component={onAgentToggle && myAgentName ? 'button' : 'div'}
+                type={onAgentToggle && myAgentName ? 'button' : undefined}
+                onClick={
+                  onAgentToggle && myAgentName
+                    ? (e: React.MouseEvent) => {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        onAgentToggle();
+                      }
+                    : undefined
+                }
                 sx={{
                   display: 'flex',
                   alignItems: 'center',
@@ -143,7 +161,14 @@ export default function ChatInputStatusCluster({
                   minWidth: 36,
                   height: 36,
                   px: libraryActive ? 0.5 : 0.75,
+                  border: 'none',
+                  bgcolor: 'transparent',
                   color: 'primary.main',
+                  cursor: onAgentToggle && myAgentName ? 'pointer' : 'default',
+                  '&:hover':
+                    onAgentToggle && myAgentName
+                      ? { bgcolor: alpha(theme.palette.primary.main, 0.12) }
+                      : {},
                 }}
               >
                 <AgentStatusIcon sx={{ fontSize: '1.15rem' }} />

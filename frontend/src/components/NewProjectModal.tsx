@@ -1,7 +1,8 @@
 import React, { useState, useRef, useEffect } from 'react';
 import ProjectRagLibraryInline from './ProjectRagLibraryInline';
-import WorkspacePicker from './WorkspacePicker';
 import RAGSettings from './settings/RAGSettings';
+import { saveEntityRagSettings, type EntityRagDraft } from '../utils/entityRagSettings';
+import { syncProjectCreate } from '../utils/projectsApi';
 import {
   Dialog,
   DialogTitle,
@@ -65,7 +66,6 @@ export interface DraftProjectPayload {
   name: string;
   memory: 'default' | 'project-only';
   instructions: string;
-  workspacePath?: string;
   icon?: string;
   iconType?: 'icon' | 'emoji';
   iconColor?: string;
@@ -75,7 +75,7 @@ interface NewProjectModalProps {
   open: boolean;
   onClose: () => void;
   /** Обычное создание без предварительного черновика (файлы не загружались) */
-  onCreateProject?: (projectData: ProjectData) => void;
+  onCreateProject?: (projectData: ProjectData) => string | void;
   /** Создать проект в состоянии при первой загрузке файла — вернуть id */
   ensureDraftProjectForRag?: (draft: DraftProjectPayload) => string;
   /** Обновить черновик при нажатии «Создать проект» */
@@ -92,7 +92,6 @@ export interface ProjectData {
   category?: string;
   memory: 'default' | 'project-only';
   instructions: string;
-  workspacePath?: string;
 }
 
 const iconOptions = [
@@ -160,7 +159,8 @@ export default function NewProjectModal({
   const [selectedColor, setSelectedColor] = useState('#ffffff');
   const [memory, setMemory] = useState<'default' | 'project-only'>('default');
   const [instructions, setInstructions] = useState('');
-  const [workspacePath, setWorkspacePath] = useState('');
+  /** Черновик настроек РАГ: уезжает в БД вместе с созданием проекта. */
+  const [ragDraft, setRagDraft] = useState<EntityRagDraft | null>(null);
   const [showIconPicker, setShowIconPicker] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [showRagSettingsPanel, setShowRagSettingsPanel] = useState(false);
@@ -201,12 +201,12 @@ export default function NewProjectModal({
     setSelectedColor('#ffffff');
     setMemory('default');
     setInstructions('');
-    setWorkspacePath('');
     setShowIconPicker(false);
     setShowAdvanced(false);
     setShowRagSettingsPanel(false);
     setIconTab(0);
     setRagDraftProjectId(null);
+    setRagDraft(null);
   };
 
   const handleClose = () => {
@@ -221,37 +221,57 @@ export default function NewProjectModal({
     name: projectName.trim(),
     memory,
     instructions: instructions.trim(),
-    workspacePath: workspacePath.trim() || undefined,
     icon: iconType === 'icon' ? selectedIcon || undefined : selectedEmoji || undefined,
     iconType,
     iconColor: selectedColor,
   });
 
-  const handleCreate = () => {
+  const handleCreate = async () => {
     if (!projectName.trim()) return;
     createCompletedRef.current = true;
 
+    const payload = buildDraftPayload();
+    let projectId: string | null = null;
+
     if (ragDraftProjectId && finalizeDraftProject) {
-      finalizeDraftProject(ragDraftProjectId, buildDraftPayload());
+      finalizeDraftProject(ragDraftProjectId, payload);
+      projectId = ragDraftProjectId;
     } else {
       const projectData: ProjectData = {
-        name: projectName.trim(),
-        icon: iconType === 'icon' ? selectedIcon || undefined : selectedEmoji || undefined,
-        iconType,
-        iconColor: selectedColor,
+        name: payload.name,
+        icon: payload.icon,
+        iconType: payload.iconType,
+        iconColor: payload.iconColor,
         category: undefined,
-        memory,
-        instructions: instructions.trim(),
-        workspacePath: workspacePath.trim() || undefined,
+        memory: payload.memory,
+        instructions: payload.instructions,
       };
-      onCreateProject?.(projectData);
+      const createdId = onCreateProject?.(projectData);
+      if (typeof createdId === 'string') {
+        projectId = createdId;
+      }
+    }
+
+    if (projectId) {
+      // Настройки уходят ПОСЛЕ создания: до него id проекта ещё нет. Нужна ли
+      // перечанковка, решает backend — сравнивает индексные поля «до/после».
+      const ragApplied = await saveEntityRagSettings({
+        scope: 'project',
+        entityId: projectId,
+        entityName: payload.name,
+        instructions: payload.instructions,
+        draft: ragDraft,
+      });
+      if (!ragApplied.ok) {
+        console.warn(`[RAG] Проект создан; настройки РАГ не применены: ${ragApplied.message}`);
+      }
     }
 
     resetForm();
     onClose();
   };
 
-  const resolveProjectIdForRag = (): string => {
+  const resolveProjectIdForRag = async (): Promise<string> => {
     if (ragDraftProjectId) return ragDraftProjectId;
     if (!projectName.trim()) {
       throw new Error('Сначала введите название проекта');
@@ -259,8 +279,26 @@ export default function NewProjectModal({
     if (!ensureDraftProjectForRag) {
       throw new Error('Загрузка файлов для нового проекта недоступна');
     }
-    const id = ensureDraftProjectForRag(buildDraftPayload());
+    const payload = buildDraftPayload();
+    const id = ensureDraftProjectForRag(payload);
     setRagDraftProjectId(id);
+    // createProject пишет в Postgres асинхронно; без ожидания PUT RAG settings
+    // получает 403 («не владелец») — настройки «Применить» выглядят потерянными.
+    try {
+      await syncProjectCreate({
+        id,
+        name: payload.name,
+        instructions: payload.instructions,
+        memory: payload.memory,
+        icon: payload.icon,
+        iconType: payload.iconType,
+        iconColor: payload.iconColor,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      console.warn('[RAG] черновик проекта ещё не в БД:', err);
+    }
     return id;
   };
 
@@ -330,8 +368,19 @@ export default function NewProjectModal({
           <RAGSettings
             variant="panel"
             lockedScope="project"
+            entityId={ragDraftProjectId}
+            entityName={projectName.trim() || 'новый проект'}
+            entityInstructionsPrompt={instructions}
+            draft
+            draftValue={ragDraft}
+            onDraftChange={setRagDraft}
+            onResolveEntityId={ensureDraftProjectForRag ? resolveProjectIdForRag : undefined}
             isDarkMode={theme.palette.mode === 'dark'}
-            panelTitle="Настройки РАГ для проектов"
+            panelTitle={
+              projectName.trim()
+                ? `Настройки РАГ: ${projectName.trim()}`
+                : 'Настройки РАГ для проекта'
+            }
             onClose={() => setShowRagSettingsPanel(false)}
           />
         </Box>
@@ -526,7 +575,22 @@ export default function NewProjectModal({
         <Box sx={{ mb: 2 }}>
           <Button
             fullWidth
-            onClick={() => setShowRagSettingsPanel(true)}
+            onClick={() => {
+              if (!projectName.trim()) {
+                window.alert('Сначала введите название проекта');
+                return;
+              }
+              void (async () => {
+                if (ensureDraftProjectForRag && !ragDraftProjectId) {
+                  try {
+                    await resolveProjectIdForRag();
+                  } catch {
+                    return;
+                  }
+                }
+                setShowRagSettingsPanel(true);
+              })();
+            }}
             endIcon={<ExpandMoreIcon />}
             sx={{
               justifyContent: 'space-between',
@@ -534,11 +598,11 @@ export default function NewProjectModal({
               color: 'text.primary',
             }}
           >
-            Настройки РАГ для проектов
+            Настройки РАГ для этого проекта
           </Button>
         </Box>
 
-        {/* Память / инструкции / workspace */}
+        {/* Память / инструкции */}
         <Box sx={{ mb: 2 }}>
           <Button
             fullWidth
@@ -615,22 +679,6 @@ export default function NewProjectModal({
                       color: theme.palette.mode === 'dark' ? 'white' : 'text.primary',
                     },
                   }}
-                />
-              </Box>
-              <Box sx={{ mb: 3 }}>
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
-                  <Typography variant="body2" fontWeight="500">
-                    Workspace (coding agent)
-                  </Typography>
-                  <Tooltip title="Выберите папку из списка — путь к Docker подставится автоматически.">
-                    <InfoIcon sx={{ fontSize: 16, opacity: 0.7 }} />
-                  </Tooltip>
-                </Box>
-                <WorkspacePicker
-                  value={workspacePath}
-                  onChange={setWorkspacePath}
-                  isDarkMode={theme.palette.mode === 'dark'}
-                  showGlobalDefault
                 />
               </Box>
             </Box>

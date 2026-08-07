@@ -54,6 +54,7 @@ import {
   ExpandMore as ExpandMoreIcon,
   Close as CloseIcon,
   FilterList as FilterListIcon,
+  ChevronLeft as ChevronLeftIcon,
   ChevronRight as ChevronRightIcon,
   SmartToy as AgentIcon,
   AutoAwesome as PromptIcon,
@@ -61,7 +62,11 @@ import {
 } from '@mui/icons-material';
 import { getApiUrl, API_ENDPOINTS } from '../config/api';
 import { useAuth } from '../contexts/AuthContext';
-import { getSidebarPanelBackground } from '../constants/sidebarPanelColor';
+import {
+  getSidebarPanelBackground,
+  getSidebarChromeSx,
+  getSidebarForcedContrastSx,
+} from '../constants/sidebarPanelColor';
 import { SIDEBAR_HIDE_SCROLLBAR_SX } from '../constants/menuStyles';
 import SidebarRailMenuGlyph from '../components/SidebarRailMenuGlyph';
 import { useTheme } from '@mui/material/styles';
@@ -1236,12 +1241,19 @@ export default function PromptGalleryPage() {
           '& .MuiDrawer-paper': {
             width: rightSidebarOpen ? 240 : 64,
             boxSizing: 'border-box',
-            background: rightSidebarOpen 
-              ? rightSidebarPanelBg
-              : 'background.default',
-            color: rightSidebarOpen ? 'white' : 'text.primary',
+            ...(rightSidebarOpen
+              ? {
+                  ...getSidebarChromeSx(rightSidebarPanelBg),
+                  ...getSidebarForcedContrastSx(rightSidebarPanelBg),
+                }
+              : {
+                  background: 'background.default',
+                  color: 'text.primary',
+                }),
             borderLeft: '1px solid',
-            borderColor: 'divider',
+            borderColor: rightSidebarOpen
+              ? 'var(--sidebar-border-color, rgba(255,255,255,0.08))'
+              : 'divider',
             transition: 'width 0.3s ease, background 0.3s ease, color 0.3s ease',
             overflowX: 'hidden',
             overflowY: 'auto',
@@ -1483,18 +1495,15 @@ export default function PromptGalleryPage() {
               }}
               sx={{
                 bgcolor: 'transparent',
-                color: 'white',
-                opacity: 1,
-                width: 40,
-                height: 40,
-                borderRadius: 1,
-                boxShadow: 'none',
+                color: 'text.primary',
+                opacity: 0.7,
                 '&:hover': {
                   bgcolor: 'transparent',
+                  opacity: 1,
                 },
               }}
             >
-              <ChevronRightIcon sx={{ transform: 'rotate(180deg)' }} />
+              <ChevronLeftIcon />
             </IconButton>
           </Tooltip>
         </Box>

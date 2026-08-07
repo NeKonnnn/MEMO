@@ -8,6 +8,12 @@ import { mapServerConversationToChat } from '../utils/mapServerConversation';
 import type { MessageFeedback } from '../constants/messageFeedback';
 import type { ChatInputSuggestion } from '../chat/inputSuggestions';
 import { MODEL_SETTINGS_CHANGED_EVENT } from '../utils/contextTokens';
+import {
+  fetchProjectsFromServer,
+  migrateLocalProjectsToServer,
+  syncProjectCreate,
+  syncProjectUpdate,
+} from '../utils/projectsApi';
 
 export type { MessageFeedback };
 
@@ -868,14 +874,31 @@ export function AppProvider({ children }: { children: ReactNode }) {
         console.error('Ошибка загрузки состояния из localStorage:', error);
       }
 
-      if (parsed?.projects?.length > 0) {
-        dispatch({ type: 'RESTORE_PROJECTS', payload: parsed.projects });
-      }
+      const localProjects: Project[] = Array.isArray(parsed?.projects) ? parsed.projects : [];
 
       const effectiveToken = token || localStorage.getItem('auth_token');
       if (effectiveToken) {
         try {
           await initSettings();
+
+          try {
+            let serverProjects = await fetchProjectsFromServer();
+            if (serverProjects.length === 0 && localProjects.length > 0) {
+              await migrateLocalProjectsToServer(localProjects);
+              serverProjects = await fetchProjectsFromServer();
+            }
+            if (serverProjects.length > 0) {
+              dispatch({ type: 'RESTORE_PROJECTS', payload: serverProjects });
+            } else if (localProjects.length > 0) {
+              dispatch({ type: 'RESTORE_PROJECTS', payload: localProjects });
+            }
+          } catch (error) {
+            console.warn('Не удалось загрузить проекты из backend, используем localStorage', error);
+            if (localProjects.length > 0) {
+              dispatch({ type: 'RESTORE_PROJECTS', payload: localProjects });
+            }
+          }
+
           const response = await fetch(getApiUrl('/api/conversations?limit=500'), {
             headers: { Authorization: `Bearer ${effectiveToken}` },
           });
@@ -899,6 +922,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
         } catch (error) {
           console.warn('Не удалось загрузить диалоги из backend, используем localStorage', error);
         }
+      } else if (localProjects.length > 0) {
+        dispatch({ type: 'RESTORE_PROJECTS', payload: localProjects });
       }
 
       if (parsed?.chats?.length > 0) {
@@ -1343,11 +1368,27 @@ export function useAppActions() {
         updatedAt: new Date().toISOString(),
       };
       dispatch({ type: 'CREATE_PROJECT', payload: newProject });
+      const effectiveToken = token || localStorage.getItem('auth_token');
+      if (effectiveToken) {
+        initSettings()
+          .then(() => syncProjectCreate(newProject))
+          .catch((error) => {
+            console.warn(`[projects] не удалось сохранить проект ${projectId} в БД:`, error);
+          });
+      }
       return projectId;
     },
     
     updateProject: (projectId: string, updates: Partial<Project>) => {
       dispatch({ type: 'UPDATE_PROJECT', payload: { projectId, updates } });
+      const effectiveToken = token || localStorage.getItem('auth_token');
+      if (effectiveToken) {
+        initSettings()
+          .then(() => syncProjectUpdate(projectId, updates))
+          .catch((error) => {
+            console.warn(`[projects] не удалось обновить проект ${projectId} в БД:`, error);
+          });
+      }
     },
     
     deleteProject: (projectId: string) => {

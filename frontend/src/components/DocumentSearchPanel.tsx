@@ -293,7 +293,11 @@ export function DocumentSearchPanel({ trace }: { trace: DocumentSearchTrace }) {
                   <strong>Anchor</strong>: {h.anchor}
                 </Typography>
                 <Typography variant="caption" component="div" sx={{ display: 'block' }}>
-                  <strong>Relevance</strong>: {h.relevance}
+                  <strong>Relevance</strong>: {(() => {
+                    const r = Number(h.relevance) || 0;
+                    const pct = r > 0 && r <= 1 ? Math.round(r * 100) : Math.round(r);
+                    return `${Math.max(1, Math.min(100, pct || 1))}%`;
+                  })()}
                   {h.store ? ` (${h.store})` : ''}
                 </Typography>
                 <Typography

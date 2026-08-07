@@ -1,19 +1,35 @@
 import { formatFileSize } from './inlineImage';
 
 export const INLINE_ATTACH_ALLOWED_TYPES_LABEL =
-  'PDF (.pdf), Word (.docx), Excel (.xlsx, .xls), текст (.txt), изображения (.jpg, .jpeg, .png, .webp, .gif)';
+  'PDF (.pdf), Word (.docx, .docm), Excel (.xlsx, .xls, .xlsm), текст (.txt, .md, .log, .rtf), изображения (.jpg, .jpeg, .png, .webp, .gif, .bmp)';
+
+/** Значение атрибута accept для input type=file (inline-вложения). */
+export const INLINE_ATTACH_ACCEPT =
+  '.pdf,.docx,.docm,.xlsx,.xls,.xlsm,.txt,.md,.log,.rtf,.jpg,.jpeg,.png,.webp,.gif,.bmp';
 
 /** Лимит для inline-вложений через «+» (фронт и POST /api/documents/attach). */
 export const INLINE_ATTACHMENT_MAX_BYTES = 50 * 1024 * 1024;
 export const INLINE_ATTACHMENT_MAX_SIZE_MB = 50;
 
-const IMAGE_MIME_TYPES = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'image/gif'];
+const IMAGE_MIME_TYPES = [
+  'image/jpeg',
+  'image/jpg',
+  'image/png',
+  'image/webp',
+  'image/gif',
+  'image/bmp',
+];
 const DOC_MIME_TYPES = [
   'application/pdf',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.ms-word.document.macroEnabled.12',
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.ms-excel.sheet.macroEnabled.12',
   'application/vnd.ms-excel',
   'text/plain',
+  'text/markdown',
+  'application/rtf',
+  'text/rtf',
 ];
 
 export function getInlineAttachmentExtension(filename: string): string {
@@ -24,8 +40,11 @@ export function getInlineAttachmentExtension(filename: string): string {
 }
 
 export function isInlineAttachFileAllowed(file: File): boolean {
-  const isImage = IMAGE_MIME_TYPES.includes(file.type) || /\.(jpe?g|png|webp|gif)$/i.test(file.name);
-  const isDoc = DOC_MIME_TYPES.includes(file.type) || /\.(pdf|docx|xlsx|xls|txt)$/i.test(file.name);
+  const isImage =
+    IMAGE_MIME_TYPES.includes(file.type) || /\.(jpe?g|png|webp|gif|bmp)$/i.test(file.name);
+  const isDoc =
+    DOC_MIME_TYPES.includes(file.type) ||
+    /\.(pdf|docx|docm|xlsx|xls|xlsm|txt|md|log|rtf)$/i.test(file.name);
   return isImage || isDoc;
 }
 

@@ -156,8 +156,8 @@ export interface ModelSettingsMaxValues {
 }
 
 export const MODEL_SETTINGS_DEFAULT: ModelSettingsState = {
-  context_size: 2048,
-  output_tokens: 512,
+  context_size: 100000,
+  output_tokens: 50000,
   temperature: 0.7,
   top_p: 0.95,
   repeat_penalty: 1.05,
@@ -171,8 +171,8 @@ export const MODEL_SETTINGS_DEFAULT: ModelSettingsState = {
 };
 
 export const MODEL_SETTINGS_MAX_DEFAULT: ModelSettingsMaxValues = {
-  context_size: 32768,
-  output_tokens: 8192,
+  context_size: 200000,
+  output_tokens: 100000,
   temperature: 2.0,
   top_p: 1.0,
   repeat_penalty: 2.0,

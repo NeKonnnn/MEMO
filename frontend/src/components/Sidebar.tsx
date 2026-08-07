@@ -97,7 +97,12 @@ import {
   SIDEBAR_CHAT_ROW_LIST_ITEM_BUTTON_SX,
   SIDEBAR_LIST_ICON_SX,
 } from '../constants/menuStyles';
-import { getSidebarPanelBackground } from '../constants/sidebarPanelColor';
+import {
+  getSidebarPanelBackground,
+  getSidebarChromeSx,
+  getSidebarForcedContrastSx,
+  getSidebarPanelHoverBackground,
+} from '../constants/sidebarPanelColor';
 import { ASTRA_REQUEST_DELETE_CURRENT_CHAT, ASTRA_OPEN_SETTINGS } from '../constants/hotkeys';
 import { useHotkeyBindings } from '../hooks/useHotkeyBindings';
 import HotkeysSettingsDialog from './HotkeysSettingsDialog';
@@ -123,7 +128,7 @@ const menuItems: any[] = [];
 
 const SIDEBAR_SECTION_CHEVRON_SX = {
   fontSize: '1.25rem',
-  color: '#ffffff',
+  color: 'var(--sidebar-fg, #ffffff)',
   opacity: 0.9,
 } as const;
 
@@ -137,7 +142,7 @@ const SIDEBAR_SECTION_HEADER_ROW_SX = {
   minHeight: SIDEBAR_CONTROL_HEIGHT_PX,
   borderRadius: SIDEBAR_CONTROL_RADIUS,
   '&:hover': {
-    backgroundColor: 'rgba(255,255,255,0.05)',
+    backgroundColor: 'var(--sidebar-hover-bg, rgba(255,255,255,0.05))',
   },
   transition: 'background-color 0.2s ease',
 } as const;
@@ -816,9 +821,9 @@ export default function Sidebar({ open, onToggle, isDarkMode, onToggleTheme, onH
         '& .MuiDrawer-paper': {
           width: open ? 240 : 64,
           boxSizing: 'border-box',
-          background: sidebarPanelBg,
-          color: open ? 'white' : 'text.primary',
-          borderRight: '1px solid rgba(255,255,255,0.08)',
+          ...getSidebarChromeSx(sidebarPanelBg),
+          ...getSidebarForcedContrastSx(sidebarPanelBg),
+          borderRight: '1px solid var(--sidebar-border-color, rgba(255,255,255,0.08))',
           transition: 'width 0.3s ease, background 0.3s ease, color 0.3s ease',
           overflowX: 'hidden',
           display: 'flex',
@@ -877,14 +882,14 @@ export default function Sidebar({ open, onToggle, isDarkMode, onToggleTheme, onH
           <IconButton
             onClick={onToggle}
             sx={{
-              color: 'white',
+              color: 'var(--sidebar-fg, #ffffff)',
               opacity: 1,
               width: 40,
               height: 40,
               borderRadius: 1,
               p: 0,
               '&:hover': {
-                backgroundColor: isDarkMode ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)',
+                backgroundColor: getSidebarPanelHoverBackground(sidebarPanelBg),
                 opacity: 1,
               },
             }}
@@ -3179,7 +3184,6 @@ export default function Sidebar({ open, onToggle, isDarkMode, onToggleTheme, onH
             iconColor: draft.iconColor,
             memory: draft.memory,
             instructions: draft.instructions,
-            workspacePath: draft.workspacePath,
           });
           if (pendingChatIdForProject) {
             moveChatToProject(pendingChatIdForProject, projectId);
@@ -3195,7 +3199,6 @@ export default function Sidebar({ open, onToggle, isDarkMode, onToggleTheme, onH
             iconColor: updates.iconColor,
             memory: updates.memory,
             instructions: updates.instructions,
-            workspacePath: updates.workspacePath,
           });
           if (pendingChatIdForProject) {
             moveChatToProject(pendingChatIdForProject, projectId);
@@ -3213,12 +3216,12 @@ export default function Sidebar({ open, onToggle, isDarkMode, onToggleTheme, onH
             iconColor: projectData.iconColor,
             memory: projectData.memory,
             instructions: projectData.instructions,
-            workspacePath: projectData.workspacePath,
           });
           if (pendingChatIdForProject) {
             moveChatToProject(pendingChatIdForProject, projectId);
             setPendingChatIdForProject(null);
           }
+          return projectId;
         }}
       />
 

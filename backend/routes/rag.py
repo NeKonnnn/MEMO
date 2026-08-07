@@ -22,12 +22,16 @@ from backend.auth.jwt_handler import get_current_user
 from backend.rag_query.semantic_cache import bump_rag_semantic_cache
 from backend.schemas import RAGSettings, RagModelSelectRequest
 from backend.services.user_rag_settings import (
-    SCOPES,
     chunk_params_from_rag_settings,
     default_rag_settings_snapshot,
-    get_user_rag_settings,
+    get_entity_rag_settings,
+    get_user_memory_strategy,
+    index_params_changed,
+    normalize_entity_id,
     normalize_scope,
-    save_user_rag_settings,
+    reset_entity_rag_settings,
+    save_entity_rag_settings,
+    save_user_memory_strategy,
     settings_response_dict,
 )
 from backend.settings.logging import get_logger
@@ -60,9 +64,9 @@ def _model_row_from_path(model_path: str, kind: str) -> dict:
 
 
 def _overlay_user_model_current(data: dict, user_rag: dict) -> dict:
-    """В UI current — персональный выбор пользователя, не runtime кластера.
+    """В UI current — модель выбранной сущности, не runtime кластера.
 
-    Если у пользователя путь пуст — показываем cluster_default (ConfigMap на старте
+    Если у сущности путь пуст — показываем cluster_default (ConfigMap на старте
     svc-rag-models), а не live current после чужого /models/select.
     """
     out = dict(data or {})
@@ -132,12 +136,12 @@ router = APIRouter(tags=["rag"])
 _VALID_STRATEGIES = {"auto", "hierarchical", "hybrid", "vector", "lexical", "raw_cosine", "graph"}
 _VALID_CHUNKING_STRATEGIES = {"hierarchical", "fixed", "markdown", "separators", "semantic"}
 
-# Кто сейчас в scoped-перечанковке (project/kb). Плашка у других пользователей не горит.
-# Memory / cluster-reindex — отдельно (кластерный флаг).
-_user_scoped_reindex_kb: set[str] = set()
-_user_scoped_reindex_project: set[str] = set()
+# Что сейчас пересобирается: {"agent:17": {"scope","entity_id","name",...}}.
+# Пересборка идёт для ВСЕХ, кому сущность расшарена, поэтому и плашка не
+# пер-юзерная, как раньше, а пер-сущностная — с именем агента или проекта.
+_active_reindex: dict[str, dict] = {}
 _cluster_reindex_active: bool = False
-# Когда флаги подняли. svc-rag отвечает "started" ДО того, как возьмёт лок, —
+# Когда флаги подняли. svc-rag отвечает "started" ДО того, как возьмёт слот, —
 # без форы статус погасил бы плашку в первую же секунду.
 _reindex_flags_started_at: float = 0.0
 REINDEX_FLAG_GRACE_SECONDS = 60.0
@@ -158,24 +162,59 @@ def _norm_uid(user_id: Optional[str]) -> str:
     return str(user_id or "").strip().lower()
 
 
-def _mark_user_scoped_reindex(
-    user_id: str, *, active: bool, scope: Optional[str] = None
+def _reindex_key(scope: Optional[str], entity_id: Optional[str]) -> str:
+    sc = normalize_scope(scope)
+    eid = str(entity_id or "").strip()
+    return f"{sc}:{eid}" if eid else sc
+
+
+async def _entity_display_name(scope: str, entity_id: str) -> Optional[str]:
+    """Имя агента или проекта для плашки. Не нашли — покажем id."""
+    sc = normalize_scope(scope)
+    eid = str(entity_id or "").strip()
+    if not eid:
+        return None
+    try:
+        if sc == "agent":
+            from backend.database.init_db import get_agent_repository
+
+            repo = get_agent_repository()
+            agent = await repo.get_agent(int(eid)) if repo else None
+            return (getattr(agent, "name", None) or "").strip() or None
+        from backend.database.init_db import get_project_repository
+
+        repo = get_project_repository()
+        if repo is None:
+            return None
+        async with await repo.db_connection.acquire() as conn:
+            row = await conn.fetchrow("SELECT name FROM user_projects WHERE id = $1", eid)
+        return (row["name"] or "").strip() if row else None
+    except Exception:
+        logger.debug("Имя сущности %s:%s недоступно", sc, eid, exc_info=True)
+        return None
+
+
+def _mark_entity_reindex(
+    scope: Optional[str],
+    entity_id: Optional[str],
+    *,
+    active: bool,
+    name: Optional[str] = None,
 ) -> None:
-    """Флаг "идет scoped-перечанковка" - только для затронутого стора"""
-    uid = _norm_uid(user_id)
-    if not uid:
+    """Отметить сущность как пересобираемую. Без entity_id ничего не отмечаем:
+    пересборку «всего» показывает кластерный флаг."""
+    eid = str(entity_id or "").strip()
+    if not eid:
         return
-    sc = (scope or "").strip().lower()
-    targets = []
-    if sc in ("", "agent"):
-        targets.append(_user_scoped_reindex_kb)
-    if sc in ("", "project"):
-        targets.append(_user_scoped_reindex_project)
-    for target in targets:
-        if active:
-            target.add(uid)
-        else:
-            target.discard(uid)
+    key = _reindex_key(scope, eid)
+    if active:
+        _active_reindex[key] = {
+            "scope": normalize_scope(scope),
+            "entity_id": eid,
+            "name": name,
+        }
+    else:
+        _active_reindex.pop(key, None)
 
 
 def _is_upstream_httpx_timeout(exc: BaseException) -> bool:
@@ -194,22 +233,125 @@ def _rag_settings_response_dict() -> dict:
     return settings_response_dict(default_rag_settings_snapshot())
 
 
+def _entity_id_from_params(
+    scope: Optional[str],
+    project_id: Optional[str] = None,
+    agent_id: Optional[int] = None,
+) -> Optional[str]:
+    sc = normalize_scope(scope)
+    if sc == "project":
+        pid = str(project_id or "").strip()
+        return pid or None
+    if sc == "agent" and agent_id is not None:
+        try:
+            aid = int(agent_id)
+        except (TypeError, ValueError):
+            return None
+        return str(aid) if aid > 0 else None
+    return None
+
+
+def _entity_label(scope: str, entity_name: Optional[str], entity_id: Optional[str]) -> str:
+    name = str(entity_name or "").strip()
+    if name:
+        return f"«{name}»"
+    eid = str(entity_id or "").strip()
+    return eid or "?"
+
+
+async def _entity_permission(scope: str, entity_id: str, user_id: str) -> Optional[str]:
+    """Роль пользователя для сущности: owner | editor | viewer | None.
+
+    Агент: владелец, получатель шаринга или (для публичного) читатель.
+    Проект: своими проектами владеет один человек, чужих он не видит.
+    """
+    sc = normalize_scope(scope)
+    ek = normalize_entity_id(entity_id)
+    uid = (user_id or "").strip().lower()
+    if not ek or not uid:
+        return None
+    if sc == "agent":
+        try:
+            from backend.database.init_db import get_agent_repository
+
+            repo = get_agent_repository()
+            if repo is None:
+                return None
+            return await repo.get_user_permission(int(ek), uid)
+        except (TypeError, ValueError):
+            return None
+        except Exception:
+            logger.exception("Не удалось определить роль для агента %s", ek)
+            return None
+    try:
+        from backend.database.init_db import get_project_repository
+
+        repo = get_project_repository()
+        if repo is None:
+            return None
+        project = await repo.get_by_id(uid, ek)
+        return "owner" if project else None
+    except Exception:
+        logger.exception("Не удалось определить роль для проекта %s", ek)
+        return None
+
+
+def _can_edit(permission: Optional[str]) -> bool:
+    """Менять настройки могут владелец и редактор — у обоих правка видна всем."""
+    return (permission or "").strip().lower() in ("owner", "editor")
+
+
+async def _require_entity_editor(scope: str, entity_id: str, user_id: str) -> str:
+    """403, если у пользователя нет права менять настройки этой сущности."""
+    permission = await _entity_permission(scope, entity_id, user_id)
+    if not _can_edit(permission):
+        kind = "агента" if normalize_scope(scope) == "agent" else "проекта"
+        raise HTTPException(
+            status_code=403,
+            detail=f"Недостаточно прав для изменения настроек {kind}",
+        )
+    return permission or "owner"
+
+
 @router.get("/api/rag/settings")
 async def get_rag_settings(
     current_user: Annotated[dict, Depends(get_current_user)],
     scope: Optional[str] = None,
+    project_id: Optional[str] = None,
+    agent_id: Optional[int] = None,
 ):
-    """Персональные RAG-настройки одного стора.
+    """RAG-настройки конкретного агента или проекта.
 
-    ```scope``` — project (по умолчанию) или agent. Общие поля (стратегия поиска,
-    agentic_*, препроцесс запроса) одинаковы в обоих скоупах, остальные свои.
+    ```scope``` — project (по умолчанию) или agent.
+    ```project_id``` / ```agent_id``` — чьи именно настройки. Без них отдаём
+    дефолты кластера: настройки принадлежат сущности, «настроек вообще» больше нет.
+
+    ```can_edit``` — может ли текущий пользователь их менять. Читателю
+    расшаренного агента настройки показываем (иначе непонятно, почему поиск ведёт
+    себя так), но правку отбиваем.
 
     Memory RAG (кроме стратегии поиска) — только ConfigMap/env SVC-RAG / SVC-RAG-MODELS.
     """
     user_id = str(current_user.get("user_id") or "").strip()
     sc = normalize_scope(scope)
-    settings_data = await get_user_rag_settings(user_id, sc)
-    return {**settings_response_dict(settings_data), "scope": sc}
+    entity_id = _entity_id_from_params(sc, project_id, agent_id)
+    if entity_id:
+        settings_data = await get_entity_rag_settings(sc, entity_id)
+        permission = await _entity_permission(sc, entity_id, user_id)
+    else:
+        settings_data = default_rag_settings_snapshot()
+        # Новая сущность ещё не создана: показываем дефолты и даём их править —
+        # сохранятся они уже под конкретным id.
+        permission = "owner"
+    return {
+        **settings_response_dict(settings_data),
+        "scope": sc,
+        "project_id": project_id if sc == "project" else None,
+        "agent_id": agent_id if sc == "agent" else None,
+        "rag_memory_strategy": await get_user_memory_strategy(user_id),
+        "permission": permission,
+        "can_edit": _can_edit(permission),
+    }
 
 
 def _build_reindex_status_message(
@@ -217,11 +359,13 @@ def _build_reindex_status_message(
     memory_reindexing: bool,
     project_reindexing: bool,
     kb_reindexing: bool,
+    active: Optional[list] = None,
 ) -> str:
     return build_reindex_status_message(
         memory_reindexing=memory_reindexing,
         project_reindexing=project_reindexing,
         kb_reindexing=kb_reindexing,
+        active=active,
     )
 
 
@@ -276,6 +420,7 @@ async def get_rag_reindex_status(
         "project": {"reindexing": False},
         "kb": {"reindexing": False},
         "any_reindexing": False,
+        "active": [],
         "agent_has_kb": False,
         "project_has_documents": False,
         "memory_rag_enabled": memory_enabled,
@@ -283,16 +428,15 @@ async def get_rag_reindex_status(
     }
     if not rag_client:
         return empty_payload
-    global _reindex_flags_started_at, _cluster_reindex_active
-    global _user_scoped_reindex_kb, _user_scoped_reindex_project
+    global _cluster_reindex_active
     try:
         status = await rag_client.get_reindex_status()
     except Exception as exc:
         logger.warning("[RAG] reindex-status poll failed: %s", exc)
         return empty_payload
 
-    # Источник истины о том, идёт ли работа, — локи svc-rag, а не наши флаги:
-    # backend узнаёт только момент ПОСТАНОВКИ задачи, не её завершение.
+    # Источник истины о том, идёт ли работа, — svc-rag, а не наш реестр: backend
+    # узнаёт только момент ПОСТАНОВКИ задачи, не её завершение.
     svc_busy = any(
         bool((status.get(key) or {}).get("reindexing"))
         for key in ("kb", "project", "memory")
@@ -301,10 +445,9 @@ async def get_rag_reindex_status(
         if _cluster_reindex_active:
             logger.info("[REINDEX] svc-rag освободился — снимаю кластерный флаг")
             _cluster_reindex_active = False
-        if _user_scoped_reindex_kb or _user_scoped_reindex_project:
-            logger.info("[REINDEX] svc-rag освободился — снимаю пер-юзерные флаги")
-            _user_scoped_reindex_kb.clear()
-            _user_scoped_reindex_project.clear()
+        if _active_reindex:
+            logger.info("[REINDEX] svc-rag освободился — чищу реестр пересборок")
+            _active_reindex.clear()
 
     user_id = _norm_uid(current_user.get("user_id") if current_user else None)
     agent_has_kb = False
@@ -317,24 +460,28 @@ async def get_rag_reindex_status(
 
     # Memory — общий стор: флаг виден всем (ConfigMap / cluster).
     memory_flag = bool(status.get("memory", {}).get("reindexing")) or _cluster_reindex_active
-    # Project/KB scoped: плашка только у пользователя, который запустил перечанковку
-    # (или при полном cluster-reindex после смены dim).
+    active = [dict(v) for v in _active_reindex.values()]
     if _cluster_reindex_active:
+        # Кластерный прогон перетряхивает всё — показываем его всем.
         project_flag = bool(status.get("project", {}).get("reindexing"))
         kb_flag = bool(status.get("kb", {}).get("reindexing"))
     else:
-        project_flag = bool(user_id and user_id in _user_scoped_reindex_project)
-        kb_flag = bool(user_id and user_id in _user_scoped_reindex_kb)
+        # Пересобирается сущность, а не «мои документы»: плашка нужна всем, кто с
+        # ней работает, включая читателей расшаренного агента.
+        project_flag = any(a["scope"] == "project" for a in active)
+        kb_flag = any(a["scope"] == "agent" for a in active)
     message = _build_reindex_status_message(
         memory_reindexing=memory_flag,
         project_reindexing=project_flag,
         kb_reindexing=kb_flag,
+        active=active,
     )
     return {
         "memory": {"reindexing": memory_flag},
         "project": {"reindexing": project_flag},
         "kb": {"reindexing": kb_flag},
         "any_reindexing": memory_flag or project_flag or kb_flag,
+        "active": active,
         "agent_has_kb": agent_has_kb,
         "project_has_documents": project_has_documents,
         "memory_rag_enabled": memory_enabled,
@@ -343,42 +490,45 @@ async def get_rag_reindex_status(
 
 
 @router.post("/api/rag/settings/reset")
-async def reset_rag_settings(current_user: Annotated[dict, Depends(get_current_user)]):
-    """Сброс персональных RAG-настроек пользователя к дефолтам кластера."""
+async def reset_rag_settings(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    scope: Optional[str] = None,
+    project_id: Optional[str] = None,
+    agent_id: Optional[int] = None,
+):
+    """Сброс настроек агента или проекта к дефолтам кластера.
+
+    Сбрасывает не «мои настройки», а настройки СУЩНОСТИ — то есть у всех, кому
+    её расшарили. Поэтому нужны права редактора и обязателен
+    ```project_id``` / ```agent_id```.
+    """
     try:
         user_id = str(current_user.get("user_id") or "").strip()
         if not user_id:
             raise HTTPException(status_code=401, detail="Требуется авторизация")
-        logger.debug("[RAG-CFG] сброс персональных RAG-настроек user=%s", user_id)
-        defaults = default_rag_settings_snapshot()
-        # UI-дефолты сброса (как раньше в reset)
-        defaults.update(
-            {
-                "rag_strategy": "auto",
-                "agentic_rag_enabled": True,
-                "agentic_max_iterations": 2,
-                "rag_query_fix_typos": False,
-                "rag_multi_query_enabled": False,
-                "rag_hyde_enabled": False,
-                "rag_chat_top_k": 8,
-                "rag_chunking_strategy": "hierarchical",
-                "rag_chunk_size": 1000,
-                "rag_chunk_overlap": 200,
-                "rag_similarity_threshold": 0.0,
-                "rag_reranking_enabled": True,
-                "rag_rerank_top_n": 12,
-                "rag_embedding_model_path": "",
-                "rag_reranker_model_path": "",
-                "rag_system_prompt": "",
-            }
+        sc = normalize_scope(scope)
+        entity_id = _entity_id_from_params(sc, project_id, agent_id)
+        if not entity_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Укажите project_id или agent_id: настройки принадлежат сущности",
+            )
+        await _require_entity_editor(sc, entity_id, user_id)
+        logger.info(
+            "[RAG-CFG] сброс настроек %s %s пользователем %s",
+            "агента" if sc == "agent" else "проекта",
+            entity_id,
+            user_id,
         )
-        # Сброс — во ВСЕ скоупы: пользователь ждёт «как из коробки» целиком,
-        # а не только для того стора, что открыт в UI.
-        merged = None
-        for sc in SCOPES:
-            merged = await save_user_rag_settings(user_id, defaults, sc)
+        merged = await reset_entity_rag_settings(sc, entity_id)
         bump_rag_semantic_cache()
-        return {"message": "Настройки RAG сброшены", "success": True, **settings_response_dict(merged or defaults)}
+        return {
+            "message": "Настройки RAG сброшены",
+            "success": True,
+            **settings_response_dict(merged),
+            "scope": sc,
+            "can_edit": True,
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -439,14 +589,61 @@ async def _collect_owner_agent_kb_document_ids(owner_user_id: str) -> list:
         return []
 
 
+async def _collect_agent_kb_document_ids(agent_id: int) -> list:
+    """document_id из config одного агента."""
+    try:
+        aid = int(agent_id)
+    except (TypeError, ValueError):
+        return []
+    if aid <= 0:
+        return []
+    try:
+        from backend.database.init_db import get_agent_repository
+
+        repo = get_agent_repository()
+        if repo is None:
+            return []
+        agent = await repo.get_agent(aid)
+        if not agent:
+            return []
+        cfg = getattr(agent, "config", None) or {}
+        if isinstance(cfg, str):
+            import json
+
+            try:
+                cfg = json.loads(cfg)
+            except Exception:
+                cfg = {}
+        if not isinstance(cfg, dict):
+            return []
+        out: list = []
+        for raw in cfg.get("kb_document_ids") or []:
+            try:
+                out.append(int(raw))
+            except (TypeError, ValueError):
+                continue
+        return out
+    except Exception:
+        logger.exception("Не удалось собрать kb_document_ids агента %s", agent_id)
+        return []
+
+
 async def _run_background_rechunk_for_user(
-    user_id: str, chunk_params: dict, scope: Optional[str] = None
+    user_id: str,
+    chunk_params: dict,
+    scope: Optional[str] = None,
+    *,
+    project_id: Optional[str] = None,
+    agent_id: Optional[int] = None,
 ) -> None:
     """Перечанковка документов в пределах ОДНОГО стора.
 
     ```scope="agent"``` — только agent KB (документы, где owner_user_id = пользователь),
     ```scope="project"``` — только документы проектов. Без scope трогает оба, как было
     до разделения настроек.
+
+    С ```agent_id``` — только KB выбранного агента.
+    С ```project_id``` — только документы указанного проекта.
 
     Memory RAG не трогаем — нарезка Memory только из env SVC-RAG.
     """
@@ -457,15 +654,29 @@ async def _run_background_rechunk_for_user(
     strat = chunk_params.get("chunking_strategy")
     oid = _norm_uid(user_id)
     agent_doc_ids = await _collect_owner_agent_kb_document_ids(oid)
-    # Фон живёт вне запроса — ContextVar пуст, модель берём по user_id явно.
-    from backend.services.user_rag_settings import embedding_fields_for_user
+    if agent_id is not None:
+        try:
+            aid = int(agent_id)
+        except (TypeError, ValueError):
+            aid = 0
+        if aid > 0:
+            agent_doc_ids = await _collect_agent_kb_document_ids(aid)
+    # Фон живёт вне запроса — ContextVar пуст, модель берём у самой сущности.
+    # Взять её у пользователя нельзя: перечанковку мог запустить редактор, а
+    # корпус должен лечь моделью агента, той же, которой по нему потом ищут.
+    from backend.services.user_rag_settings import embedding_fields_for_entity
 
-    emb = await embedding_fields_for_user(oid, scope)
+    emb = await embedding_fields_for_entity(
+        scope, _entity_id_from_params(scope or "", project_id, agent_id)
+    )
     logger.info(
-        "[RECHUNK-USER] старт user=%s scope=%s model=%s strategy=%s chunk_size=%s ",
+        "[RECHUNK-USER] старт user=%s scope=%s project=%s agent=%s provider=%s model=%s strategy=%s chunk_size=%s "
         "overlap=%s agent_docs=%s",
         oid,
         scope or "both",
+        project_id or "*",
+        agent_id or "*",
+        emb.get("embedding_provider") or "cluster",
         emb.get("embedding_model"),
         strat,
         cs,
@@ -475,7 +686,47 @@ async def _run_background_rechunk_for_user(
     sc = (scope or "").strip().lower()
     do_agent = sc in ("", "agent")
     do_project = sc in ("", "project")
-    _mark_user_scoped_reindex(oid, active=True, scope=scope)
+    pid = str(project_id or "").strip() or None
+
+    # Пустой список ≠ «все документы»: раньше `[] or None` уводил в полный
+    # reindex владельца и поднимал плашку даже у нового агента без файлов.
+    if do_agent and not agent_doc_ids:
+        logger.info(
+            "[RECHUNK-USER] kb пропуск: нет документов "
+            "(user=%s agent=%s) — плашку не поднимаем",
+            oid,
+            agent_id or "*",
+        )
+        do_agent = False
+
+    # Новый проект без файлов: смена эмбеддера/нарезки не должна стартовать
+    # перечанковку и оранжевую плашку — пересобирать нечего.
+    if do_project and pid:
+        has_project_docs = await _resolve_project_has_rag_documents(pid)
+        if not has_project_docs:
+            logger.info(
+                "[RECHUNK-USER] project пропуск: нет документов "
+                "(user=%s project=%s) — плашку не поднимаем",
+                oid,
+                pid,
+            )
+            do_project = False
+
+    if not do_agent and not do_project:
+        logger.info(
+            "[RECHUNK-USER] нечего пересобирать user=%s scope=%s — выход",
+            oid,
+            scope or "both",
+        )
+        return
+
+    marked_entity_id = str(agent_id) if sc == "agent" and agent_id is not None else pid
+    _mark_entity_reindex(
+        scope,
+        marked_entity_id,
+        active=True,
+        name=await _entity_display_name(scope or "", marked_entity_id or ""),
+    )
     _mark_reindex_started()
     try:
         if do_agent:
@@ -485,7 +736,10 @@ async def _run_background_rechunk_for_user(
                     chunk_overlap=co,
                     chunking_strategy=strat,
                     owner_user_id=oid,
-                    document_ids=agent_doc_ids or None,
+                    # Ключ очереди в svc-rag: пересборка этого агента не должна
+                    # прерывать пересборку соседнего у того же владельца.
+                    agent_id=int(agent_id) if agent_id is not None else None,
+                    document_ids=list(agent_doc_ids),
                     **emb,
                 )
                 logger.info("[RECHUNK-USER] kb готово: %s", kb_res)
@@ -497,20 +751,27 @@ async def _run_background_rechunk_for_user(
                     chunk_size=cs,
                     chunk_overlap=co,
                     chunking_strategy=strat,
-                    owner_user_id=oid,
+                    owner_user_id=oid if not pid else None,
+                    project_id=pid,
                     **emb,
                 )
-                logger.info("[RECHUNK-USER] projects готово: %s", proj_res)
+                logger.info(
+                    "[RECHUNK-USER] project готово scope=%s project_id=%s: %s",
+                    scope or "both",
+                    pid or "*",
+                    proj_res,
+                )
             except Exception:
                 logger.exception("[RECHUNK-USER] projects ошибка")
         logger.info(
-            "[RECHUNK-USER] задачи поставлены в svc-rag user=%s; "
+            "[RECHUNK-USER] задачи поставлены в svc-rag user=%s project=%s; "
             "флаг снимется по факту завершения",
             oid,
+            pid or "*",
         )
     except Exception:
-        # Ставить задачи не удалось — снимаем флаг сразу, ждать нечего.
-        _mark_user_scoped_reindex(oid, active=False, scope=scope)
+        # Ставить задачи не удалось — снимаем отметку сразу, ждать нечего.
+        _mark_entity_reindex(scope, marked_entity_id, active=False)
         raise
 
 
@@ -564,9 +825,22 @@ async def _run_background_reindex_after_model_change() -> None:
     )
 
 
-async def _run_background_reindex_for_user(user_id: str, chunk_params: dict, scope: Optional[str] = None) -> None:
-    """Переиндексация документов пользователя в пределах сторна (без Memory)"""
-    await _run_background_rechunk_for_user(user_id, chunk_params, scope)
+async def _run_background_reindex_for_user(
+    user_id: str,
+    chunk_params: dict,
+    scope: Optional[str] = None,
+    *,
+    project_id: Optional[str] = None,
+    agent_id: Optional[int] = None,
+) -> None:
+    """Переиндексация документов пользователя в пределах стора (без Memory).
+
+    ```project_id``` / ```agent_id``` сужают до одной сущности — без них смена
+    модели у одного агента перетряхнула бы KB всех агентов пользователя.
+    """
+    await _run_background_rechunk_for_user(
+        user_id, chunk_params, scope, project_id=project_id, agent_id=agent_id
+    )
 
 
 @router.put("/api/rag/settings")
@@ -574,11 +848,14 @@ async def update_rag_settings(
     settings_data: RAGSettings,
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
-    """Обновить персональные RAG-настройки (project + agent).
+    """Обновить RAG-настройки конкретного агента или проекта.
 
-    Memory RAG (кроме strategy) через UI не меняется.
-    При смене чанкинга — перечанковка только документов текущего пользователя;
-    для agent KB — только docs с owner_user_id = этот пользователь (владелец агента).
+    Правка видна ВСЕМ, кому сущность расшарена, — поэтому нужны права владельца
+    или редактора. При смене полей, влияющих на индекс (нарезка, эмбеддер),
+    перечанковываются документы только этой сущности.
+
+    Memory RAG настраивается из env; из UI у него меняется одна стратегия поиска
+    (```rag_memory_strategy```) — она общая и остаётся у пользователя.
     """
     user_id = str(current_user.get("user_id") or "").strip()
     if not user_id:
@@ -601,45 +878,67 @@ async def update_rag_settings(
                 status_code=400,
                 detail=f"Недопустимая стратегия чанкования. Допустимые: {_VALID_CHUNKING_STRATEGIES}",
             )
-    if (
-        settings_data.strategy is None
-        and settings_data.agentic_rag_enabled is None
-        and (settings_data.agentic_max_iterations is None)
-        and (settings_data.rag_query_fix_typos is None)
-        and (settings_data.rag_multi_query_enabled is None)
-        and (settings_data.rag_hyde_enabled is None)
-        and (settings_data.rag_chat_top_k is None)
-        and (settings_data.rag_chunking_strategy is None)
-        and (settings_data.rag_chunk_size is None)
-        and (settings_data.rag_chunk_overlap is None)
-        and (settings_data.rag_similarity_threshold is None)
-        and (settings_data.rag_reranking_enabled is None)
-        and (settings_data.rag_rerank_top_n is None)
-        and (settings_data.rag_system_prompt is None)
-        and (settings_data.rag_embedding_model_path is None)
-        and (settings_data.rag_reranker_model_path is None)
-    ):
+    # Стратегия Библиотеки — единственная настройка, оставшаяся у пользователя:
+    # это общий стор, сущности к нему отношения не имеют. Обрабатываем ДО
+    # проверки «нет полей»: со страницы настроек она приходит одна, без сущности.
+    memory_strategy_saved: Optional[str] = None
+    if settings_data.rag_memory_strategy is not None:
+        mem_strat = str(settings_data.rag_memory_strategy).strip().lower()
+        if mem_strat and mem_strat not in _VALID_STRATEGIES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Недопустимая стратегия Библиотеки. Допустимые: {_VALID_STRATEGIES}",
+            )
+        if mem_strat:
+            memory_strategy_saved = await save_user_memory_strategy(user_id, mem_strat)
+            logger.info(
+                "[RAG-CFG] стратегия поиска по Библиотеке у %s: %s", user_id, mem_strat
+            )
+    entity_fields_present = any(
+        value is not None
+        for value in (
+            settings_data.strategy,
+            settings_data.agentic_rag_enabled,
+            settings_data.agentic_max_iterations,
+            settings_data.rag_query_fix_typos,
+            settings_data.rag_multi_query_enabled,
+            settings_data.rag_hyde_enabled,
+            settings_data.rag_chat_top_k,
+            settings_data.rag_chunking_strategy,
+            settings_data.rag_chunk_size,
+            settings_data.rag_chunk_overlap,
+            settings_data.rag_similarity_threshold,
+            settings_data.rag_reranking_enabled,
+            settings_data.rag_rerank_top_n,
+            settings_data.rag_system_prompt,
+            settings_data.rag_embedding_model_path,
+            settings_data.rag_reranker_model_path,
+        )
+    )
+    if not entity_fields_present:
+        if memory_strategy_saved:
+            return {
+                "message": "Стратегия поиска по Библиотеке обновлена",
+                "success": True,
+                "rag_memory_strategy": memory_strategy_saved,
+            }
         raise HTTPException(status_code=400, detail="Нет полей для обновления")
     scope = normalize_scope(settings_data.scope)
-    try:
-        before = await get_user_rag_settings(user_id, scope)
-        _chunk_before = (
-            str(before.get("rag_chunking_strategy") or ""),
-            int(before.get("rag_chunk_size") or 0),
-            int(before.get("rag_chunk_overlap") or 0),
+    entity_id = _entity_id_from_params(
+        scope, settings_data.project_id, settings_data.agent_id
+    )
+    entity_label = _entity_label(scope, settings_data.entity_name, entity_id)
+    if not entity_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Укажите project_id или agent_id: настройки принадлежат сущности",
         )
+    permission = await _require_entity_editor(scope, entity_id, user_id)
+    try:
+        before = await get_entity_rag_settings(scope, entity_id)
         updates: dict = {}
         if strat is not None:
             updates["rag_strategy"] = strat
-        if settings_data.rag_memory_strategy is not None:
-            mem_strat = str(settings_data.rag_memory_strategy).strip().lower()
-            if mem_strat and mem_strat not in _VALID_STRATEGIES:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Недопустимая стратегия Библиотеки. Допустимые: {_VALID_STRATEGIES}",
-                )
-            if mem_strat:
-                updates["rag_memory_strategy"] = mem_strat
         if settings_data.agentic_rag_enabled is not None:
             updates["agentic_rag_enabled"] = bool(settings_data.agentic_rag_enabled)
         if settings_data.agentic_max_iterations is not None:
@@ -696,40 +995,48 @@ async def update_rag_settings(
         if not updates:
             raise HTTPException(status_code=400, detail="Нет полей для обновления")
 
-        logger.debug("[RAG-CFG] персональные настройки user=%s scope=%s: %s", user_id, scope, updates)
-        merged = await save_user_rag_settings(user_id, updates, scope)
+        kind = "проекта" if scope == "project" else "агента"
+        logger.debug(
+            "[RAG-CFG] настройки %s %s (user=%s): %s", kind, entity_id, user_id, updates
+        )
+        merged = await save_entity_rag_settings(scope, entity_id, updates, user_id)
+        logger.info(
+            "[RAG-CFG] настройки %s %s изменены пользователем %s (роль %s)",
+            kind,
+            entity_label,
+            user_id,
+            permission,
+        )
 
         if "rag_chat_top_k" in updates or "rag_rerank_top_n" in updates:
             bump_rag_semantic_cache()
 
-        _chunk_after = (
-            str(merged.get("rag_chunking_strategy") or ""),
-            int(merged.get("rag_chunk_size") or 0),
-            int(merged.get("rag_chunk_overlap") or 0),
-        )
-        # Только явная смена полей нарезки — не top_k / similarity / toggles.
-        chunk_fields_touched = any(
-            k in updates
-            for k in ("rag_chunking_strategy", "rag_chunk_size", "rag_chunk_overlap")
-        )
-        if (
-            _rechunk_on_settings_change()
-            and chunk_fields_touched
-            and _chunk_after != _chunk_before
-        ):
+        # Пересобираем только когда изменилось то, что лежит в индексе: нарезка
+        # и эмбеддер. top_k, порог и тумблеры препроцесса применяются на лету.
+        if _rechunk_on_settings_change() and index_params_changed(before, merged):
             logger.info(
-                "[RECHUNK-USER] чанкинг изменился user=%s scope=%s → scoped перечанковка только для этого стора",
-                user_id,
-                scope,
+                "[RECHUNK-USER] индексные настройки %s %s изменились → перечанковка",
+                kind,
+                entity_label,
             )
             asyncio.create_task(
-                _run_background_rechunk_for_user(user_id, chunk_params_from_rag_settings(merged), scope)
+                _run_background_rechunk_for_user(
+                    user_id,
+                    chunk_params_from_rag_settings(merged),
+                    scope,
+                    project_id=settings_data.project_id,
+                    agent_id=settings_data.agent_id,
+                )
             )
         return {
-            "message": "Настройки RAG обновлены", 
-            "success": True, 
-            **settings_response_dict(merged), 
+            "message": "Настройки RAG обновлены",
+            "success": True,
+            **settings_response_dict(merged),
             "scope": scope,
+            "project_id": settings_data.project_id if scope == "project" else None,
+            "agent_id": settings_data.agent_id if scope == "agent" else None,
+            "permission": permission,
+            "can_edit": True,
         }
     except HTTPException:
         raise
@@ -824,12 +1131,15 @@ async def reindex_all_documents(
     logger.warning(
         "[REINDEX-ALL] запущен пользователем %s (memory=%s)", user_id, include_memory
     )
-    agent_merged = await get_user_rag_settings(user_id, "agent")
-    project_merged = await get_user_rag_settings(user_id, "project")
+    # Известное ограничение: прогон режет ВСЁ одним набором параметров и
+    # индивидуальные настройки агентов не учитывает — после него они разойдутся
+    # с фактом, и агента придётся пересобрать из его карточки. Эндпоинт ручной,
+    # кнопки в интерфейсе нет; переделка на цикл по сущностям — отдельная работа.
+    cluster_defaults = default_rag_settings_snapshot()
     asyncio.create_task(
         _run_global_reindex(
-            chunk_params_from_rag_settings(agent_merged), 
-            chunk_params_from_rag_settings(project_merged), 
+            chunk_params_from_rag_settings(cluster_defaults),
+            chunk_params_from_rag_settings(cluster_defaults),
             bool(include_memory),
         )
     )
@@ -1291,43 +1601,16 @@ async def list_rag_models(
     current_user: Annotated[dict, Depends(get_current_user)],
     type: str | None = None,
     scope: Optional[str] = None,
+    project_id: Optional[str] = None,
+    agent_id: Optional[int] = None,
 ):
-    """Каталог embedding/reranker для UI: local (svc-rag-models) + CORSUR/PHOENIX.
+    """Каталог embedding/reranker для UI: CORSUR, PHOENIX, PHOENIX_Embeddings.
 
     ```scope``` — чей выбор подсвечивать как current: project (по умолчанию) или agent.
-    Внешний каталог кэшируется (RAG_MODELS_CACHE_SECONDS);
-    current всегда из персональных настроек пользователя (с fallback на cluster_default).
+    ```project_id``` / ```agent_id``` — настройки конкретного проекта/агента.
     """
     try:
-        data: dict = {
-            "models": {"embedding": [], "reranker": []},
-            "offline": True,
-            "cluster_default": {},
-        }
-        # 1) Локальные папки из SVC-RAG-MODELS (models/rag/*) — основной каталог memo.
-        if rag_models_client:
-            try:
-                local = await rag_models_client.list_models(type)
-                if isinstance(local, dict):
-                    data["offline"] = bool(local.get("offline", True))
-                    if isinstance(local.get("cluster_default"), dict):
-                        data["cluster_default"] = local["cluster_default"]
-                    if isinstance(local.get("current"), dict) and not data["cluster_default"]:
-                        data["cluster_default"] = local["current"]
-                    local_models = local.get("models") or {}
-                    for kind_key in ("embedding", "reranker"):
-                        if type and kind_key != type:
-                            continue
-                        for row in local_models.get(kind_key) or []:
-                            if not isinstance(row, dict) or not row.get("path"):
-                                continue
-                            row = dict(row)
-                            row.setdefault("source", "local")
-                            row.setdefault("kind", kind_key)
-                            data["models"].setdefault(kind_key, []).append(row)
-            except Exception:
-                logger.exception("Каталог локальных RAG-моделей (svc-rag-models) недоступен")
-        # 2) Внешние шлюзы (CORSUR / PHOENIX) — опционально, если настроены.
+        data: dict = {"models": {"embedding": [], "reranker": []}}
         try:
             external_rows = await _external_rag_models_cached(type)
             for row in external_rows or []:
@@ -1335,13 +1618,10 @@ async def list_rag_models(
                 data["models"].setdefault(kind_key, []).append(row)
         except Exception:
             logger.exception("Каталог внешних RAG-моделей недоступен")
-        user_id = str(current_user.get("user_id") or "").strip()
-        user_rag = (
-            await get_user_rag_settings(user_id, normalize_scope(scope))
-            if user_id
-            else {}
-        )
-        return _overlay_user_model_current(data, user_rag)
+        sc = normalize_scope(scope)
+        entity_id = _entity_id_from_params(sc, project_id, agent_id)
+        entity_rag = await get_entity_rag_settings(sc, entity_id) if entity_id else {}
+        return _overlay_user_model_current(data, entity_rag)
     except Exception as e:
         logger.exception("list_rag_models error")
         raise HTTPException(status_code=502, detail=str(e)) from e
@@ -1349,12 +1629,14 @@ async def list_rag_models(
 
 @router.get("/api/rag/models/current")
 async def get_rag_models_current(
-    current_user: Annotated[dict, Depends(get_current_user)], 
+    current_user: Annotated[dict, Depends(get_current_user)],
     scope: Optional[str] = None,
+    project_id: Optional[str] = None,
+    agent_id: Optional[int] = None,
 ):
     try:
         # Кластерная «текущая модель» есть только у svc-rag-models. Для шлюзовых
-        # провайдеров источник истины — персональные настройки пользователя.
+        # провайдеров источник истины — настройки самой сущности.
         data: dict = {}
         if rag_models_client:
             try:
@@ -1367,13 +1649,10 @@ async def get_rag_models_current(
                 data = {}
         if not isinstance(data, dict):
             data = {}
-        user_id = str(current_user.get("user_id") or "").strip()
-        user_rag = (
-            await get_user_rag_settings(user_id, normalize_scope(scope)) 
-            if user_id 
-            else {}
-        )
-        return _overlay_user_model_current(data, user_rag)
+        sc = normalize_scope(scope)
+        entity_id = _entity_id_from_params(sc, project_id, agent_id)
+        entity_rag = await get_entity_rag_settings(sc, entity_id) if entity_id else {}
+        return _overlay_user_model_current(data, entity_rag)
     except Exception as e:
         logger.exception("get_rag_models_current error")
         raise HTTPException(status_code=502, detail=str(e)) from e
@@ -1400,6 +1679,9 @@ async def _select_external_rag_model(
     path_prefix: str,
     source_label: str,
     scope: Optional[str] = None,
+    entity_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+    agent_id: Optional[int] = None,
 ):
     """Персональный выбор внешней OpenAI-совместимой модели (phoenix/…, corsur/…).
 
@@ -1439,27 +1721,35 @@ async def _select_external_rag_model(
     }
 
     if model_type == "embedding":
-        merged = await save_user_rag_settings(
-            user_id, {"rag_embedding_model_path": model_path}, scope
+        merged = await save_entity_rag_settings(
+            scope, entity_id, {"rag_embedding_model_path": model_path}, user_id
         )
         if _reindex_on_model_change():
             asyncio.create_task(
                 _run_background_reindex_for_user(
-                    user_id, chunk_params_from_rag_settings(merged), scope
+                    user_id,
+                    chunk_params_from_rag_settings(merged),
+                    scope,
+                    project_id=project_id,
+                    agent_id=agent_id,
                 )
             )
     else:
-        await save_user_rag_settings(user_id, {"rag_reranker_model_path": model_path}, scope)
+        await save_entity_rag_settings(
+            scope, entity_id, {"rag_reranker_model_path": model_path}, user_id
+        )
     bump_rag_semantic_cache()
     logger.info(
-        "[RAG-CFG] персональный выбор %s user=%s type=%s path=%s "
+        "[RAG-CFG] выбор %s для %s %s пользователем %s: type=%s path=%s "
         "(кластер и Библиотека не меняются)",
         source_label,
+        "агента" if scope == "agent" else "проекта",
+        entity_id,
         user_id,
         model_type,
         model_path,
     )
-    result["message"] = "Модель сохранена в ваших настройках"
+    result["message"] = "Модель сохранена в настройках этого агента или проекта"
     result["reindexed"] = model_type == "embedding" and _reindex_on_model_change()
     return result
 
@@ -1485,10 +1775,11 @@ async def select_rag_model(
 ):
     """Выбор embedding/reranker: загружает модель и сохраняет путь пользователю.
 
-    - UI-выбор у других пользователей не меняется (персональный Postgres).
+    - Модель принадлежит агенту или проекту: у других сущностей не меняется,
+      но меняется у всех, кому эта расшарена. Нужны права редактора.
     - Memory RAG не переиндексируется.
     - Смена dim из UI запрещена.
-    - При той же dim — scoped reindex только project + agent KB этого пользователя.
+    - При той же dim — reindex только документов этой сущности.
     """
     user_id = str(current_user.get("user_id") or "").strip()
     if not user_id:
@@ -1500,10 +1791,18 @@ async def select_rag_model(
     if not model_path:
         raise HTTPException(status_code=400, detail="model_path обязателен")
     scope = normalize_scope(body.scope)
+    entity_id = _entity_id_from_params(scope, body.project_id, body.agent_id)
+    if not entity_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Укажите project_id или agent_id: модель принадлежит сущности",
+        )
+    await _require_entity_editor(scope, entity_id, user_id)
     logger.debug(
-        "[RAG-CFG] Выбор RAG-модели user=%s scope=%s: type=%s, path=%s",
+        "[RAG-CFG] Выбор RAG-модели user=%s scope=%s entity=%s: type=%s, path=%s",
         user_id,
         scope,
+        entity_id,
         model_type,
         model_path,
     )
@@ -1520,6 +1819,9 @@ async def select_rag_model(
             path_prefix="phoenix_embeddings",
             source_label="PHOENIX_Embeddings",
             scope=scope,
+            entity_id=entity_id,
+            project_id=body.project_id,
+            agent_id=body.agent_id,
         )
     if model_path.lower().startswith("phoenix/"):
         return await _select_external_rag_model(
@@ -1529,6 +1831,9 @@ async def select_rag_model(
             path_prefix="phoenix",
             source_label="PHOENIX",
             scope=scope,
+            entity_id=entity_id,
+            project_id=body.project_id,
+            agent_id=body.agent_id,
         )
     if model_path.lower().startswith("corsur/"):
         return await _select_external_rag_model(
@@ -1538,6 +1843,9 @@ async def select_rag_model(
             path_prefix="corsur",
             source_label="CORSUR",
             scope=scope,
+            entity_id=entity_id,
+            project_id=body.project_id,
+            agent_id=body.agent_id,
         )
     # local/* — нужен svc-rag-models
     require_service("rag_models")
@@ -1557,32 +1865,39 @@ async def select_rag_model(
         }
 
         if model_type == "embedding":
-            merged = await save_user_rag_settings(
-                user_id, {"rag_embedding_model_path": model_path}, scope
+            merged = await save_entity_rag_settings(
+                scope, entity_id, {"rag_embedding_model_path": model_path}, user_id
             )
             if _reindex_on_model_change():
                 logger.info(
-                    "[REINDEX-USER] смена embedding user=%s scope=%s → scoped reindex (без Memory)",
+                    "[REINDEX-USER] смена embedding user=%s scope=%s entity=%s → scoped reindex (без Memory)",
                     user_id,
                     scope,
+                    entity_id,
                 )
                 asyncio.create_task(
                     _run_background_reindex_for_user(
-                        user_id, chunk_params_from_rag_settings(merged), scope
+                        user_id,
+                        chunk_params_from_rag_settings(merged),
+                        scope,
+                        project_id=body.project_id,
+                        agent_id=body.agent_id,
                     )
                 )
         else:
-            await save_user_rag_settings(
-                user_id, {"rag_reranker_model_path": model_path}, scope
+            await save_entity_rag_settings(
+                scope, entity_id, {"rag_reranker_model_path": model_path}, user_id
             )
             bump_rag_semantic_cache()
-        result["message"] = "Модель сохранена в ваших настройках"
+        result["message"] = "Модель сохранена в настройках этого агента или проекта"
         result["reindexed"] = (
             model_type == "embedding" and _reindex_on_model_change()
         )
         logger.info(
-            "[RAG-CFG] персональный выбор модели user=%s type=%s path=%s "
+            "[RAG-CFG] выбор модели для %s %s пользователем %s: type=%s path=%s "
             "(кластер и Библиотека не меняются)",
+            "агента" if scope == "agent" else "проекта",
+            entity_id,
             user_id,
             model_type,
             model_path,
@@ -1644,12 +1959,45 @@ async def kb_upload_document(
             owner_user_id = str(agent.author_id or uploader_id).strip().lower()
             resolved_agent_id = int(agent_id)
 
-        # Чанкинг: настройки владельца агента (он же контролирует rechunk)
-        settings_user = owner_user_id or uploader_id
-        user_rag = (
-            await get_user_rag_settings(settings_user, "agent") if settings_user else {}
+        # Нарезка и модель — из настроек САМОГО агента: файл должен лечь теми же
+        # параметрами, которыми по нему потом будут искать. Чей это агент и кто
+        # заливает — уже неважно, вопрос «настройки владельца или редактора» снят.
+        agent_rag = (
+            await get_entity_rag_settings("agent", resolved_agent_id)
+            if resolved_agent_id
+            else {}
         )
-        chunk_params = chunk_params_from_rag_settings(user_rag) if user_rag else get_rag_chunk_index_params()
+        from backend.services.user_rag_settings import (
+            embedding_fields_from_rag_settings,
+            reranker_fields_from_rag_settings,
+        )
+
+        emb_fields = embedding_fields_from_rag_settings(agent_rag)
+        # Без явной модели агент уезжал бы в кластерный дефолт без имени модели.
+        if resolved_agent_id is not None and not emb_fields.get("embedding_model"):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Сначала выберите модель эмбеддингов в настройках РАГ для агента"
+                ),
+            )
+        if resolved_agent_id is not None and bool(
+            agent_rag.get("rag_reranking_enabled", True)
+        ):
+            rer_fields = reranker_fields_from_rag_settings(agent_rag)
+            if not rer_fields.get("reranker_model"):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Сначала выберите модель реранкера в настройках РАГ для агента"
+                    ),
+                )
+
+        chunk_params = (
+            chunk_params_from_rag_settings(agent_rag)
+            if agent_rag
+            else get_rag_chunk_index_params()
+        )
         strategy = (chunking_strategy or "").strip().lower()
         if strategy and strategy in _VALID_CHUNKING_STRATEGIES | {"universal"}:
             chunk_params["chunking_strategy"] = strategy
@@ -1674,12 +2022,8 @@ async def kb_upload_document(
                 )
             file_bucket = RAG_PVC_BUCKET_MARKER
         try:
-            from backend.services.user_rag_settings import (
-                embedding_fields_from_rag_settings,
-            )
-
-            # Модель владельца агента, а не заливающего: реиндекс документа
-            # потом запустит владелец из своих настроек, и модель должна совпасть.
+            # Модель агента, а не заливающего: перечанковку может запустить любой
+            # редактор, и она пойдёт из настроек агента — модель должна совпасть.
             out = await rag_client.kb_upload_document(
                 file_bytes=content,
                 filename=fn,
@@ -1689,9 +2033,9 @@ async def kb_upload_document(
                 agent_id=resolved_agent_id,
                 uploaded_by=username or None,
                 **chunk_params,
-                **embedding_fields_from_rag_settings(user_rag),
+                **emb_fields,
             )
-        except Exception as e:
+        except Exception:
             if file_object_name and file_bucket:
                 with logged_suppress(logger):
                     _delete_rag_source_file(file_object_name, file_bucket)

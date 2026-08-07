@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Просмотр презентации — AstraChat</title>
+  <script src="/static/dom-to-pptx.bundle.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      background: #e5e7eb;
+      font-family: 'Segoe UI', sans-serif;
+    }
+    #viewer {
+      width: 297mm;
+      height: 167mm;
+      background: white;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+      position: relative;
+      overflow: hidden;
+      margin-bottom: 12px;
+    }
+    #viewer:empty::after {
+      content: 'Загрузка...';
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      color: #999;
+    }
+    .toolbar {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+    button {
+      padding: 10px 24px;
+      background: #2355D7;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    button:disabled {
+      background: #9ca3af;
+      cursor: not-allowed;
+    }
+    button.secondary {
+      background: #fff;
+      color: #2355D7;
+      border: 1px solid #2355D7;
+    }
+    #counter { margin-top: 8px; font-size: 12px; color: #666; }
+    #error {
+      display: none;
+      max-width: 720px;
+      margin: 12px auto;
+      padding: 12px 16px;
+      background: #fee2e2;
+      color: #991b1b;
+      border-radius: 8px;
+      font-size: 14px;
+    }
+    iframe { display: none; }
+  </style>
+</head>
+<body>
+  <div id="error"></div>
+  <div id="viewer"></div>
+  <div class="toolbar">
+    <button type="button" class="secondary" id="prevBtn" disabled>← Назад</button>
+    <button type="button" class="secondary" id="nextBtn" disabled>Вперёд →</button>
+    <button type="button" id="exportBtn" disabled>Скачать PPTX</button>
+  </div>
+  <div id="counter">—</div>
+  <iframe id="frame" title="presentation-source"></iframe>
+
+  <script id="src" type="text/plain"></script>
+
+  <script>
+    const STORAGE_PREFIX = 'astrachat:presentation:';
+    const slideHTMLFromScript = document.getElementById('src').textContent;
+    let slides = [];
+    let current = 0;
+    let exporting = false;
+
+    function showError(msg) {
+      const el = document.getElementById('error');
+      el.style.display = 'block';
+      el.textContent = msg;
+    }
+
+    function loadPresentationHtml() {
+      const params = new URLSearchParams(window.location.search);
+      const key = params.get('key');
+      if (key) {
+        const storageKey = STORAGE_PREFIX + key;
+        try {
+          // localStorage — общий для вкладок; sessionStorage при noopener пустой
+          let raw = localStorage.getItem(storageKey);
+          if (!raw) {
+            try { raw = sessionStorage.getItem(storageKey); } catch (_) {}
+          }
+          if (raw) {
+            try { localStorage.removeItem(storageKey); } catch (_) {}
+            try { sessionStorage.removeItem(storageKey); } catch (_) {}
+            return raw;
+          }
+        } catch (e) {
+          console.warn('storage unavailable', e);
+        }
+      }
+      return slideHTMLFromScript.trim();
+    }
+
+    function stripEmbeddedScripts(html) {
+      return html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '');
+    }
+
+    function init() {
+      const html = stripEmbeddedScripts(loadPresentationHtml());
+      if (!html) {
+        showError('HTML презентации не найден. Откройте просмотр из блока ```html в чате.');
+        return;
+      }
+
+      const frame = document.getElementById('frame');
+      frame.srcdoc = html;
+      frame.onload = () => {
+        try {
+          const doc = frame.contentDocument;
+          slides = Array.from(doc.querySelectorAll('.slide'));
+          if (!slides.length) {
+            showError('В HTML не найдены слайды с классом .slide');
+            return;
+          }
+          doc.querySelectorAll('style').forEach((s) => {
+            const ns = document.createElement('style');
+            ns.textContent = s.textContent;
+            document.head.appendChild(ns);
+          });
+          show(0);
+          document.getElementById('exportBtn').disabled = false;
+          document.getElementById('prevBtn').disabled = false;
+          document.getElementById('nextBtn').disabled = false;
+        } catch (e) {
+          showError('Ошибка загрузки HTML презентации');
+          console.error(e);
+        }
+      };
+    }
+
+    function show(i) {
+      if (i < 0 || i >= slides.length) return;
+      current = i;
+      const viewer = document.getElementById('viewer');
+      const clone = slides[i].cloneNode(true);
+      clone.style.cssText = 'width:100%;height:100%;position:absolute;top:0;left:0;margin:0;';
+      viewer.innerHTML = '';
+      viewer.appendChild(clone);
+      document.getElementById('counter').textContent = `${i + 1} / ${slides.length}`;
+    }
+
+    document.getElementById('prevBtn').addEventListener('click', () => show(current - 1));
+    document.getElementById('nextBtn').addEventListener('click', () => show(current + 1));
+
+    document.getElementById('viewer').addEventListener('wheel', (e) => {
+      e.preventDefault();
+      show(current + (e.deltaY > 0 ? 1 : -1));
+    }, { passive: false });
+
+    async function exportPptx() {
+      if (exporting || !slides.length) return;
+      if (typeof domToPptx === 'undefined' || !domToPptx.exportToPptx) {
+        showError('Библиотека dom-to-pptx не загружена. Выполните npm install и пересоберите frontend.');
+        return;
+      }
+
+      exporting = true;
+      const btn = document.getElementById('exportBtn');
+      btn.disabled = true;
+      btn.textContent = 'Экспорт...';
+
+      const wrap = document.createElement('div');
+      wrap.style.cssText = 'position:fixed;left:-9999px;top:0;';
+      document.body.appendChild(wrap);
+
+      const elems = slides.map((s) => {
+        const d = document.createElement('div');
+        d.style.cssText = 'width:297mm;height:167mm;overflow:hidden;position:relative;';
+        const c = s.cloneNode(true);
+        c.style.cssText = 'width:100%;height:100%;margin:0;font-family:"Cera CY",sans-serif;';
+        d.appendChild(c);
+        wrap.appendChild(d);
+        return d;
+      });
+
+      try {
+        await domToPptx.exportToPptx(elems, {
+          fileName: 'presentation.pptx',
+          svgAsVector: true,
+          autoEmbedFonts: false,
+        });
+      } catch (e) {
+        showError('Ошибка экспорта в PPTX: ' + (e && e.message ? e.message : String(e)));
+        console.error(e);
+      } finally {
+        wrap.remove();
+        exporting = false;
+        btn.disabled = false;
+        btn.textContent = 'Скачать PPTX';
+      }
+    }
+
+    document.getElementById('exportBtn').addEventListener('click', exportPptx);
+    init();
+  </script>
+</body>
+</html>

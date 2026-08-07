@@ -30,6 +30,7 @@ import {
 } from '@mui/icons-material';
 import { getApiUrl, API_ENDPOINTS, getAuthFetchHeaders } from '../config/api';
 import { useAppActions } from '../contexts/AppContext';
+import { ragDocumentDisplayIndex } from '../utils/ragDocumentDisplayIndex';
 
 export interface MemoryRagDoc {
   id: number;
@@ -295,7 +296,11 @@ export default function MemoryRagLibraryModal({ open, onClose }: Props) {
                     </>
                   }
                 />
-                <Chip size="small" label={`#${doc.id}`} sx={{ mr: 4 }} />
+                <Chip
+                  size="small"
+                  label={`#${ragDocumentDisplayIndex(documents, doc.id)}`}
+                  sx={{ mr: 4 }}
+                />
               </ListItem>
             ))}
           </List>

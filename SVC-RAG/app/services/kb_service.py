@@ -25,8 +25,6 @@ from app.services.stage_timer import StageTimer
 
 logger = get_logger(__name__)
 
-_kb_reindex_generation = 0
-
 def _doc_actors(doc):
     """(owner, uploader, filename) из документа. Принимает и объект, и dict."""
     if isinstance(doc, dict):
@@ -45,14 +43,27 @@ def _doc_actors(doc):
     uploader = str(meta.get("uploaded_by") or "-").strip() or "-"
     return owner, uploader, name
 
-def bump_kb_reindex_generation() -> int:
-    """Увеличивает номер поколения реиндекса KB (сигнал текущим — прерваться)."""
-    global _kb_reindex_generation
-    _kb_reindex_generation += 1
-    return _kb_reindex_generation
+def bump_kb_reindex_generation(key: str = "*") -> int:
+    """Новое поколение реиндекса KB — сигнал текущему проходу ЭТОГО ключа прерваться.
 
-def current_kb_reindex_generation() -> int:
-    return _kb_reindex_generation
+    Ключ — конкретная сущность (``agent:<id>``, ``owner:<uid>``) либо ``*`` для
+    кластерного прогона. Раньше счётчик был один на сервис, и старт пересборки
+    одного агента прерывал пересборку другого на полпути.
+    """
+    from app.services.reindex_queue import kb_queue
+
+    return kb_queue.bump(key)
+
+def current_kb_reindex_generation(key: str = "*") -> int:
+    from app.services.reindex_queue import kb_queue
+
+    return kb_queue.current(key)
+
+def kb_generation_is_current(key: str, generation: Optional[int]) -> bool:
+    """Актуален ли проход. ``generation=None`` — прерывание не запрашивалось."""
+    from app.services.reindex_queue import kb_queue
+
+    return kb_queue.is_current(key, generation)
 
 MAX_KB_CONTEXT_CHARS = 12000
 
@@ -427,6 +438,7 @@ class KbService:
         chunk_overlap: Optional[int] = None,
         chunking_strategy: Optional[str] = None,
         generation: Optional[int] = None,
+        generation_key: str = "*",
         owner_user_id: Optional[str] = None,
         document_ids: Optional[List[int]] = None,
         model: Optional[str] = None,
@@ -466,11 +478,15 @@ class KbService:
         n_chunks = 0
         n_errors = 0
         for doc in docs:
-            if generation is not None and generation != _kb_reindex_generation:
+            # Прерываемся, только если заново запустили ЭТУ ЖЕ сущность: значит
+            # её настройки изменились и текущий проход уже неактуален. Пересборка
+            # соседнего агента нас не касается.
+            if not kb_generation_is_current(generation_key, generation):
                 logger.info(
-                    "[REINDEX kb] прерван: начат новый реиндекс (gen %s→%s)",
+                    "[REINDEX kb] %s прерван: начат новый реиндекс этой же сущности (gen %s→%s)",
+                    generation_key,
                     generation,
-                    _kb_reindex_generation,
+                    current_kb_reindex_generation(generation_key),
                 )
                 break
             try:

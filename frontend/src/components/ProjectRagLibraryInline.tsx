@@ -24,6 +24,8 @@ import {
   Refresh as RefreshIcon,
 } from '@mui/icons-material';
 import { getApiUrl, API_ENDPOINTS, getAuthFetchHeaders } from '../config/api';
+import { useRagEntityReadyMessage } from '../hooks/useRagEntityReadyMessage';
+import { ragDocumentDisplayIndex } from '../utils/ragDocumentDisplayIndex';
 
 export interface ProjectRagDoc {
   id: number;
@@ -67,13 +69,16 @@ export default function ProjectRagLibraryInline({
   projectId,
   onResolveProjectId,
   autoLoad = true,
-  subtitle = 'Документы только этого проекта. В чатах проекта подключаются автоматически — отдельный тумблер не нужен.',
+  subtitle = 'Оригиналы в MinIO, чанки и векторы — в PostgreSQL (только этот проект)',
   dense = false,
 }: ProjectRagLibraryInlineProps) {
   const [documents, setDocuments] = useState<ProjectRagDoc[]>([]);
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
-  const [banner, setBanner] = useState<{ message: string; severity: 'success' | 'error' | 'info' } | null>(null);
+  const [banner, setBanner] = useState<{
+    message: string;
+    severity: 'success' | 'error' | 'info' | 'warning';
+  } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [resolvedId, setResolvedId] = useState<string | null>(projectId);
 
@@ -82,6 +87,46 @@ export default function ProjectRagLibraryInline({
   }, [projectId]);
 
   const effectiveId = resolvedId ?? projectId;
+
+  const { readyMessage: ragReadyMessage, clearReadyMessage: clearRagReadyMessage } =
+    useRagEntityReadyMessage('project', effectiveId);
+
+  const showModelGuard = useCallback((message: string) => {
+    setBanner({ message, severity: 'warning' });
+  }, []);
+
+  /** Модели из настроек проекта (уже сохранённых в БД). */
+  const resolveProjectRagModelPaths = useCallback(
+    async (
+      pid: string,
+    ): Promise<{
+      embeddingPath: string;
+      rerankerPath: string;
+      rerankingEnabled: boolean;
+    }> => {
+      try {
+        const resp = await fetch(
+          getApiUrl(`/api/rag/settings?scope=project&project_id=${encodeURIComponent(pid)}`),
+          { headers: getAuthFetchHeaders() },
+        );
+        if (!resp.ok) {
+          return { embeddingPath: '', rerankerPath: '', rerankingEnabled: true };
+        }
+        const data = (await resp.json()) as Record<string, unknown>;
+        return {
+          embeddingPath: String(data.rag_embedding_model_path || '').trim(),
+          rerankerPath: String(data.rag_reranker_model_path || '').trim(),
+          rerankingEnabled:
+            typeof data.rag_reranking_enabled === 'boolean'
+              ? data.rag_reranking_enabled
+              : true,
+        };
+      } catch {
+        return { embeddingPath: '', rerankerPath: '', rerankingEnabled: true };
+      }
+    },
+    [],
+  );
 
   const fetchList = useCallback(async (pid: string): Promise<ProjectRagDoc[]> => {
     const url = getApiUrl((API_ENDPOINTS.PROJECT_RAG_LIST as (id: string) => string)(pid));
@@ -156,11 +201,27 @@ export default function ProjectRagLibraryInline({
   };
 
   const uploadFiles = async (files: FileList | File[]) => {
-    const list = Array.from(files);
+    // Снимок ДО любых await: FileList живой и обнуляется с value input.
+    const list = Array.from(files || []);
     if (!list.length) return;
 
     const pid = await ensureProjectId();
     if (!pid) return;
+
+    const { embeddingPath, rerankerPath, rerankingEnabled } =
+      await resolveProjectRagModelPaths(pid);
+    if (!embeddingPath) {
+      showModelGuard(
+        'Сначала выберите модель эмбеддингов в настройках РАГ для проекта',
+      );
+      return;
+    }
+    if (rerankingEnabled && !rerankerPath) {
+      showModelGuard(
+        'Сначала выберите модель реранкера в настройках РАГ для проекта',
+      );
+      return;
+    }
 
     const valid = list.filter((f) => {
       const ext = '.' + f.name.split('.').pop()?.toLowerCase();
@@ -184,7 +245,35 @@ export default function ProjectRagLibraryInline({
         const resp = await fetch(url, { method: 'POST', headers: getAuthFetchHeaders(), body: fd });
         if (!resp.ok) {
           const err = await resp.json().catch(() => ({ detail: resp.statusText }));
-          throw new Error(typeof err.detail === 'string' ? err.detail : JSON.stringify(err.detail));
+          const detail = err.detail;
+          const msg =
+            typeof detail === 'string'
+              ? detail
+              : Array.isArray(detail)
+                ? detail
+                    .map((d: unknown) =>
+                      typeof d === 'object' && d && 'msg' in d
+                        ? String((d as { msg: unknown }).msg)
+                        : String(d),
+                    )
+                    .join('; ')
+                : JSON.stringify(detail);
+          // Сообщения про модели — оранжевая табличка, остальное error.
+          if (
+            typeof msg === 'string' &&
+            (msg.includes('эмбеддинг') || msg.includes('реранкер'))
+          ) {
+            showModelGuard(msg);
+          } else {
+            setBanner({ message: `${file.name}: ${msg}`, severity: 'error' });
+          }
+          setUploading(false);
+          try {
+            setDocuments(await fetchList(pid));
+          } catch {
+            /* ignore */
+          }
+          return;
         }
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -249,8 +338,11 @@ export default function ProjectRagLibraryInline({
         hidden
         accept=".pdf,.doc,.docx,.docm,.xls,.xlsx,.xlsm,.txt,.csv,.md,.log,.rtf"
         onChange={(e) => {
-          if (e.target.files?.length) uploadFiles(e.target.files);
+          const list = e.target.files;
+          if (!list?.length) return;
+          const snapshot = Array.from(list);
           e.target.value = '';
+          void uploadFiles(snapshot);
         }}
       />
       <UploadIcon sx={{ fontSize: dense ? 32 : 40, color: 'text.secondary', mb: 1 }} />
@@ -273,15 +365,47 @@ export default function ProjectRagLibraryInline({
   return (
     <Box>
       <Typography variant="subtitle2" fontWeight={600} gutterBottom>
-        Документы проекта
+        Файлы проекта (RAG)
       </Typography>
       <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1 }}>
         {subtitle}
       </Typography>
 
       {banner && (
-        <Alert severity={banner.severity} onClose={() => setBanner(null)} sx={{ mb: 2 }}>
+        <Alert
+          severity={banner.severity}
+          onClose={() => setBanner(null)}
+          sx={
+            banner.severity === 'warning'
+              ? {
+                  mb: 2,
+                  bgcolor: 'rgba(255, 152, 0, 0.12)',
+                  color: 'warning.main',
+                  border: '1px solid',
+                  borderColor: 'warning.main',
+                  '& .MuiAlert-icon': { color: 'warning.main' },
+                }
+              : { mb: 2 }
+          }
+        >
           {banner.message}
+        </Alert>
+      )}
+
+      {ragReadyMessage && (
+        <Alert
+          severity="success"
+          onClose={clearRagReadyMessage}
+          sx={{
+            mb: 2,
+            bgcolor: 'rgba(76, 175, 80, 0.12)',
+            color: 'success.main',
+            border: '1px solid',
+            borderColor: 'success.main',
+            '& .MuiAlert-icon': { color: 'success.main' },
+          }}
+        >
+          {ragReadyMessage}
         </Alert>
       )}
 
@@ -340,7 +464,11 @@ export default function ProjectRagLibraryInline({
                   </>
                 }
               />
-              <Chip size="small" label={`#${doc.id}`} sx={{ mr: 4 }} />
+              <Chip
+                size="small"
+                label={`#${ragDocumentDisplayIndex(documents, doc.id)}`}
+                sx={{ mr: 4 }}
+              />
             </ListItem>
           ))}
         </List>

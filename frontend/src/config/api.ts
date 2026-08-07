@@ -52,6 +52,8 @@ export const API_ENDPOINTS = {
   PROJECT_RAG_SEARCH: (projectId: string) => `/api/project-rag/projects/${projectId}/search`,
 
   // Управление проектами
+  PROJECTS: '/api/projects',
+  PROJECT_ITEM: (projectId: string) => `/api/projects/${encodeURIComponent(projectId)}`,
   PROJECT_DELETE: (projectId: string) => `/api/projects/${projectId}`,
   
   // Модели
@@ -71,6 +73,9 @@ export const API_ENDPOINTS = {
   AUTH_LOGIN_LOCKOUT_POLICY: '/api/auth/login-lockout-policy',
   AUTH_SESSION_POLICY: '/api/auth/session-policy',
   AUTH_SERVER_INSTANCE: '/api/auth/server-instance',
+  AUTH_SSO_PROVIDERS: '/api/auth/sso/providers',
+  AUTH_SSO_KEYCLOAK_LOGIN: '/api/auth/sso/keycloak/login',
+  AUTH_SSO_KEYCLOAK_EXCHANGE: '/api/auth/sso/keycloak/exchange',
 
   // MCP (Model Context Protocol)
   MCP_SERVERS: '/api/mcp/servers',

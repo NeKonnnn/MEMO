@@ -12,6 +12,7 @@ import { getApiUrl, getAuthFetchHeaders } from '../config/api';
 import { useAppContext } from './AppContext';
 import { getSettings, initSettings } from '../settings';
 import {
+  isRagReindexBannerVisible,
   ragReindexBlockMessage,
   shouldBlockRagSend,
   type RagReindexStatusPayload,
@@ -37,6 +38,7 @@ const defaultStatus: RagReindexStatusPayload = {
   project_has_documents: false,
   memory_rag_enabled: true,
   message: '',
+  active: [],
 };
 
 const RagReindexStatusContext = createContext<RagReindexStatusContextValue>({
@@ -66,16 +68,12 @@ export function RagReindexStatusProvider({ children }: { children: ReactNode }) 
   const location = useLocation();
   const [status, setStatus] = useState<RagReindexStatusPayload | null>(null);
 
-  const currentChatProjectId = useMemo(() => {
-    const chat = state.chats.find((c) => c.id === state.currentChatId);
-    return chat?.projectId ?? null;
-  }, [state.chats, state.currentChatId]);
-
   const pollProjectId = useMemo(() => {
     const routeProjectId = projectIdFromPathname(location.pathname);
     if (routeProjectId) return routeProjectId;
-    return currentChatProjectId;
-  }, [location.pathname, currentChatProjectId]);
+    const chat = state.chats.find((c) => c.id === state.currentChatId);
+    return chat?.projectId ?? null;
+  }, [location.pathname, state.chats, state.currentChatId]);
 
   const pollAgentId = useMemo(() => readActiveAgentId(), [location.pathname, state.currentChatId]);
 
@@ -101,7 +99,8 @@ export function RagReindexStatusProvider({ children }: { children: ReactNode }) 
       const poll = async () => {
         const activeAgentId = readActiveAgentId();
         const routeProjectId = projectIdFromPathname(location.pathname);
-        const activeProjectId = routeProjectId ?? currentChatProjectId;
+        const chat = state.chats.find((c) => c.id === state.currentChatId);
+        const activeProjectId = routeProjectId ?? chat?.projectId ?? null;
         const params = new URLSearchParams();
         if (activeAgentId != null) {
           params.set('agent_id', String(activeAgentId));
@@ -125,6 +124,7 @@ export function RagReindexStatusProvider({ children }: { children: ReactNode }) 
             project_has_documents: Boolean(data.project_has_documents),
             memory_rag_enabled: data.memory_rag_enabled !== false,
             message: typeof data.message === 'string' ? data.message : '',
+            active: Array.isArray(data.active) ? data.active : [],
           });
         } catch {
           /* ignore transient network errors */
@@ -140,10 +140,17 @@ export function RagReindexStatusProvider({ children }: { children: ReactNode }) 
       cancelled = true;
       if (interval) clearInterval(interval);
     };
-  }, [location.pathname, currentChatProjectId, pollProjectId, pollAgentId]);
+  }, [location.pathname, state.chats, state.currentChatId, pollProjectId, pollAgentId]);
 
   const effectiveStatus = status ?? defaultStatus;
-  const blockMessage = ragReindexBlockMessage(effectiveStatus);
+  const bannerCtx = useMemo(
+    () => ({ agentId: pollAgentId, projectId: pollProjectId }),
+    [pollAgentId, pollProjectId],
+  );
+  // Плашка не по глобальному any_reindexing: чужой проект не должен светить
+  // оранжевым у всех. Агенты — как раньше (любой agent в active).
+  const anyReindexing = isRagReindexBannerVisible(effectiveStatus, bannerCtx);
+  const blockMessage = ragReindexBlockMessage(effectiveStatus, bannerCtx);
 
   const shouldBlock = useCallback(
     (ctx: Pick<RagSendBlockContext, 'libraryEnabled'>) =>
@@ -151,21 +158,24 @@ export function RagReindexStatusProvider({ children }: { children: ReactNode }) 
         libraryEnabled: ctx.libraryEnabled,
         projectHasDocuments: effectiveStatus.project_has_documents,
         agentHasKb: effectiveStatus.agent_has_kb,
+        // Чей это чат: пересборка соседнего агента отправку блокировать не должна.
+        agentId: pollAgentId,
+        projectId: pollProjectId,
       }),
-    [effectiveStatus],
+    [effectiveStatus, pollAgentId, pollProjectId],
   );
 
   const value = useMemo(
     () => ({
       status: effectiveStatus,
-      anyReindexing: effectiveStatus.any_reindexing,
+      anyReindexing,
       agentHasKb: effectiveStatus.agent_has_kb,
       projectHasDocuments: effectiveStatus.project_has_documents,
       memoryRagEnabled: effectiveStatus.memory_rag_enabled !== false,
       blockMessage,
       shouldBlockRagSend: shouldBlock,
     }),
-    [effectiveStatus, blockMessage, shouldBlock],
+    [effectiveStatus, anyReindexing, blockMessage, shouldBlock],
   );
 
   return (

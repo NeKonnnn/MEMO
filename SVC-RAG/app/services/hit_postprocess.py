@@ -5,9 +5,18 @@ from __future__ import annotations
 import logging
 from typing import Any, List, Optional, Tuple
 
+from app.services.hit_types import RagHit
+
 logger = logging.getLogger(__name__)
 
 HitRow = Tuple[str, float, Optional[int], Optional[int]]
+
+
+def _keep(row: HitRow, content: str) -> HitRow:
+    """Строка с новым текстом, не теряя сырой cosine у ```RagHit```."""
+    if isinstance(row, RagHit):
+        return row.with_content(content)
+    return (content, row[1], row[2], row[3])
 
 
 async def apply_rerank_min_and_window(
@@ -28,20 +37,21 @@ async def apply_rerank_min_and_window(
     get_chunks = getattr(vector_repo, "get_chunk_contents_by_indices", None)
     if not get_chunks:
         return out
-    for content, score, doc_id, chunk_idx in out:
+    for row in out:
+        content, __dict__score, doc_id, chunk_idx = row
         if doc_id is None or chunk_idx is None:
-            expanded.append((content, score, doc_id, chunk_idx))
+            expanded.append(row)
             continue
         neigh = [int(chunk_idx) + d for d in range(-sentence_window, sentence_window + 1) if int(chunk_idx) + d >= 0]
         try:
             cmap = await get_chunks(int(doc_id), neigh)
         except Exception as e:
             logger.debug("sentence_window fetch failed: %s", e)
-            expanded.append((content, score, doc_id, chunk_idx))
+            expanded.append(row)
             continue
         if not cmap:
-            expanded.append((content, score, doc_id, chunk_idx))
+            expanded.append(row)
             continue
         merged = "\n---\n".join(cmap[i] for i in sorted(cmap.keys()))
-        expanded.append((merged, score, doc_id, chunk_idx))
+        expanded.append(_keep(row, merged))
     return expanded

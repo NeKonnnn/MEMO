@@ -157,16 +157,16 @@ export default function GalleryNavButton({ variant, isDarkMode }: GalleryNavButt
           selected={open}
           sx={{
             ...SIDEBAR_CHAT_ROW_LIST_ITEM_BUTTON_SX,
-            color: 'white',
-            backgroundColor: open ? 'rgba(255,255,255,0.12)' : 'transparent',
+            color: 'var(--sidebar-fg, #ffffff)',
+            backgroundColor: open ? 'var(--sidebar-selected-bg, rgba(255,255,255,0.12))' : 'transparent',
             '&:hover': {
-              backgroundColor: 'rgba(255,255,255,0.08)',
+              backgroundColor: 'var(--sidebar-hover-bg, rgba(255,255,255,0.08))',
             },
           }}
         >
           <ListItemIcon
             sx={{
-              color: '#ffffff',
+              color: 'var(--sidebar-fg, #ffffff)',
               minWidth: 40,
               mr: `${SIDEBAR_LIST_ICON_TO_TEXT_GAP_PX}px`,
               '& .MuiSvgIcon-root': { fontSize: '1.375rem' },
@@ -177,13 +177,13 @@ export default function GalleryNavButton({ variant, isDarkMode }: GalleryNavButt
           <ListItemText
             primary="Галерея"
             primaryTypographyProps={{
-              sx: { fontSize: '0.8rem', fontWeight: 400, color: '#ffffff' },
+              sx: { fontSize: '0.8rem', fontWeight: 400, color: 'var(--sidebar-fg, #ffffff)' },
             }}
           />
           <ExpandMoreIcon
             sx={{
               fontSize: 18,
-              color: 'rgba(255,255,255,0.55)',
+              color: 'var(--sidebar-muted-fg, rgba(255,255,255,0.55))',
               transform: open ? 'rotate(180deg)' : 'rotate(-90deg)',
               transition: 'transform 0.15s ease',
             }}

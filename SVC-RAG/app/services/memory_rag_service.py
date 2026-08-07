@@ -22,9 +22,9 @@ from app.services.chunker import (
 )
 from app.services.document_parser import parse_document
 from app.services.retrieval_pipeline import RetrievalTrace, run_retrieval_pipeline
+from app.services.stage_timer import StageTimer
 from app.text_sanitize import strip_null_bytes
 from app.services.hierarchical_indexing import index_document_hierarchically
-from app.services.stage_timer import StageTimer
 
 logger = get_logger(__name__)
 

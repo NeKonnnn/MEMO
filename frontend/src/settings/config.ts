@@ -18,6 +18,8 @@ export interface AppConfig {
   version: string;
   description: string;
   debug: boolean;
+  llmStatusPollSeconds: number;
+  llmStatusPollTrace: boolean;
   ragReindexStatusPollSeconds: number;
 }
 
@@ -52,6 +54,17 @@ const loadConfig = async (): Promise<SettingsConfig> => {
         throw new Error('В config.yml отсутствует секция urls. Проверьте формат файла.');
       }
 
+      const llmStatusPollSeconds = Number.parseInt(String(configData.app?.llm_status_poll_seconds ?? ''), 10);
+      if (!Number.isFinite(llmStatusPollSeconds) || llmStatusPollSeconds <= 0) {
+        throw new Error(
+          'В config.yml app.llm_status_poll_seconds должен быть положительным целым числом (секунды).',
+        );
+      }
+      const llmStatusPollTrace =
+        String(configData.app?.llm_status_poll_trace ?? '')
+          .trim()
+          .toLowerCase() === 'true';
+
       const ragReindexStatusPollSeconds = Number.parseInt(
         String(configData.app?.rag_reindex_status_poll_seconds ?? '10'),
         10,
@@ -67,6 +80,8 @@ const loadConfig = async (): Promise<SettingsConfig> => {
         version: configData.app?.version || '1.0.0',
         description: configData.app?.description || 'Frontend for astrachat',
         debug: configData.app?.debug ?? false,
+        llmStatusPollSeconds,
+        llmStatusPollTrace,
         ragReindexStatusPollSeconds,
       };
 

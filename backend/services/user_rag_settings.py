@@ -1,10 +1,18 @@
 """
-Персональные RAG-настройки пользователя.
+RAG-настройки агентов и проектов.
 
-Глобальный settings.json / app_state — только seed/defaults.
-Чанкинг/модели/top_k/rerank/strategy для project + agent RAG — PostgreSQL
-user_llm_settings.rag_settings. На время обработки чата настройки
-прокидываются через ContextVar (см. bind_user_rag_runtime).
+Настройки принадлежат СУЩНОСТИ, а не пользователю: у каждого агента и каждого
+проекта свой набор, он один на всех, кому агента расшарили, и переживает смену
+владельца. Хранилище — таблица ``entity_rag_settings`` (см.
+``database/postgresql/entity_settings_repository.py``). Глобальный settings.json
+/ app_state остаются seed-дефолтами для сущностей, которых не настраивали.
+
+Библиотека (memory) сюда не входит: её модель, чанкинг, пороги и препроцесс —
+только из env, см. ``memory_rag_env``. Из настроек пользователя у неё остаётся
+одна стратегия поиска.
+
+На время обработки чата снимки активных сущностей прокидываются через ContextVar
+(см. ``bind_user_rag_runtime``).
 """
 
 from __future__ import annotations
@@ -18,9 +26,10 @@ from backend.settings.logging import get_logger
 
 logger = get_logger(__name__)
 
-_RAG_SETTING_KEYS = (
+# Все настройки — пер-сущностные. Исключение одно: rag_memory_strategy, это
+# стратегия поиска по Библиотеке, она общая и живёт в user_llm_settings.
+RAG_SETTING_KEYS: Tuple[str, ...] = (
     "rag_strategy",
-    "rag_memory_strategy",
     "agentic_rag_enabled",
     "agentic_max_iterations",
     "rag_query_fix_typos",
@@ -38,60 +47,69 @@ _RAG_SETTING_KEYS = (
     "rag_reranker_model_path",
 )
 
-# Персональные настройки текущего запроса чата/поиска (не глобальный app_state).
-_user_rag_runtime: ContextVar[Optional[Dict[str, Any]]] = ContextVar(
-    "user_rag_runtime", default=None
+# Совместимость с прежним именем: на него ссылался внешний код.
+_RAG_SETTING_KEYS = RAG_SETTING_KEYS
+
+# Поля, изменение которых требует пересборки индекса. Отдельный список, потому
+# что top_k или порог similarity менять можно сколько угодно — они на нарезку и
+# вектора не влияют.
+INDEX_AFFECTING_KEYS: Tuple[str, ...] = (
+    "rag_chunking_strategy",
+    "rag_chunk_size",
+    "rag_chunk_overlap",
+    "rag_embedding_model_path",
 )
 
-# Сырая запись со ```scopes``` — чтобы на лету доставать настройки нужного стора.
-_user_rag_runtime_raw: ContextVar[Optional[Dict[str, Any]]] = ContextVar(
-    "user_rag_runtime_raw", default=None
+SCOPES: Tuple[str, ...] = ("project", "agent")
+DEFAULT_SCOPE = "project"
+
+# Ключ настроек Библиотеки в строке пользователя.
+MEMORY_STRATEGY_KEY = "rag_memory_strategy"
+
+# Снимки настроек сущностей текущего запроса: {"agent": {...}, "project": {...}}.
+_runtime_scopes: ContextVar[Optional[Dict[str, Dict[str, Any]]]] = ContextVar(
+    "rag_runtime_scopes", default=None
 )
+# Стратегия поиска по Библиотеке текущего пользователя.
+_runtime_memory_strategy: ContextVar[Optional[str]] = ContextVar(
+    "rag_runtime_memory_strategy", default=None
+)
+
+
+def normalize_scope(raw: Optional[str]) -> str:
+    s = (raw or "").strip().lower()
+    return s if s in SCOPES else DEFAULT_SCOPE
+
+
+def normalize_entity_id(raw: Any) -> Optional[str]:
+    s = str(raw if raw is not None else "").strip()
+    return s or None
+
 
 def _defaults_from_app_state() -> Dict[str, Any]:
+    """Дефолты кластера: settings.json / ConfigMap через app_state."""
     try:
         from backend import app_state as state
 
         return {
-            "rag_strategy": str(
-                getattr(state, "current_rag_strategy", "auto") or "auto"
-            ),
-            "rag_memory_strategy": str(
-                getattr(state, "rag_memory_strategy", "") 
-                or getattr(state, "current_rag_strategy", "auto") 
-                or "auto"
-            ),
+            "rag_strategy": str(getattr(state, "current_rag_strategy", "auto") or "auto"),
             "agentic_rag_enabled": bool(getattr(state, "agentic_rag_enabled", True)),
-            "agentic_max_iterations": int(
-                getattr(state, "agentic_max_iterations", 2) or 2
-            ),
+            "agentic_max_iterations": int(getattr(state, "agentic_max_iterations", 2) or 2),
             "rag_query_fix_typos": bool(getattr(state, "rag_query_fix_typos", False)),
-            "rag_multi_query_enabled": bool(
-                getattr(state, "rag_multi_query_enabled", False)
-            ),
+            "rag_multi_query_enabled": bool(getattr(state, "rag_multi_query_enabled", False)),
             "rag_hyde_enabled": bool(getattr(state, "rag_hyde_enabled", False)),
             "rag_chat_top_k": int(getattr(state, "rag_chat_top_k", 12) or 12),
             "rag_chunking_strategy": str(
-                getattr(state, "rag_chunking_strategy", "hierarchical")
-                or "hierarchical"
+                getattr(state, "rag_chunking_strategy", "hierarchical") or "hierarchical"
             ),
             "rag_chunk_size": int(getattr(state, "rag_chunk_size", 1000) or 1000),
             "rag_chunk_overlap": int(getattr(state, "rag_chunk_overlap", 200) or 200),
             "rag_similarity_threshold": float(
                 getattr(state, "rag_similarity_threshold", 0.0) or 0.0
             ),
-            "rag_reranking_enabled": bool(
-                getattr(state, "rag_reranking_enabled", True)
-            ),
+            "rag_reranking_enabled": bool(getattr(state, "rag_reranking_enabled", True)),
             "rag_rerank_top_n": int(getattr(state, "rag_rerank_top_n", 12) or 12),
-            "rag_system_prompt": str(
-                getattr(
-                    state,
-                    "rag_system_prompt",
-                    "",
-                )
-                or ""
-            ),
+            "rag_system_prompt": str(getattr(state, "rag_system_prompt", "") or ""),
             "rag_embedding_model_path": str(
                 getattr(state, "rag_embedding_model_path", "") or ""
             ),
@@ -103,7 +121,6 @@ def _defaults_from_app_state() -> Dict[str, Any]:
         logger.exception("user_rag_settings: defaults from app_state failed")
         return {
             "rag_strategy": "auto",
-            "rag_memory_strategy": "auto",
             "agentic_rag_enabled": True,
             "agentic_max_iterations": 2,
             "rag_query_fix_typos": False,
@@ -121,158 +138,277 @@ def _defaults_from_app_state() -> Dict[str, Any]:
             "rag_reranker_model_path": "",
         }
 
-# --- Скоупы: проекты и агенты настраиваются раздельно -----------------------
-# Библиотека сюда не входит: её настройки только из env (см. memory_rag_env).
-SCOPES: Tuple[str, ...] = ("project", "agent")
-DEFAULT_SCOPE = "project"
 
-# Всё, что влияет на нарезку, векторизацию и выдачу по документам конкретного
-# стора. У проектов и агентов свои значения.
-_SCOPED_KEYS: Tuple[str, ...] = (
-    "rag_memory_strategy",
-    "rag_chunking_strategy",
-    "rag_chunk_size",
-    "rag_chunk_overlap",
-    "rag_embedding_model_path",
-    "rag_reranker_model_path",
-    "rag_system_prompt",
-    "rag_chat_top_k",
-    "rag_similarity_threshold",
-    "rag_reranking_enabled",
-    "rag_rerank_top_n",
-)
+def default_rag_settings_snapshot() -> Dict[str, Any]:
+    return deepcopy(_defaults_from_app_state())
 
-# Общие для обоих скоупов. Стратегия поиска сюда НЕ входит - она у каждого стора
-# своя (у Библиотеки - rag_memory_strategy)
-_GLOBAL_KEYS: Tuple[str, ...] = tuple(
-    k for k in _RAG_SETTING_KEYS if k not in _SCOPED_KEYS
-)
 
-_SCOPES_FIELD = "scopes"
-
-def normalize_scope(raw: Optional[str]) -> str:
-    s = (raw or "").strip().lower()
-    return s if s in SCOPES else DEFAULT_SCOPE
-
-def _merge(stored: Optional[Dict[str, Any]], scope: Optional[str] = None) -> Dict[str, Any]:
-    """Плоский снимок настроек для одного скоупа.
-
-    Форма хранения: общие ключи лежат в корне, скоупные — в ```scopes.<scope>```.
-    Старая плоская запись (до разделения) читается как значение ОБОИХ скоупов,
-    поэтому у существующих пользователей поведение не меняется до первой правки.
-    """
+def _merge_with_defaults(stored: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     merged = _defaults_from_app_state()
-    if not isinstance(stored, dict):
-        return merged
-
-    sc = normalize_scope(scope)
-
-    # 1. Общие ключи из корня.
-    for key in _GLOBAL_KEYS:
-        if key in stored and stored[key] is not None:
-            merged[key] = stored[key]
-
-    # 2. Легаси: плоские скоупные ключи в корне — общий предок обоих скоупов.
-    for key in _SCOPED_KEYS:
-        if key in stored and stored[key] is not None:
-            merged[key] = stored[key]
-
-    # 3. Значения самого скоупа перекрывают легаси.
-    scoped = (stored.get(_SCOPES_FIELD) or {}).get(sc)
-    if isinstance(scoped, dict):
-        for key in _SCOPED_KEYS:
-            if key in scoped and scoped[key] is not None:
-                merged[key] = scoped[key]
+    if isinstance(stored, dict):
+        for key in RAG_SETTING_KEYS:
+            if key in stored and stored[key] is not None:
+                merged[key] = stored[key]
     return merged
 
-def _get_repo():
+
+def _get_entity_repo():
+    try:
+        from backend.database.init_db import get_entity_settings_repository
+
+        return get_entity_settings_repository()
+    except Exception:
+        logger.debug("entity settings repository недоступен", exc_info=True)
+        return None
+
+
+def _get_user_repo():
     try:
         from backend.database.init_db import get_user_settings_repository
 
         return get_user_settings_repository()
     except Exception:
-        logger.debug("user rag settings repository недоступен", exc_info=True)
+        logger.debug("user settings repository недоступен", exc_info=True)
         return None
 
-async def get_user_rag_settings(
-    user_id: Optional[str], scope: Optional[str] = None
+
+# --- настройки сущности -----------------------------------------------------
+
+async def get_entity_rag_settings(
+    scope: Optional[str], entity_id: Optional[Any]
 ) -> Dict[str, Any]:
-    """Плоский снимок настроек пользователя для одного скоупа (project/agent)."""
-    if not user_id:
+    """Полный снимок настроек агента или проекта.
+
+    Записи нет — чистые дефолты кластера. Не настройки того, кто спрашивает:
+    иначе у читателя расшаренного агента поиск шёл бы по его собственной модели,
+    мимо корпуса агента.
+    """
+    ek = normalize_entity_id(entity_id)
+    if not ek:
         return _defaults_from_app_state()
-    repo = _get_repo()
+    repo = _get_entity_repo()
     if repo is None:
         return _defaults_from_app_state()
-    row = await repo.get(user_id)
-    if not row:
-        return _defaults_from_app_state()
-    return _merge(row.get("rag_settings"), scope)
+    stored = await repo.get(normalize_scope(scope), ek)
+    return _merge_with_defaults(stored)
 
-async def raw_user_rag_settings(user_id: Optional[str]) -> Dict[str, Any]:
-    """Сырая запись со ```scopes``` — для привязки к контексту запроса."""
+
+async def save_entity_rag_settings(
+    scope: Optional[str],
+    entity_id: Any,
+    updates: Dict[str, Any],
+    updated_by: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Частичное обновление настроек сущности. Возвращает полный снимок.
+
+    Пишем только то, что реально отличается от дефолтов кластера: сущность без
+    расхождений строки не заводит и продолжает следовать за ConfigMap.
+    """
+    ek = normalize_entity_id(entity_id)
+    if not ek:
+        raise ValueError("entity_id обязателен")
+    sc = normalize_scope(scope)
+    repo = _get_entity_repo()
+    if repo is None:
+        logger.warning("entity_rag_settings: репозиторий недоступен — сохранение пропущено")
+        return _merge_with_defaults(updates)
+
+    stored = dict(await repo.get(sc, ek) or {})
+    for key in RAG_SETTING_KEYS:
+        if key in updates and updates[key] is not None:
+            stored[key] = updates[key]
+
+    defaults = _defaults_from_app_state()
+    payload = {
+        k: v for k, v in stored.items() if k in RAG_SETTING_KEYS and v != defaults.get(k)
+    }
+    if payload:
+        await repo.upsert(sc, ek, payload, updated_by)
+    else:
+        # Всё вернулось к дефолтам — строка не нужна, пусть сущность снова
+        # следует за ConfigMap.
+        await repo.delete(sc, ek)
+    return _merge_with_defaults(payload)
+
+
+async def reset_entity_rag_settings(
+    scope: Optional[str], entity_id: Any
+) -> Dict[str, Any]:
+    """Сброс настроек сущности к дефолтам кластера."""
+    ek = normalize_entity_id(entity_id)
+    if not ek:
+        raise ValueError("entity_id обязателен")
+    repo = _get_entity_repo()
+    if repo is not None:
+        await repo.delete(normalize_scope(scope), ek)
+    return _defaults_from_app_state()
+
+
+# --- стратегия Библиотеки (единственная настройка на пользователе) ----------
+
+async def get_user_memory_strategy(user_id: Optional[str]) -> str:
     uid = (user_id or "").strip()
     if not uid:
-        return {}
-    return await _raw_rag_settings(uid)
-
-async def _raw_rag_settings(user_id: str) -> Dict[str, Any]:
-    """Сырая запись из БД как есть (со скоупами), без слияния с дефолтами."""
-    repo = _get_repo()
+        return "auto"
+    repo = _get_user_repo()
     if repo is None:
-        return {}
-    row = await repo.get(user_id)
-    raw = (row or {}).get("rag_settings")
-    return dict(raw) if isinstance(raw, dict) else {}
+        return "auto"
+    row = await repo.get(uid)
+    stored = (row or {}).get("rag_settings")
+    if isinstance(stored, dict):
+        value = str(stored.get(MEMORY_STRATEGY_KEY) or "").strip().lower()
+        if value:
+            return value
+    return str(_defaults_from_app_state().get("rag_strategy") or "auto")
 
-async def save_user_rag_settings(
-    user_id: str, updates: Dict[str, Any], scope: Optional[str] = None
-) -> Dict[str, Any]:
-    """Частичное обновление настроек. Возвращает merged snapshot этого скоупа.
 
-    Общие ключи пишутся в корень, скоупные — в ```scopes.<scope>```, поэтому
-    правка настроек проектов не задевает агентов и наоборот.
-    """
+async def save_user_memory_strategy(user_id: str, strategy: str) -> str:
     uid = (user_id or "").strip()
     if not uid:
         raise ValueError("user_id обязателен")
-    sc = normalize_scope(scope)
-
-    raw = await _raw_rag_settings(uid)
-    scopes = dict(raw.get(_SCOPES_FIELD) or {})
-    scoped_now = dict(scopes.get(sc) or {})
-
-    # Первая запись после перехода: легаси-значения из корня становятся
-    # стартовой точкой обоих скоупов, иначе правка одного поля обнулила бы
-    # остальные до дефолтов.
-    for other in SCOPES:
-        if other in scopes:
-            continue
-        legacy = {k: raw[k] for k in _SCOPED_KEYS if raw.get(k) is not None}
-        if legacy:
-            scopes[other] = legacy
-    scoped_now = dict(scopes.get(sc) or scoped_now)
-
-    for key in _GLOBAL_KEYS:
-        if key in updates and updates[key] is not None:
-            raw[key] = updates[key]
-    for key in _SCOPED_KEYS:
-        if key in updates and updates[key] is not None:
-            scoped_now[key] = updates[key]
-
-    scopes[sc] = scoped_now
-    raw[_SCOPES_FIELD] = scopes
-    # Легаси-копии в корне больше не нужны: они переехали в оба скоупа.
-    for key in _SCOPED_KEYS:
-        raw.pop(key, None)
-
-    repo = _get_repo()
+    repo = _get_user_repo()
     if repo is None:
-        logger.warning(
-            "user_rag_settings: repo недоступен — сохранение только в памяти ответа"
-        )
-        return _merge(raw, sc)
-    await repo.upsert(uid, rag_settings=raw)
-    return _merge(raw, sc)
+        raise RuntimeError("Хранилище пользовательских настроек недоступно")
+    row = await repo.get(uid)
+    stored = dict((row or {}).get("rag_settings") or {})
+    stored[MEMORY_STRATEGY_KEY] = str(strategy or "auto").strip().lower() or "auto"
+    await repo.upsert(uid, rag_settings=stored)
+    return stored[MEMORY_STRATEGY_KEY]
+
+
+# --- привязка к запросу чата ------------------------------------------------
+
+def bind_user_rag_runtime(
+    scopes: Optional[Dict[str, Dict[str, Any]]] = None,
+    memory_strategy: Optional[str] = None,
+) -> Token:
+    """Привязать снимки настроек активных сущностей к текущему async-контексту.
+
+    ``scopes`` — {"agent": {...}, "project": {...}}; сущность не выбрана — ключа
+    нет, и её скоуп читается как дефолты кластера.
+    """
+    payload: Dict[str, Dict[str, Any]] = {}
+    if isinstance(scopes, dict):
+        for name, snapshot in scopes.items():
+            key = normalize_scope(name)
+            if isinstance(snapshot, dict) and snapshot:
+                payload[key] = dict(snapshot)
+    _runtime_memory_strategy.set(
+        str(memory_strategy).strip().lower() if memory_strategy else None
+    )
+    return _runtime_scopes.set(payload or None)
+
+
+def reset_user_rag_runtime(token: Token) -> None:
+    _runtime_scopes.reset(token)
+    _runtime_memory_strategy.set(None)
+
+
+def get_runtime_rag_settings(scope: Optional[str] = None) -> Dict[str, Any]:
+    """Настройки стора для текущего запроса. Нет привязки — дефолты кластера."""
+    current = _runtime_scopes.get()
+    if isinstance(current, dict) and current:
+        snapshot = current.get(normalize_scope(scope))
+        if isinstance(snapshot, dict) and snapshot:
+            return snapshot
+    return _defaults_from_app_state()
+
+
+# --- производные значения для пайплайна поиска ------------------------------
+
+def runtime_rag_top_k(scope: Optional[str] = None) -> int:
+    try:
+        v = int(get_runtime_rag_settings(scope).get("rag_chat_top_k") or 12)
+    except (TypeError, ValueError):
+        v = 12
+    return max(1, min(v, 64))
+
+
+def runtime_rag_strategy(scope: Optional[str] = None) -> str:
+    return str(get_runtime_rag_settings(scope).get("rag_strategy") or "auto")
+
+
+def runtime_memory_strategy() -> str:
+    """Стратегия поиска по Библиотеке: настройка пользователя, не сущности."""
+    value = _runtime_memory_strategy.get()
+    if value:
+        return value
+    return str(_defaults_from_app_state().get("rag_strategy") or "auto")
+
+
+def runtime_primary_scope() -> str:
+    """Чья настройка управляет поведением, общим для всего запроса.
+
+    Agentic-цикл и число его итераций относятся не к отдельному стору, а к
+    обработке вопроса целиком, — а настройки теперь у каждой сущности свои.
+    Правило: командует та, с которой человек разговаривает: агент, если он
+    выбран, иначе проект. Ни одной не привязано — дефолты кластера.
+    """
+    current = _runtime_scopes.get()
+    if isinstance(current, dict) and current.get("agent"):
+        return "agent"
+    return DEFAULT_SCOPE
+
+
+def runtime_agentic_rag_enabled(scope: Optional[str] = None) -> bool:
+    sc = scope or runtime_primary_scope()
+    return bool(get_runtime_rag_settings(sc).get("agentic_rag_enabled", True))
+
+
+def runtime_agentic_max_iterations(scope: Optional[str] = None) -> int:
+    sc = scope or runtime_primary_scope()
+    try:
+        v = int(get_runtime_rag_settings(sc).get("agentic_max_iterations") or 2)
+    except (TypeError, ValueError):
+        v = 2
+    return max(1, min(v, 5))
+
+
+def runtime_rag_similarity_threshold(scope: Optional[str] = None) -> float:
+    """Порог similarity: agent/project — настройки сущности, memory — env."""
+    if scope and str(scope).strip().lower() == "memory":
+        from backend.services.memory_rag_env import get_memory_similarity_threshold
+
+        return get_memory_similarity_threshold()
+    try:
+        v = float(get_runtime_rag_settings(scope).get("rag_similarity_threshold") or 0.0)
+    except (TypeError, ValueError):
+        v = 0.0
+    return max(0.0, min(v, 1.0))
+
+
+def merged_rag_system_prompt(scopes) -> str:
+    """Системный промпт для набора сторов, давших чанки.
+
+    project/agent — промпт сущности; memory — ``RAG_MEMORY_SYSTEM_PROMPT`` из
+    env. Несколько разных промптов — склейка без дублей.
+    """
+    names = [str(s or "").strip().lower() for s in (scopes or []) if s]
+    if not names:
+        return ""
+    seen: list = []
+    for name in names:
+        if name == "memory":
+            from backend.services.memory_rag_env import get_memory_system_prompt
+
+            p = get_memory_system_prompt().strip()
+        else:
+            p = str(
+                get_runtime_rag_settings(normalize_scope(name)).get("rag_system_prompt") or ""
+            ).strip()
+        if p and p not in seen:
+            seen.append(p)
+    return "\n\n".join(seen)
+
+
+def runtime_rag_system_prompt(scopes=None) -> str:
+    """Промпт текущего запроса. ``scopes`` — сторы, реально давшие чанки."""
+    if scopes:
+        return merged_rag_system_prompt(scopes)
+    return ""
+
+
+# --- параметры нарезки и моделей --------------------------------------------
 
 def chunk_params_from_rag_settings(settings: Dict[str, Any]) -> Dict[str, Any]:
     try:
@@ -283,9 +419,7 @@ def chunk_params_from_rag_settings(settings: Dict[str, Any]) -> Dict[str, Any]:
         overlap = int(settings.get("rag_chunk_overlap") or 200)
     except (TypeError, ValueError):
         overlap = 200
-    strategy = (
-        str(settings.get("rag_chunking_strategy") or "hierarchical").strip().lower()
-    )
+    strategy = str(settings.get("rag_chunking_strategy") or "hierarchical").strip().lower()
     if strategy not in {
         "hierarchical",
         "fixed",
@@ -301,14 +435,12 @@ def chunk_params_from_rag_settings(settings: Dict[str, Any]) -> Dict[str, Any]:
         "chunking_strategy": strategy,
     }
 
+
 def settings_response_dict(settings: Dict[str, Any]) -> Dict[str, Any]:
-    """Формат ответа /api/rag/settings (как раньше из app_state)."""
+    """Формат ответа /api/rag/settings."""
     strategy = str(settings.get("rag_strategy") or "auto")
     return {
         "strategy": strategy,
-        "rag_memory_strategy": str(
-            settings.get("rag_memory_strategy") or strategy or "auto"
-        ),
         "applied_method": strategy,
         "method_description": {
             "auto": "Автоматический выбор стратегии.",
@@ -325,14 +457,10 @@ def settings_response_dict(settings: Dict[str, Any]) -> Dict[str, Any]:
         "rag_multi_query_enabled": bool(settings.get("rag_multi_query_enabled", False)),
         "rag_hyde_enabled": bool(settings.get("rag_hyde_enabled", False)),
         "rag_chat_top_k": int(settings.get("rag_chat_top_k") or 12),
-        "rag_chunking_strategy": str(
-            settings.get("rag_chunking_strategy") or "hierarchical"
-        ),
+        "rag_chunking_strategy": str(settings.get("rag_chunking_strategy") or "hierarchical"),
         "rag_chunk_size": int(settings.get("rag_chunk_size") or 1000),
         "rag_chunk_overlap": int(settings.get("rag_chunk_overlap") or 200),
-        "rag_similarity_threshold": float(
-            settings.get("rag_similarity_threshold") or 0.0
-        ),
+        "rag_similarity_threshold": float(settings.get("rag_similarity_threshold") or 0.0),
         "rag_reranking_enabled": bool(settings.get("rag_reranking_enabled", True)),
         "rag_rerank_top_n": int(settings.get("rag_rerank_top_n") or 12),
         "rag_system_prompt": str(settings.get("rag_system_prompt") or ""),
@@ -340,113 +468,11 @@ def settings_response_dict(settings: Dict[str, Any]) -> Dict[str, Any]:
         "rag_reranker_model_path": str(settings.get("rag_reranker_model_path") or ""),
     }
 
-def default_rag_settings_snapshot() -> Dict[str, Any]:
-    return deepcopy(_defaults_from_app_state())
 
-def bind_user_rag_runtime(
-    settings: Optional[Dict[str, Any]], raw: Optional[Dict[str, Any]] = None
-) -> Token:
-    """Привязать персональные RAG-настройки к текущему async-контексту (чат/поиск).
+def index_params_changed(before: Dict[str, Any], after: Dict[str, Any]) -> bool:
+    """Нужна ли пересборка индекса после правки настроек."""
+    return any(before.get(k) != after.get(k) for k in INDEX_AFFECTING_KEYS)
 
-    ```settings``` — плоский снимок скоупа по умолчанию (совместимость со старым кодом).
-    ```raw``` — сырая запись со ```scopes```; без неё скоупные геттеры отдадут то же,
-    что и раньше, то есть один набор на оба скоупа.
-    """
-    _user_rag_runtime_raw.set(dict(raw) if isinstance(raw, dict) else None)
-    payload = dict(settings) if isinstance(settings, dict) else None
-    return _user_rag_runtime.set(payload)
-
-def reset_user_rag_runtime(token: Token) -> None:
-    _user_rag_runtime.reset(token)
-    _user_rag_runtime_raw.set(None)
-
-def get_runtime_rag_settings(scope: Optional[str] = None) -> Dict[str, Any]:
-    """Настройки текущего запроса или seed/defaults, если контекст не задан.
-
-    С ```scope``` отдаёт настройки конкретного стора (project/agent), если в
-    контексте есть сырая запись со скоупами. Иначе — общий снимок, как раньше.
-    """
-    if scope is not None:
-        raw = _user_rag_runtime_raw.get()
-        if isinstance(raw, dict) and raw:
-            return _merge(raw, scope)
-    cur = _user_rag_runtime.get()
-    if isinstance(cur, dict) and cur:
-        return cur
-    return _defaults_from_app_state()
-
-def merged_rag_system_prompt(scopes) -> str:
-    """Системный промпт для набора сторов, давших чанки.
-
-    project/agent — персональный промпт из UI (Postgres).
-    memory — ``RAG_MEMORY_SYSTEM_PROMPT`` из env/ConfigMap.
-    Несколько разных промптов — склейка без дублей.
-    """
-    names = [str(s or "").strip().lower() for s in (scopes or []) if s]
-    if not names:
-        return str(get_runtime_rag_settings().get("rag_system_prompt") or "")
-    seen: list = []
-    for name in names:
-        if name == "memory":
-            from backend.services.memory_rag_env import get_memory_system_prompt
-
-            p = get_memory_system_prompt().strip()
-        else:
-            scope = normalize_scope(name)
-            p = str(get_runtime_rag_settings(scope).get("rag_system_prompt") or "").strip()
-        if p and p not in seen:
-            seen.append(p)
-    return "\n\n".join(seen)
-
-def runtime_rag_top_k(scope: Optional[str] = None) -> int:
-    """top_k из runtime; scope сохранён для совместимости memo (agent_tools)."""
-    try:
-        v = int(get_runtime_rag_settings(scope).get("rag_chat_top_k") or 12)
-    except (TypeError, ValueError):
-        v = 12
-    return max(1, min(v, 64))
-
-def runtime_rag_strategy(scope: Optional[str] = None) -> str:
-    """Стратегия поиска стора. Без scope — скоуп по умолчанию (совместимость)."""
-    return str(get_runtime_rag_settings(scope).get("rag_strategy") or "auto")
-
-def runtime_memory_strategy() -> str:
-    """Стратегия поиска Библиотеки — общий ключ, не привязан к скоупу.
-
-    Читаем через скоуп по умолчанию: общие ключи лежат в корне записи, и
-    ```_merge``` достаёт их при любом скоупе. Без аргумента геттер смотрел бы
-    только плоский снимок и не увидел бы сохранённое значение.
-    """
-    s = get_runtime_rag_settings(DEFAULT_SCOPE)
-    return str(s.get("rag_memory_strategy") or s.get("rag_strategy") or "auto")
-
-def runtime_rag_system_prompt(scopes=None) -> str:
-    """Промпт текущего запроса. ```scopes``` — сторы, реально давшие чанки."""
-    if scopes:
-        return merged_rag_system_prompt(scopes)
-    return str(get_runtime_rag_settings().get("rag_system_prompt") or "")
-
-def runtime_agentic_rag_enabled() -> bool:
-    return bool(get_runtime_rag_settings().get("agentic_rag_enabled", True))
-
-def runtime_agentic_max_iterations() -> int:
-    try:
-        v = int(get_runtime_rag_settings().get("agentic_max_iterations") or 2)
-    except (TypeError, ValueError):
-        v = 2
-    return max(1, min(v, 5))
-
-def runtime_rag_similarity_threshold(scope: Optional[str] = None) -> float:
-    """Порог similarity: project/agent — UI; memory — env (см. memory_rag_env)."""
-    if scope and str(scope).strip().lower() == "memory":
-        from backend.services.memory_rag_env import get_memory_similarity_threshold
-
-        return get_memory_similarity_threshold()
-    try:
-        v = float(get_runtime_rag_settings(scope).get("rag_similarity_threshold") or 0.0)
-    except (TypeError, ValueError):
-        v = 0.0
-    return max(0.0, min(v, 1.0))
 
 def embedding_fields_from_path(model_path: Optional[str]) -> Dict[str, Any]:
     """Путь модели из настроек → поля запроса к svc-rag.
@@ -480,20 +506,18 @@ def embedding_fields_from_path(model_path: Optional[str]) -> Dict[str, Any]:
         return {}
     return {"embedding_model": model, "embedding_provider": provider}
 
-def embedding_fields_from_rag_settings(
-    settings: Optional[Dict[str, Any]],
-) -> Dict[str, Any]:
+
+def embedding_fields_from_rag_settings(settings: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     return embedding_fields_from_path((settings or {}).get("rag_embedding_model_path"))
 
-def runtime_embedding_fields(scope: Optional[str] = None) -> Dict[str, Any]:
-    """Модель ТЕКУЩЕГО запроса чата/поиска (ContextVar), если выбрана.
 
-    ```scope``` — project/agent: у сторов свои модели после разделения настроек.
-    """
+def runtime_embedding_fields(scope: Optional[str] = None) -> Dict[str, Any]:
+    """Модель стора для ТЕКУЩЕГО запроса чата/поиска."""
     return embedding_fields_from_rag_settings(get_runtime_rag_settings(scope))
 
+
 def reranker_fields_from_path(model_path: Optional[str]) -> Dict[str, Any]:
-    """Путь реранкера из настроек -> поля запроса к svc-rag.
+    """Путь реранкера → поля запроса к svc-rag.
 
     Разбор пути тот же, что у эмбеддера, но ключи другие: реранкер выбирается
     независимо (можно эмбеддить нативно, а реранкать в Phoenix).
@@ -506,24 +530,22 @@ def reranker_fields_from_path(model_path: Optional[str]) -> Dict[str, Any]:
         "reranker_provider": fields["embedding_provider"],
     }
 
-def reranker_fields_from_rag_settings(
-    settings: Optional[Dict[str, Any]],
-) -> Dict[str,Any]:
+
+def reranker_fields_from_rag_settings(settings: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     return reranker_fields_from_path((settings or {}).get("rag_reranker_model_path"))
 
+
 def runtime_reranker_fields(scope: Optional[str] = None) -> Dict[str, Any]:
-    """Реранкер ТЕКУЩЕГО запроса (ContextVar), если выбран. ```scope``` — project/agent."""
+    """Реранкер стора для текущего запроса."""
     return reranker_fields_from_rag_settings(get_runtime_rag_settings(scope))
 
-async def embedding_fields_for_user(
-    user_id: Optional[str], scope: Optional[str] = None
-) -> Dict[str, Any]:
-    """Модель конкретного пользователя — для фона и загрузок (ContextVar нет/чужой).
 
-    ```scope``` — project/agent: после разделения настроек у сторов свои модели.
-    """
-    if not user_id:
+async def embedding_fields_for_entity(
+    scope: Optional[str], entity_id: Optional[Any]
+) -> Dict[str, Any]:
+    """Модель сущности — для фона и загрузок, где ContextVar пуст или чужой."""
+    if not normalize_entity_id(entity_id):
         return {}
     return embedding_fields_from_rag_settings(
-        await get_user_rag_settings(user_id, scope)
+        await get_entity_rag_settings(scope, entity_id)
     )

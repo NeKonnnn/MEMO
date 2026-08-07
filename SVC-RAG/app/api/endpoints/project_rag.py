@@ -1,8 +1,7 @@
 # API эндпоинты для RAG-файлов проектов
 from typing import Any, Dict, List, Optional
 
-import asyncio
-import os 
+import os
 
 from fastapi import (
     APIRouter,
@@ -24,6 +23,7 @@ from app.api.rag_common import (
     filters_body_to_domain,
 )
 from app.dependencies import get_project_rag_service
+from app.services.hit_types import hit_cosine
 from app.services.project_rag_service import ProjectRagService
 from app.core.logging import get_logger
 
@@ -66,6 +66,7 @@ class ProjectRagSearchHit(BaseModel):
     score: float
     document_id: Optional[int] = None
     chunk_index: Optional[int] = None
+    cosine: Optional[float] = None
 
 class ProjectRagSearchResponse(BaseModel):
     hits: List[ProjectRagSearchHit]
@@ -205,11 +206,11 @@ async def project_rag_search(
     svc: ProjectRagService = Depends(get_project_rag_service),
 ):
     """Семантический поиск по RAG-документам проекта."""
-    if (
-        _block_search_on_reindex()
-        and _project_reindex_lock.locked()
-        and _project_reindex_owner is None
-    ):
+    # Пересборка одного проекта чужие документы не трогает — отбиваем только
+    # кластерный прогон, он перетряхивает всю таблицу.
+    from app.services.reindex_queue import project_queue
+
+    if _block_search_on_reindex() and project_queue.cluster_running():
         raise HTTPException(
             status_code=409,
             detail="Идёт полная переиндексация проектов — поиск временно недоступен",
@@ -234,9 +235,13 @@ async def project_rag_search(
     return ProjectRagSearchResponse(
         hits=[
             ProjectRagSearchHit(
-                content=c, score=s, document_id=doc_id, chunk_index=chunk_idx
+                content=h[0],
+                score=h[1],
+                document_id=h[2],
+                chunk_index=h[3],
+                cosine=hit_cosine(h),
             )
-            for c, s, doc_id, chunk_idx in results
+            for h in results
         ],
         trace=trace.to_dict() if body.debug_trace else None,
     )
@@ -246,17 +251,26 @@ class ProjectRagReindexRequest(BaseModel):
     chunk_overlap: Optional[int] = None
     chunking_strategy: Optional[str] = None
     owner_user_id: Optional[str] = None
+    project_id: Optional[str] = None
     embedding_model: Optional[str] = None
     embedding_provider: Optional[str] = None
-
-_project_reindex_lock = asyncio.Lock()
-# Чей реиндекс идёт. None при УДЕРЖИВАЕМОМ локе = глобальный прогон.
-_project_reindex_owner: Optional[str] = None
 
 def _block_search_on_reindex() -> bool:
     """Отбивать ли поиск во время ГЛОБАЛЬНОГО реиндекса."""
     v = os.getenv("RAG_BLOCK_SEARCH_DURING_REINDEX", "true").strip().lower()
     return v in ("1", "true", "yes", "on")
+
+def _project_reindex_key(owner_user_id: Optional[str], project_id: Optional[str]) -> str:
+    """Ключ очереди. Без фильтров — кластерный прогон, он эксклюзивный."""
+    from app.services.reindex_queue import GLOBAL_KEY, entity_key
+
+    pid = (project_id or "").strip()
+    if pid:
+        return entity_key("project", pid)
+    owner = (owner_user_id or "").strip().lower()
+    if owner:
+        return entity_key("owner", owner)
+    return GLOBAL_KEY
 
 async def _project_reindex_all_bg(
     svc: ProjectRagService,
@@ -266,41 +280,53 @@ async def _project_reindex_all_bg(
     owner_user_id: Optional[str] = None,
     embedding_model: Optional[str] = None,
     embedding_provider: Optional[str] = None,
+    project_id: Optional[str] = None,
 ) -> None:
-    global _project_reindex_owner
-    from app.services.project_rag_service import (
-        bump_project_reindex_generation,
-        current_project_reindex_generation,
-    )
+    from app.services.project_rag_service import bump_project_reindex_generation
+    from app.services.reindex_queue import project_queue
 
-    gen = bump_project_reindex_generation()
-    async with _project_reindex_lock:
-        if gen != current_project_reindex_generation():
-            logger.info("[REINDEX project ALL] пропуск: поколение устарело до старта")
-            return
-        _project_reindex_owner = (owner_user_id or "").strip().lower() or None
-        logger.info(
-            "[REINDEX project] лок взят: owner=%s (поиск %s)",
-            _project_reindex_owner or "*",
-            "заблокирован" if _project_reindex_owner is None else "работает",
-        )
-        try:
-            res = await svc.reindex_all_projects(
+    pid = (project_id or "").strip() or None
+    key = _project_reindex_key(owner_user_id, pid)
+    # Поколение поднимаем ДО очереди: если этот же проект уже пересобирается, его
+    # текущий проход должен прерваться — настройки успели поменяться.
+    gen = bump_project_reindex_generation(key)
+
+    async def _job() -> None:
+        if pid:
+            res = await svc.reindex_all(
+                pid,
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap,
                 chunking_strategy=chunking_strategy,
                 generation=gen,
-                owner_user_id=owner_user_id,
+                generation_key=key,
                 model=embedding_model,
                 provider=embedding_provider,
             )
-            logger.info(
-                "[REINDEX project ALL] фоновая перечанкировка завершена: %s", res
-            )
-        except Exception:
-            logger.exception("[REINDEX project ALL] фоновая перечанкировка упала")
-        finally:
-            _project_reindex_owner = None
+            logger.info("[REINDEX project=%s] перечанкировка завершена: %s", pid, res)
+            return
+        res = await svc.reindex_all_projects(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            chunking_strategy=chunking_strategy,
+            generation=gen,
+            generation_key=key,
+            owner_user_id=owner_user_id,
+            model=embedding_model,
+            provider=embedding_provider,
+        )
+        logger.info("[REINDEX project ALL] перечанкировка завершена: %s", res)
+
+    await project_queue.run(
+        key,
+        gen,
+        _job,
+        meta={
+            "scope": "project" if pid else ("owner" if owner_user_id else "all"),
+            "entity_id": pid,
+            "owner_user_id": (owner_user_id or "").strip().lower() or None,
+        },
+    )
 
 @router.post("/reindex")
 async def project_rag_reindex_all(
@@ -310,7 +336,8 @@ async def project_rag_reindex_all(
 ):
     """Перечанкировать проекты В ФОНЕ.
 
-    С owner_user_id — только документы пользователя.
+    С ```project_id``` — только один проект.
+    С ```owner_user_id``` без ```project_id``` — все проекты пользователя.
     Без фильтра — все проекты (кластерный путь после смены dim).
     """
     background.add_task(
@@ -322,12 +349,28 @@ async def project_rag_reindex_all(
         body.owner_user_id,
         body.embedding_model,
         body.embedding_provider,
+        body.project_id,
     )
-    return {"ok": True, "status": "started", "owner_user_id": body.owner_user_id}
+    return {
+        "ok": True,
+        "status": "started",
+        "owner_user_id": body.owner_user_id,
+        "project_id": body.project_id,
+        "queue_key": _project_reindex_key(body.owner_user_id, body.project_id),
+    }
 
 @router.get("/reindex/status")
 async def project_rag_reindex_status():
-    return {
-        "reindexing": _project_reindex_lock.locked(),
-        "owner_user_id": _project_reindex_owner,
-    }
+    """Статус пересборки проектов.
+
+    ``reindexing``, ``owner_user_id`` и ``project_id`` сохранены для прежней
+    версии backend: первый теперь значит «занят хотя бы один слот». Что именно
+    пересобирается — в ``active``.
+    """
+    from app.services.reindex_queue import project_queue
+
+    status = project_queue.status()
+    active = status.get("active") or []
+    single = active[0] if len(active) == 1 else {}
+    status["project_id"] = single.get("entity_id") if single.get("scope") == "project" else None
+    return status

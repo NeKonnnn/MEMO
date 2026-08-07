@@ -423,7 +423,7 @@ export default function SkillsPage() {
           <input
             ref={importRef}
             type="file"
-            accept=".json,.md"
+            accept=".json,.md,.txt"
             hidden
             onChange={(e) => {
               const f = e.target.files?.[0];

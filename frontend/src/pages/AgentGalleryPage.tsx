@@ -28,13 +28,9 @@ import { useNavigate } from 'react-router-dom';
 import { getApiUrl } from '../config/api';
 import { useAuth } from '../contexts/AuthContext';
 import { useAppActions } from '../contexts/AppContext';
-import { applyAgentModelAndSettings } from '../utils/applyAgentServer';
+import { loadAgentModelOnly } from '../utils/applyAgentServer';
 import { persistAgentMcpConfig } from '../utils/applyAgentMcp';
-import { MODEL_SETTINGS_DEFAULT } from '../constants/modelSettingsStyles';
-import {
-  ASTRA_OPEN_AGENT_CONSTRUCTOR,
-  ASTRA_OPEN_AGENT_CONSTRUCTOR_ID_KEY,
-} from '../constants/hotkeys';
+import { openAgentInConstructor } from '../utils/openAgentConstructorNav';
 
 interface GalleryAgent {
   id: number;
@@ -57,21 +53,6 @@ interface GalleryAgent {
 const STORAGE_AGENT_ID = 'active_agent_id';
 const STORAGE_AGENT_NAME = 'active_agent_name';
 const STORAGE_AGENT_PROMPT = 'active_agent_prompt';
-
-/** Открыть агента в конструкторе (с ролями viewer/editor/owner). */
-function openAgentInConstructor(agentId: number, navigate: (path: string) => void) {
-  try {
-    sessionStorage.setItem(ASTRA_OPEN_AGENT_CONSTRUCTOR_ID_KEY, String(agentId));
-  } catch {
-    /* */
-  }
-  navigate('/');
-  window.setTimeout(() => {
-    window.dispatchEvent(
-      new CustomEvent(ASTRA_OPEN_AGENT_CONSTRUCTOR, { detail: { agentId } }),
-    );
-  }, 80);
-}
 
 export default function AgentGalleryPage() {
   const { token } = useAuth();
@@ -197,16 +178,8 @@ export default function AgentGalleryPage() {
         .trim()
         .replace(/^1lm-svc:\/\//i, 'llm-svc://')
         .replace(/\s+/g, '');
-      const rawSettings = {
-        ...MODEL_SETTINGS_DEFAULT,
-        ...((cfg.model_settings as Record<string, unknown>) || {}),
-      };
 
-      const applied = await applyAgentModelAndSettings(token, {
-        system_prompt: full.system_prompt || '',
-        model_path: modelPath || null,
-        model_settings: rawSettings,
-      });
+      const applied = await loadAgentModelOnly(token, modelPath || null);
 
       localStorage.setItem(STORAGE_AGENT_ID, String(full.id));
       localStorage.setItem(STORAGE_AGENT_NAME, full.name);
@@ -220,7 +193,7 @@ export default function AgentGalleryPage() {
           `Агент «${full.name}» добавлен в «Агенты из галереи», но настройки не применились: ${applied.message}`,
         );
       } else {
-        showNotification('success', `Агент «${full.name}» добавлен и применён. Переходим в чат…`);
+        showNotification('success', `Агент «${full.name}» добавлен. Промпт и настройки применятся в чате. Переходим…`);
       }
 
       setTimeout(() => navigate('/'), 800);

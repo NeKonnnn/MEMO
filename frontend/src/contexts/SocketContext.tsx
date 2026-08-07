@@ -1,8 +1,10 @@
 import React, { createContext, useContext, useEffect, useLayoutEffect, useRef, useState, ReactNode } from 'react';
 import { io, Socket } from 'socket.io-client';
-import { useAppActions } from './AppContext';
+import { useAppActions, useAppContext } from './AppContext';
 import type { Chat, Message, MultiLLMResponseSlot } from './AppContext';
 import { useAuth } from './AuthContext';
+import { useRagReindexStatus } from '../hooks/useRagReindexStatus';
+import { isKnowledgeRagEnabled } from '../utils/knowledgeRagStorage';
 import { getSettings, initSettings } from '../settings';
 import {
   LAST_SELECTED_MODEL_PATH_STORAGE_KEY,
@@ -95,6 +97,7 @@ interface SocketContextType {
         minio_object?: string;
         minio_bucket?: string;
         size?: number;
+        tokenEstimate?: number;
       }>;
       inline_attachments?: Array<{
         name: string;
@@ -144,12 +147,40 @@ type PendingSendPayload = {
 const SocketContext = createContext<SocketContextType | null>(null);
 
 export function SocketProvider({ children }: { children: ReactNode }) {
-  const { token } = useAuth();
+  const { token, user } = useAuth();
   const [socket, setSocket] = useState<Socket | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
 
+  const { state: appState } = useAppContext();
   const { addMessage, updateMessage, setChatLoading, showNotification, getCurrentChat, getChatById, getProjectById } = useAppActions();
+  /** Настройка «Потоковая генерация» из model_settings; явный аргумент перекрывает. */
+  const resolveStreaming = (streaming?: boolean): boolean =>
+    streaming !== undefined ? Boolean(streaming) : appState.modelSettings.streaming !== false;
+  const {
+    shouldBlockRagSend: shouldBlockRagSendForChat,
+    blockMessage: ragReindexBlockMessage,
+  } = useRagReindexStatus();
+
+  const readUserRagStrategy = (): string => {
+    const uid = String(user?.user_id || user?.username || '').trim().toLowerCase();
+    const keyed = uid && typeof localStorage !== 'undefined'
+      ? localStorage.getItem(`rag_strategy:${uid}`)
+      : null;
+    const legacy = typeof localStorage !== 'undefined' ? localStorage.getItem('rag_strategy') : null;
+    return normalizeRagStrategy(keyed ?? legacy);
+  };
+
+  const isRagSendBlocked = (_chatId: string, _overrideProjectId?: string | null): boolean => {
+    const blocked = shouldBlockRagSendForChat({
+      libraryEnabled: isKnowledgeRagEnabled(),
+    });
+    if (blocked) {
+      showNotification('warning', ragReindexBlockMessage);
+    }
+    return blocked;
+  };
+
   const currentMessageRef = useRef<string | null>(null);
   const currentChatIdRef = useRef<string | null>(null);
   const socketAuthTokenRef = useRef<string | null>(null);
@@ -340,6 +371,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
       reconnectionDelayMax: wsConfig.reconnectionDelayMax,
       reconnectionAttempts: wsConfig.reconnectionAttempts,
       forceNew: true, // Принудительно создаем новое соединение
+      withCredentials: true,
       auth: {
         token: tokenRef.current,
       },
@@ -424,6 +456,14 @@ export function SocketProvider({ children }: { children: ReactNode }) {
 
     newSocket.on('chat_error', (data) => {
       handleServerMessage({ type: 'error', ...data });
+    });
+
+    newSocket.on('chat_info', (data) => {
+      // Мягкое уведомление от backend (например, «идёт переиндексация»),
+      // НЕ трогает состояние стрима/загрузки.
+      if (data && typeof data.message === 'string' && data.message) {
+        showNotification('warning', data.message);
+      }
     });
 
     newSocket.on('generation_stopped', (data) => {
@@ -1186,7 +1226,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
   const sendMessage = (
     message: string,
     chatId: string,
-    streaming: boolean = true,
+    streaming?: boolean,
     overrideProjectId?: string | null,
     expectMultiLlm?: boolean,
     inlineData?: {
@@ -1199,6 +1239,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
         minio_object?: string;
         minio_bucket?: string;
         size?: number;
+        tokenEstimate?: number;
       }>;
       inline_attachments?: Array<{
         name: string;
@@ -1209,10 +1250,16 @@ export function SocketProvider({ children }: { children: ReactNode }) {
       }>;
     },
   ) => {
+    const useStreaming = resolveStreaming(streaming);
+
+    if (isRagSendBlocked(chatId, overrideProjectId)) {
+      return;
+    }
+
     if (!socket || !isConnected) {
       // При первом входе сокет может быть в фазе коннекта.
       // Сохраняем одно ожидающее сообщение и отправляем его после connect.
-      pendingSendRef.current = { message, chatId, streaming, overrideProjectId, expectMultiLlm, inlineData };
+      pendingSendRef.current = { message, chatId, streaming: useStreaming, overrideProjectId, expectMultiLlm, inlineData };
       // Не прерываем активную попытку подключения — connect-обработчик сам отправит
       // отложенное сообщение. Reconnect нужен только если сокет не подключается прямо сейчас.
       if (!connectingRef.current) {
@@ -1221,7 +1268,9 @@ export function SocketProvider({ children }: { children: ReactNode }) {
       showNotification('info', 'Подключаемся к серверу, сообщение будет отправлено автоматически');
       return;
     }
-    
+
+    // Сбрасываем отложенную отправку — иначе после reconnect возможен дубль user-сообщения.
+    pendingSendRef.current = null;
     // Сохраняем chatId для обработки ответов
     currentChatIdRef.current = chatId;
     
@@ -1272,10 +1321,14 @@ export function SocketProvider({ children }: { children: ReactNode }) {
     // Читаем флаг "Base знаний" из localStorage (устанавливается в UnifiedChatPage)
     const useKbRag = localStorage.getItem('use_kb_rag') === 'true';
     const useMemoryLibraryRag = localStorage.getItem('use_memory_library_rag') === 'true';
-    const ragStrategy = normalizeRagStrategy(localStorage.getItem('rag_strategy'));
+    const ragStrategy = readUserRagStrategy();
     const rawAgentId = typeof localStorage !== 'undefined' ? localStorage.getItem('active_agent_id') : null;
     const parsedAgentId = rawAgentId ? parseInt(rawAgentId, 10) : NaN;
     const agentIdForChat = Number.isFinite(parsedAgentId) ? parsedAgentId : null;
+    const agentNameForChat =
+      typeof localStorage !== 'undefined'
+        ? (localStorage.getItem('active_agent_name') || '').trim() || null
+        : null;
 
     // Получаем данные проекта, к которому привязан чат.
     // overrideProjectId используется когда чат только что создан и state ещё не обновился.
@@ -1287,7 +1340,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
     const skillIds = resolveSkillIds(message);
     const messageData = {
       message,
-      streaming,
+      streaming: useStreaming,
       timestamp: new Date().toISOString(),
       message_id: userMessageId,  // Передаем ID сообщения с фронтенда
       conversation_id: chatId,     // Передаем ID диалога
@@ -1296,7 +1349,9 @@ export function SocketProvider({ children }: { children: ReactNode }) {
       rag_strategy: ragStrategy,
       /** Бэкенд подставит модель и model_settings из карточки агента (конструктор) */
       agent_id: agentIdForChat,
+      agent_name: agentNameForChat,
       project_id: projectId,
+      project_name: project?.name || null,
       project_memory: project?.memory || null,
       project_instructions: project?.instructions || null,
       model_comparison_enabled: Boolean(expectMultiLlm),
@@ -1312,6 +1367,9 @@ export function SocketProvider({ children }: { children: ReactNode }) {
             ...(a.minio_object ? { minio_object: a.minio_object } : {}),
             ...(a.minio_bucket ? { minio_bucket: a.minio_bucket } : {}),
             ...(typeof a.size === 'number' && a.size > 0 ? { size: a.size } : {}),
+            ...(typeof a.tokenEstimate === 'number' && a.tokenEstimate > 0
+              ? { tokenEstimate: a.tokenEstimate }
+              : {}),
           }))
         : undefined,
       request_id: requestId,
@@ -1331,11 +1389,17 @@ export function SocketProvider({ children }: { children: ReactNode }) {
     assistantMessageId: string,
     chatId: string,
     slotModel: string,
-    streaming: boolean = true,
+    streaming?: boolean,
     overrideProjectId?: string | null,
   ) => {
+    const useStreaming = resolveStreaming(streaming);
+
     if (!socket || !isConnected) {
       showNotification('error', 'Нет соединения с сервером');
+      return;
+    }
+
+    if (isRagSendBlocked(chatId, overrideProjectId)) {
       return;
     }
 
@@ -1344,6 +1408,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
     regenerationStateRef.current = null;
 
     isStoppedRef.current = false;
+    pendingSendRef.current = null;
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('astrachat-abort-follow-ups'));
     }
@@ -1373,10 +1438,14 @@ export function SocketProvider({ children }: { children: ReactNode }) {
 
     const useKbRag = localStorage.getItem('use_kb_rag') === 'true';
     const useMemoryLibraryRag = localStorage.getItem('use_memory_library_rag') === 'true';
-    const ragStrategy = normalizeRagStrategy(localStorage.getItem('rag_strategy'));
+    const ragStrategy = readUserRagStrategy();
     const rawAgentId = typeof localStorage !== 'undefined' ? localStorage.getItem('active_agent_id') : null;
     const parsedAgentId = rawAgentId ? parseInt(rawAgentId, 10) : NaN;
     const agentIdForChat = Number.isFinite(parsedAgentId) ? parsedAgentId : null;
+    const agentNameForChat =
+      typeof localStorage !== 'undefined'
+        ? (localStorage.getItem('active_agent_name') || '').trim() || null
+        : null;
 
     const chatForProject = getChatById(chatId);
     const projectId = overrideProjectId !== undefined ? overrideProjectId : (chatForProject?.projectId || null);
@@ -1384,7 +1453,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
 
     socket.emit('chat_message', {
       message: userMessage,
-      streaming,
+      streaming: useStreaming,
       timestamp: new Date().toISOString(),
       regenerate: true,
       assistant_message_id: assistantMessageId,
@@ -1394,7 +1463,9 @@ export function SocketProvider({ children }: { children: ReactNode }) {
       use_memory_library_rag: useMemoryLibraryRag,
       rag_strategy: ragStrategy,
       agent_id: agentIdForChat,
+      agent_name: agentNameForChat,
       project_id: projectId,
+      project_name: project?.name || null,
       project_memory: project?.memory || null,
       project_instructions: project?.instructions || null,
       model_comparison_enabled: true,
@@ -1418,10 +1489,16 @@ export function SocketProvider({ children }: { children: ReactNode }) {
     chatId: string, 
     alternativeResponses: string[],
     currentIndex: number,
-    streaming: boolean = true
+    streaming?: boolean
   ) => {
+    const useStreaming = resolveStreaming(streaming);
+
     if (!socket || !isConnected) {
       showNotification('error', 'Нет соединения с сервером');
+      return;
+    }
+
+    if (isRagSendBlocked(chatId)) {
       return;
     }
     
@@ -1465,11 +1542,15 @@ export function SocketProvider({ children }: { children: ReactNode }) {
     const rawAgentId = typeof localStorage !== 'undefined' ? localStorage.getItem('active_agent_id') : null;
     const parsedAgentId = rawAgentId ? parseInt(rawAgentId, 10) : NaN;
     const agentIdForChat = Number.isFinite(parsedAgentId) ? parsedAgentId : null;
-    const ragStrategy = normalizeRagStrategy(localStorage.getItem('rag_strategy'));
+    const agentNameForChat =
+      typeof localStorage !== 'undefined'
+        ? (localStorage.getItem('active_agent_name') || '').trim() || null
+        : null;
+    const ragStrategy = readUserRagStrategy();
 
     const messageData = {
       message: userMessage,
-      streaming,
+      streaming: useStreaming,
       timestamp: new Date().toISOString(),
       regenerate: true, // Флаг перегенерации
       assistant_message_id: assistantMessageId, // ID сообщения помощника для обновления
@@ -1477,6 +1558,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
       current_response_index: currentIndex,
       conversation_id: chatId,
       agent_id: agentIdForChat,
+      agent_name: agentNameForChat,
       rag_strategy: ragStrategy,
       enable_thinking: resolveEnableThinking(),
       skill_ids: (() => {

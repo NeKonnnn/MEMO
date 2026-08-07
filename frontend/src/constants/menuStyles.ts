@@ -133,7 +133,7 @@ export const SIDEBAR_ICON_LEADING_PL = 1.75;
 
 /** Колонка ведущей иконки в списке сайдбара (проекты, «Новый чат», поиск) — как у MUI ListItemIcon + отступ до текста. */
 export const SIDEBAR_LIST_LEADING_ICON_SX = {
-  color: '#ffffff',
+  color: 'var(--sidebar-fg, #ffffff)',
   minWidth: `${SIDEBAR_PROJECT_AVATAR_SIZE + 4}px`,
   marginRight: `${SIDEBAR_LIST_ICON_TO_TEXT_GAP_PX}px`,
   justifyContent: 'flex-start',
@@ -152,8 +152,9 @@ export const SIDEBAR_HIDE_SCROLLBAR_SX = {
 export const SIDEBAR_CHAT_ROW_LIST_ITEM_BUTTON_SX = {
   borderRadius: 2,
   backgroundColor: 'transparent',
+  color: 'var(--sidebar-fg, #ffffff)',
   '&:hover': {
-    backgroundColor: 'rgba(255,255,255,0.08)',
+    backgroundColor: 'var(--sidebar-hover-bg, rgba(255,255,255,0.08))',
   },
   transition: 'all 0.2s ease',
   py: 0,
@@ -161,10 +162,10 @@ export const SIDEBAR_CHAT_ROW_LIST_ITEM_BUTTON_SX = {
   px: SIDEBAR_CONTROL_PX,
 } as const;
 
-/** Иконки в строках rail: белые, крупнее глиф (без увеличения высоты кнопки). */
+/** Иконки в строках rail: контраст от `--sidebar-fg` (светлая/тёмная панель). */
 export const SIDEBAR_LIST_ICON_SX = {
   fontSize: '1.375rem',
-  color: '#ffffff',
+  color: 'var(--sidebar-fg, #ffffff)',
   flexShrink: 0,
 } as const;
 
@@ -307,6 +308,74 @@ export const AGENT_CONSTRUCTOR_FIELD_FONT_SIZE = '0.82rem';
 /** Межстрочный интервал текста в поле/триггере. */
 export const AGENT_CONSTRUCTOR_FIELD_LINE_HEIGHT = 1.43;
 
+/** Кнопка «Сохранить» в конструкторе агента. */
+export const AGENT_CONSTRUCTOR_SAVE_BUTTON_SX: SxProps<Theme> = {
+  bgcolor: '#2e7d32',
+  textTransform: 'none',
+  fontWeight: 600,
+  fontSize: AGENT_CONSTRUCTOR_FIELD_FONT_SIZE,
+  py: 0.9,
+  '&:hover': { bgcolor: '#388e3c' },
+  '&:disabled': { bgcolor: 'rgba(46,125,50,0.4)', color: 'rgba(255,255,255,0.5)' },
+};
+
+/** Кнопка «Восстановить настройки» — тот же размер, что «Сохранить» в конструкторе. */
+export const AGENT_CONSTRUCTOR_RESTORE_BUTTON_SX: SxProps<Theme> = {
+  textTransform: 'none',
+  fontWeight: 600,
+  fontSize: AGENT_CONSTRUCTOR_FIELD_FONT_SIZE,
+  py: 0.9,
+  color: 'rgba(255,255,255,0.7)',
+  borderColor: 'rgba(255,255,255,0.2)',
+  whiteSpace: 'nowrap',
+  '&:hover': { borderColor: 'rgba(255,255,255,0.4)', bgcolor: 'rgba(255,255,255,0.06)' },
+};
+
+/**
+ * «Сохранить / Применить» с учётом темы.
+ * Светлая схема — как «Сохранить» в «Редактировать проект» (primary.main).
+ */
+export function getAgentConstructorSaveButtonSx(isDarkMode: boolean): SxProps<Theme> {
+  if (isDarkMode) return AGENT_CONSTRUCTOR_SAVE_BUTTON_SX;
+  return {
+    textTransform: 'none',
+    fontWeight: 600,
+    fontSize: AGENT_CONSTRUCTOR_FIELD_FONT_SIZE,
+    py: 0.9,
+    bgcolor: 'primary.main',
+    color: 'white',
+    '&:hover': { bgcolor: 'primary.dark' },
+    '&:disabled': {
+      bgcolor: 'action.disabledBackground',
+      color: 'action.disabled',
+    },
+  };
+}
+
+/**
+ * «Восстановить настройки» с учётом темы.
+ * Светлая схема — outlined с text.primary, как кнопки в модалке проекта.
+ */
+export function getAgentConstructorRestoreButtonSx(isDarkMode: boolean): SxProps<Theme> {
+  if (isDarkMode) return AGENT_CONSTRUCTOR_RESTORE_BUTTON_SX;
+  return {
+    textTransform: 'none',
+    fontWeight: 600,
+    fontSize: AGENT_CONSTRUCTOR_FIELD_FONT_SIZE,
+    py: 0.9,
+    color: 'text.primary',
+    borderColor: 'rgba(0,0,0,0.23)',
+    whiteSpace: 'nowrap',
+    '&:hover': {
+      borderColor: 'rgba(0,0,0,0.4)',
+      bgcolor: 'rgba(0,0,0,0.04)',
+    },
+  };
+}
+
+/** Иконка на кнопке «Сохранить» в конструкторе. */
+export const AGENT_CONSTRUCTOR_SAVE_ICON_SX = { fontSize: '0.9rem !important' } as const;
+
 /** @deprecated используйте AGENT_CONSTRUCTOR_FIELD_FONT_SIZE */
 export const FIELD_FONT_SIZE = AGENT_CONSTRUCTOR_FIELD_FONT_SIZE;
 
@@ -346,12 +415,13 @@ export function getFormFieldInputSx(isDarkMode: boolean): SxProps<Theme> {
   const labelColor = isDarkMode ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.6)';
   const inputColor = isDarkMode ? '#fff' : 'rgba(0,0,0,0.87)';
   const placeholderColor = isDarkMode ? FIELD_PLACEHOLDER : 'rgba(0,0,0,0.4)';
+  const fieldBg = isDarkMode ? FIELD_BG : 'transparent';
 
   return {
     '& .MuiOutlinedInput-root': {
       borderRadius: `${AGENT_CONSTRUCTOR_FIELD_RADIUS_PX}px`,
       minHeight: AGENT_CONSTRUCTOR_FIELD_MIN_HEIGHT_PX,
-      bgcolor: FIELD_BG,
+      bgcolor: fieldBg,
       color: inputColor,
       fontSize: AGENT_CONSTRUCTOR_FIELD_FONT_SIZE,
       boxSizing: 'border-box' as const,
@@ -365,7 +435,30 @@ export function getFormFieldInputSx(isDarkMode: boolean): SxProps<Theme> {
     '& .MuiOutlinedInput-input': {
       padding: `${AGENT_CONSTRUCTOR_FIELD_PADDING_Y_PX}px ${AGENT_CONSTRUCTOR_FIELD_PADDING_X_PX}px`,
       lineHeight: AGENT_CONSTRUCTOR_FIELD_LINE_HEIGHT,
+      fontSize: `${AGENT_CONSTRUCTOR_FIELD_FONT_SIZE} !important`,
       boxSizing: 'border-box' as const,
+    },
+    /** MUI size="small" по умолчанию ставит ~0.875rem — выравниваем с полем «Категория». */
+    '& .MuiOutlinedInput-root.MuiInputBase-sizeSmall': {
+      fontSize: AGENT_CONSTRUCTOR_FIELD_FONT_SIZE,
+      minHeight: AGENT_CONSTRUCTOR_FIELD_MIN_HEIGHT_PX,
+    },
+    '& .MuiOutlinedInput-root.MuiInputBase-sizeSmall .MuiOutlinedInput-input': {
+      fontSize: `${AGENT_CONSTRUCTOR_FIELD_FONT_SIZE} !important`,
+      lineHeight: AGENT_CONSTRUCTOR_FIELD_LINE_HEIGHT,
+      padding: `${AGENT_CONSTRUCTOR_FIELD_PADDING_Y_PX}px ${AGENT_CONSTRUCTOR_FIELD_PADDING_X_PX}px`,
+    },
+    '& .MuiInputBase-inputSizeSmall': {
+      fontSize: `${AGENT_CONSTRUCTOR_FIELD_FONT_SIZE} !important`,
+      lineHeight: AGENT_CONSTRUCTOR_FIELD_LINE_HEIGHT,
+      padding: `${AGENT_CONSTRUCTOR_FIELD_PADDING_Y_PX}px ${AGENT_CONSTRUCTOR_FIELD_PADDING_X_PX}px`,
+    },
+    '& .MuiInputLabel-root.MuiInputLabel-sizeSmall': {
+      fontSize: AGENT_CONSTRUCTOR_FIELD_FONT_SIZE,
+      lineHeight: AGENT_CONSTRUCTOR_FIELD_LINE_HEIGHT,
+    },
+    '& .MuiInputLabel-root.MuiInputLabel-shrink': {
+      fontSize: AGENT_CONSTRUCTOR_FIELD_FONT_SIZE,
     },
     '& .MuiOutlinedInput-root.MuiInputBase-multiline': {
       minHeight: 'unset',
@@ -385,6 +478,61 @@ export function getFormFieldInputSx(isDarkMode: boolean): SxProps<Theme> {
     },
   };
 }
+
+/**
+ * Outlined-поле как «Категория» в конструкторе: тот же шрифт/размер + без синей обводки при фокусе.
+ */
+export function getCategoryFieldSx(isDarkMode: boolean): SxProps<Theme> {
+  return [
+    getFormFieldInputSx(isDarkMode),
+    {
+      '& .MuiOutlinedInput-root': { cursor: 'pointer' },
+      '& .MuiOutlinedInput-root.Mui-focused fieldset': {
+        borderColor: isDarkMode ? 'rgba(255,255,255,0.23)' : 'rgba(0,0,0,0.23)',
+        borderWidth: '1px',
+      },
+      '& .MuiOutlinedInput-root:hover fieldset': {
+        borderColor: isDarkMode ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.4)',
+      },
+      '& .MuiOutlinedInput-root.Mui-focused:hover fieldset': {
+        borderColor: isDarkMode ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.4)',
+      },
+      '& .MuiInputLabel-root.Mui-focused': {
+        color: isDarkMode ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.6)',
+      },
+    },
+  ] as SxProps<Theme>;
+}
+
+/** Слить несколько sx без вложенных массивов (вложение ломает fontSize на FormControl). */
+export function flattenSx(...parts: SxProps<Theme>[]): SxProps<Theme> {
+  return parts.flatMap((part) => (Array.isArray(part) ? part : [part])) as SxProps<Theme>;
+}
+
+/**
+ * Размер текста внутри outlined-поля — как «Категория» (0.82rem).
+ * inline style на input гарантирует применение, если sx на FormControl не доходит.
+ */
+export const AGENT_CONSTRUCTOR_FIELD_INPUT_PROPS = {
+  style: {
+    fontSize: AGENT_CONSTRUCTOR_FIELD_FONT_SIZE,
+    lineHeight: AGENT_CONSTRUCTOR_FIELD_LINE_HEIGHT,
+  },
+} as const;
+
+/** sx на OutlinedInput — тот же размер шрифта значения внутри поля. */
+export const AGENT_CONSTRUCTOR_OUTLINED_INPUT_SX: SxProps<Theme> = {
+  fontSize: AGENT_CONSTRUCTOR_FIELD_FONT_SIZE,
+  lineHeight: AGENT_CONSTRUCTOR_FIELD_LINE_HEIGHT,
+  '& .MuiOutlinedInput-input': {
+    fontSize: `${AGENT_CONSTRUCTOR_FIELD_FONT_SIZE} !important`,
+    lineHeight: AGENT_CONSTRUCTOR_FIELD_LINE_HEIGHT,
+  },
+  '& .MuiInputBase-inputSizeSmall': {
+    fontSize: `${AGENT_CONSTRUCTOR_FIELD_FONT_SIZE} !important`,
+    lineHeight: AGENT_CONSTRUCTOR_FIELD_LINE_HEIGHT,
+  },
+};
 
 /**
  * По умолчанию — тёмная панель (конструктор, настройки модели с `darkPanel`).

@@ -23,6 +23,34 @@ function mapFeedbackFromMeta(raw: unknown): MessageFeedback | undefined {
   };
 }
 
+function mapDocumentSearchFromMeta(raw: unknown): Message['documentSearch'] | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const ds = raw as Record<string, unknown>;
+  const hitsRaw = Array.isArray(ds.hits) ? ds.hits : [];
+  const hits = hitsRaw
+    .filter((h): h is Record<string, unknown> => Boolean(h) && typeof h === 'object')
+    .map((h) => ({
+      file: String(h.file ?? ''),
+      anchor: String(h.anchor ?? ''),
+      relevance: Number(h.relevance ?? 0),
+      content: String(h.content ?? ''),
+      chunkIndex: Number(h.chunkIndex ?? h.chunk_index ?? 0),
+      documentId: Number(h.documentId ?? h.document_id ?? 0),
+      store: String(h.store ?? ''),
+    }));
+  const sourceFiles = Array.isArray(ds.sourceFiles)
+    ? ds.sourceFiles.map(String)
+    : Array.from(new Set(hits.map((h) => h.file).filter(Boolean)));
+  if (!hits.length && !sourceFiles.length && !String(ds.query ?? '').trim()) {
+    return undefined;
+  }
+  return {
+    query: String(ds.query ?? ''),
+    sourceFiles,
+    hits,
+  };
+}
+
 export function mapInlineAttachmentRecords(
   raw: unknown,
 ): NonNullable<Message['inlineAttachments']> | undefined {
@@ -132,6 +160,9 @@ export function mapServerConversationToChat(conversation: any): Chat {
           });
 
         const messageFeedback = mapFeedbackFromMeta(metadata?.feedback);
+        const documentSearch = mapDocumentSearchFromMeta(
+          metadata?.document_search ?? metadata?.documentSearch,
+        );
 
         return {
           id: String(msg?.message_id || `msg_${Math.random().toString(36).slice(2, 14)}`),
@@ -153,6 +184,7 @@ export function mapServerConversationToChat(conversation: any): Chat {
           ...(mcpToolCalls.length ? { mcpToolCalls } : {}),
           ...(multiLLMResponses.length ? { multiLLMResponses } : {}),
           ...(messageFeedback ? { feedback: messageFeedback } : {}),
+          ...(documentSearch ? { documentSearch } : {}),
         } as Message;
       })
     : [];

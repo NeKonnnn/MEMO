@@ -34,8 +34,6 @@ import { getApiUrl } from '../config/api';
 import type { McpPlatformStatus } from '../mcp/types';
 import { formatMcpAggregateLabel, isMcpPlatformHealthy } from '../mcp/utils/statusLabel';
 
-// Backend URL
-
 interface AgentStatus {
   is_initialized: boolean;
   mode: string;

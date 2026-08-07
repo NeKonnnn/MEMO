@@ -51,7 +51,6 @@ import {
   TextSnippet as TxtIcon,
   Article as DocxIcon,
   HelpOutline as HelpIcon,
-  AutoAwesome as SparkleIcon,
   CheckBox as CheckBoxIcon,
   CheckBoxOutlineBlank as CheckBoxBlankIcon,
   ExpandMore as ExpandMoreIcon,
@@ -59,7 +58,8 @@ import {
 import { getApiUrl, API_ENDPOINTS, getAuthFetchHeaders } from '../config/api';
 import { useAuth } from '../contexts/AuthContext';
 import { useAppActions } from '../contexts/AppContext';
-import { applyAgentModelAndSettings } from '../utils/applyAgentServer';
+import { loadAgentModelOnly } from '../utils/applyAgentServer';
+import { saveEntityRagSettings, type EntityRagDraft } from '../utils/entityRagSettings';
 import {
   ASTRA_OPEN_AGENT_CONSTRUCTOR,
   ASTRA_OPEN_AGENT_CONSTRUCTOR_ID_KEY,
@@ -79,8 +79,10 @@ import { MODEL_SETTINGS_DEFAULT, type ModelSettingsState } from '../constants/mo
 import ShareAgentDialog from './ShareAgentDialog';
 import { fetchMcpServers } from '../mcp/api';
 import type { McpServerConfigPublic } from '../mcp/types';
-import { persistAgentMcpConfig } from '../utils/applyAgentMcp';
+import { applyAgentMcpToChat, persistAgentMcpConfig } from '../utils/applyAgentMcp';
 import RAGSettings from './settings/RAGSettings';
+import { useRagEntityReadyMessage } from '../hooks/useRagEntityReadyMessage';
+import { fetchMergedUserAgents } from '../utils/fetchMergedUserAgents';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -90,6 +92,8 @@ interface KbDocument {
   created_at: string | null;
   size: number | null;
   file_type: string | null;
+  /** metadata.agent_id из SVC-RAG — документы агента, даже если config ещё не сохранён. */
+  agentId: number | null;
 }
 
 interface Agent {
@@ -191,10 +195,12 @@ function SectionHeader({ children }: { children: React.ReactNode }) {
 // ─── Main component ───────────────────────────────────────────────────────────
 
 export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConstructorPanelProps) {
-  const { token } = useAuth();
+  const { token, user } = useAuth();
+  const ragUserId = String(user?.user_id || user?.username || '').trim().toLowerCase();
   const { showNotification } = useAppActions();
   const dropdownItemSx = useMemo(() => getDropdownItemSx(isDarkMode), [isDarkMode]);
-  const formFieldInputSx = useMemo(() => getFormFieldInputSx(isDarkMode), [isDarkMode]);
+  // Панель конструктора всегда на цветном сайдбаре — текст как у кнопки «Агенты» (белый), не под светлую тему приложения.
+  const formFieldInputSx = useMemo(() => getFormFieldInputSx(true), []);
 
   /** Красная звёздочка у обязательного поля (MUI по умолчанию не всегда error.main). */
   const nameFieldSx = useMemo(
@@ -211,22 +217,22 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
         {
           '& .MuiOutlinedInput-root': { cursor: 'pointer' },
           '& .MuiOutlinedInput-root.Mui-focused fieldset': {
-            borderColor: isDarkMode ? 'rgba(255,255,255,0.23)' : 'rgba(0,0,0,0.23)',
+            borderColor: 'rgba(255,255,255,0.23)',
             borderWidth: '1px',
           },
           '& .MuiOutlinedInput-root:hover fieldset': {
-            borderColor: isDarkMode ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.4)',
+            borderColor: 'rgba(255,255,255,0.4)',
           },
           '& .MuiOutlinedInput-root.Mui-focused:hover fieldset': {
-            borderColor: isDarkMode ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.4)',
+            borderColor: 'rgba(255,255,255,0.4)',
           },
           '& .MuiInputLabel-root.Mui-focused': {
-            color: isDarkMode ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.6)',
+            color: 'rgba(255,255,255,0.7)',
           },
           '& .MuiFormLabel-asterisk': { color: '#f44336' },
         },
       ] as SxProps<Theme>,
-    [formFieldInputSx, isDarkMode],
+    [formFieldInputSx],
   );
 
   const categoryOutlinedRef = useRef<HTMLDivElement>(null);
@@ -243,7 +249,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
   const [instructions, setInstructions] = useState('');
   const [model, setModel] = useState('');
   const [availableModels, setAvailableModels] = useState<string[]>([]);
-  /** Каталог моделей с провайдером (id из config, напр. local) для выбора провайдер→модель. */
+  /** Каталог моделей с провайдером (CORSUR / Phoenix …) для выбора провайдер→модель. */
   const [providerModels, setProviderModels] = useState<ProviderModelItem[]>([]);
   const [providerIds, setProviderIds] = useState<string[]>([]);
 
@@ -255,6 +261,12 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
   const [artifactsEnabled, setArtifactsEnabled] = useState(false);
   const [shadcnEnabled, setShadcnEnabled] = useState(false);
   const [userPromptMode, setUserPromptMode] = useState(false);
+
+  /**
+   * Черновик настроек РАГ: панель их не пишет, они уезжают вместе с агентом.
+   * null — не трогали, тогда у агента остаются его текущие настройки.
+   */
+  const [ragDraft, setRagDraft] = useState<EntityRagDraft | null>(null);
 
   // File search (KB)
   const [fileSearchEnabled, setFileSearchEnabled] = useState(false);
@@ -293,6 +305,8 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
   const [categoryPopoverAnchor, setCategoryPopoverAnchor] = useState<HTMLElement | null>(null);
   const [shareDialogOpen, setShareDialogOpen] = useState(false);
   const [isPublishing, setIsPublishing] = useState(false);
+  /** Оранжевая табличка у блока документов агента (нет модели / нет чекбокса). */
+  const [kbGuardMessage, setKbGuardMessage] = useState<string | null>(null);
 
   const kbFileInputRef = useRef<HTMLInputElement>(null);
   const selectedAgentIdRef = useRef<number | 'new'>(selectedAgentId);
@@ -309,22 +323,11 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
   const loadAgents = useCallback(async () => {
     setIsLoadingAgents(true);
     try {
-      const headers: HeadersInit = tokenRef.current ? { Authorization: `Bearer ${tokenRef.current}` } : {};
-      const [mineResp, sharedResp] = await Promise.all([
-        fetch(getApiUrl('/api/agents/my/agents'), { headers }),
-        fetch(getApiUrl('/api/agents/my/shared'), { headers }),
-      ]);
-      const mine: Agent[] = mineResp.ok ? ((await mineResp.json()).agents || []) : [];
-      const shared: Agent[] = sharedResp.ok
-        ? ((await sharedResp.json()).agents || []).map((a: Agent) => ({ ...a, is_shared_with_me: true }))
-        : [];
+      const merged = await fetchMergedUserAgents(tokenRef.current);
       setAgents((prev) => {
         const byId = new Map<number, Agent>();
-        for (const a of mine) byId.set(a.id, { ...a, my_permission: a.my_permission || 'owner' });
-        for (const a of shared) {
-          if (!byId.has(a.id)) byId.set(a.id, a);
-        }
-        // Не затирать агента, открытого из галереи (ещё не в «Мои» / shared)
+        for (const a of merged) byId.set(a.id, a as Agent);
+        // Не затирать агента, открытого из галереи (ещё не в «Мои» / shared / закладках)
         const keepId = selectedAgentIdRef.current;
         if (typeof keepId === 'number') {
           const kept = prev.find((a) => a.id === keepId);
@@ -332,8 +335,8 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
         }
         return Array.from(byId.values());
       });
-    } catch (e) {
-      // silent
+    } catch {
+      /* silent */
     } finally {
       setIsLoadingAgents(false);
     }
@@ -408,21 +411,65 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
       const data = await resp.json();
       const raw = (data.documents || data || []) as Array<Record<string, unknown>>;
       // Нормализуем id → number, иначе includes() после upload может не совпасть.
-      setKbDocuments(
-        raw.map(d => ({
-          id: Number(d.id),
-          filename: String(d.filename ?? ''),
-          size: d.size != null ? Number(d.size) : null,
-          file_type: d.file_type != null ? String(d.file_type) : null,
-          created_at: d.created_at != null ? String(d.created_at) : null,
-        })).filter(d => Number.isFinite(d.id)),
-      );
+      const mapped: KbDocument[] = raw
+        .map(d => {
+          const meta =
+            d.metadata && typeof d.metadata === 'object'
+              ? (d.metadata as Record<string, unknown>)
+              : {};
+          const rawAgentId = meta.agent_id;
+          let agentId: number | null = null;
+          if (rawAgentId != null && rawAgentId !== '') {
+            const n = Number(rawAgentId);
+            if (Number.isFinite(n)) agentId = n;
+          }
+          return {
+            id: Number(d.id),
+            filename: String(d.filename ?? ''),
+            size: d.size != null ? Number(d.size) : null,
+            file_type: d.file_type != null ? String(d.file_type) : null,
+            created_at: d.created_at != null ? String(d.created_at) : null,
+            agentId,
+          };
+        })
+        .filter(d => Number.isFinite(d.id));
+      setKbDocuments(mapped);
     } catch (e) {
       // silent
     } finally {
       setIsLoadingKb(false);
     }
   }, []);
+
+  /** Записать kb_document_ids в config агента, чтобы карточки и чат не теряли файлы. */
+  const persistAgentKbDocumentIds = useCallback(
+    async (agentId: number, ids: number[]) => {
+      if (!token || !Number.isFinite(agentId) || agentId <= 0) return;
+      try {
+        const headers: HeadersInit = {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        };
+        const getResp = await fetch(getApiUrl(`/api/agents/${agentId}`), { headers });
+        if (!getResp.ok) return;
+        const agent = (await getResp.json()) as Agent;
+        const cfg = { ...(agent.config || {}) };
+        cfg.kb_document_ids = ids;
+        cfg.file_search_enabled = true;
+        await fetch(getApiUrl(`/api/agents/${agentId}`), {
+          method: 'PUT',
+          headers,
+          body: JSON.stringify({ config: cfg }),
+        });
+        setAgents(prev =>
+          prev.map(a => (a.id === agentId ? { ...a, config: { ...cfg } } : a)),
+        );
+      } catch {
+        /* silent — локальный список уже обновлён */
+      }
+    },
+    [token],
+  );
 
   // Загрузка при открытии панели — один раз на сессию открытия (без зависимости от нестабильных колбэков)
   useEffect(() => {
@@ -502,6 +549,10 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
   // ─── Load selected agent into form (только при смене выбранного id) ──────────
 
   useEffect(() => {
+    // Черновик РАГ принадлежит тому агенту, у которого его набрали. Переключились
+    // на другого — сбрасываем, иначе настройки одного уехали бы второму.
+    setRagDraft(null);
+    setKbGuardMessage(null);
     if (selectedAgentId === 'new') {
       resetForm();
       return;
@@ -569,6 +620,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
     setUserPromptMode(false);
     setFileSearchEnabled(false);
     setKbDocumentIds([]);
+    setKbGuardMessage(null);
     setSkillIds([]);
     setSkillsEnabled(false);
     setMcpEnabled(false);
@@ -577,23 +629,115 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
     setSupportEmail('');
   }
 
+  const showKbGuard = useCallback(
+    (message: string) => {
+      setKbGuardMessage(message);
+      showNotification('warning', message);
+    },
+    [showNotification],
+  );
+
+  /** Путь эмбеддера/реранкера: черновик панели, иначе сохранённые настройки агента. */
+  const resolveAgentRagModelPaths = useCallback(async (): Promise<{
+    embeddingPath: string;
+    rerankerPath: string;
+    rerankingEnabled: boolean;
+  }> => {
+    const draftEmb = ragDraft?.rag_embedding_model_path;
+    const draftRer = ragDraft?.rag_reranker_model_path;
+    let embeddingPath = typeof draftEmb === 'string' ? draftEmb.trim() : '';
+    let rerankerPath = typeof draftRer === 'string' ? draftRer.trim() : '';
+    let rerankingEnabled =
+      typeof ragDraft?.rag_reranking_enabled === 'boolean'
+        ? ragDraft.rag_reranking_enabled
+        : true;
+
+    const needServerEmb = draftEmb === null || draftEmb === undefined;
+    const needServerRer = draftRer === null || draftRer === undefined;
+    const needServerFlag = ragDraft == null || typeof ragDraft.rag_reranking_enabled !== 'boolean';
+
+    if (
+      typeof selectedAgentId === 'number' &&
+      (needServerEmb || needServerRer || needServerFlag || ragDraft == null)
+    ) {
+      try {
+        const resp = await fetch(
+          getApiUrl(`/api/rag/settings?scope=agent&agent_id=${selectedAgentId}`),
+          { headers: getAuthFetchHeaders() },
+        );
+        if (resp.ok) {
+          const data = (await resp.json()) as Record<string, unknown>;
+          if (needServerEmb || ragDraft == null) {
+            embeddingPath = String(data.rag_embedding_model_path || '').trim();
+          }
+          if (needServerRer || ragDraft == null) {
+            rerankerPath = String(data.rag_reranker_model_path || '').trim();
+          }
+          if (needServerFlag) {
+            rerankingEnabled =
+              typeof data.rag_reranking_enabled === 'boolean'
+                ? data.rag_reranking_enabled
+                : true;
+          }
+        }
+      } catch {
+        /* сеть — оставим то, что уже есть из черновика */
+      }
+    }
+
+    return { embeddingPath, rerankerPath, rerankingEnabled };
+  }, [ragDraft, selectedAgentId]);
+
   // ─── KB Upload ───────────────────────────────────────────────────────────────
 
-  const handleKbUpload = async (files: FileList) => {
-    if (!files.length) return;
-    // Загрузка в KB агента = поиск по файлам; включаем флаг автоматически.
-    if (!fileSearchEnabled) setFileSearchEnabled(true);
+  const handleKbUpload = async (files: FileList | File[]) => {
+    // FileList — live-коллекция input: если обнулить value до конца async,
+    // список станет пустым и загрузка молча оборвётся без запроса на backend.
+    const fileArr = Array.from(files || []);
+
+    if (!fileSearchEnabled) {
+      showKbGuard('Сначала включите чекбокс «Искать по файлам агента».');
+      return;
+    }
+    if (selectedAgentId === 'new' || typeof selectedAgentId !== 'number') {
+      showKbGuard('Сначала сохраните агента, затем выберите модели в настройках РАГ.');
+      return;
+    }
+    if (!fileArr.length) {
+      showKbGuard('Файл не выбран.');
+      return;
+    }
+
+    const { embeddingPath, rerankerPath, rerankingEnabled } =
+      await resolveAgentRagModelPaths();
+    if (!embeddingPath) {
+      showKbGuard(
+        'Сначала выберите модель эмбеддингов в настройках РАГ для агента',
+      );
+      return;
+    }
+    if (rerankingEnabled && !rerankerPath) {
+      showKbGuard(
+        'Сначала выберите модель реранкера в настройках РАГ для агента',
+      );
+      return;
+    }
+
+    setKbGuardMessage(null);
     setIsUploadingKb(true);
     const uploadedIds: number[] = [];
-    const errors: string[] = [];
     const chunkingStrategy =
-      (typeof localStorage !== 'undefined' && localStorage.getItem('rag_chunking_strategy')) ||
+      (typeof localStorage !== 'undefined' &&
+        (localStorage.getItem(ragUserId ? `rag_chunking_strategy:${ragUserId}` : '') ||
+          localStorage.getItem('rag_chunking_strategy'))) ||
       'hierarchical';
-    for (const file of Array.from(files)) {
+    for (const file of fileArr) {
       const formData = new FormData();
       formData.append('file', file);
       // Agent KB: применяем стратегию чанкования из настроек RAG
       formData.append('chunking_strategy', chunkingStrategy);
+      // Привязка к агенту: owner_user_id = автор агента (не uploader)
+      formData.append('agent_id', String(selectedAgentId));
       try {
         const url = getApiUrl(API_ENDPOINTS.KB_DOCUMENTS_UPLOAD);
         const resp = await fetch(url, {
@@ -603,30 +747,43 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
         });
         const data = (await resp.json().catch(() => ({}))) as Record<string, unknown>;
         if (!resp.ok) {
-          const detail = data.detail ?? data.error ?? resp.statusText;
-          errors.push(`${file.name}: ${typeof detail === 'string' ? detail : JSON.stringify(detail)}`);
+          const detail = data.detail;
+          const msg =
+            typeof detail === 'string'
+              ? detail
+              : Array.isArray(detail)
+                ? detail.map((d) => (typeof d === 'object' && d && 'msg' in d ? String((d as { msg: unknown }).msg) : String(d))).join('; ')
+                : `Не удалось загрузить «${file.name}» (${resp.status})`;
+          showKbGuard(msg);
           continue;
         }
         const docId = Number(data.document_id ?? data.id);
         if (Number.isFinite(docId)) {
           uploadedIds.push(docId);
         } else {
-          errors.push(`${file.name}: сервер не вернул document_id`);
+          showKbGuard(
+            `Файл «${file.name}» загружен, но сервер не вернул id документа`,
+          );
         }
       } catch (e) {
-        errors.push(`${file.name}: ${e instanceof Error ? e.message : 'ошибка сети'}`);
+        const msg = e instanceof Error ? e.message : String(e);
+        showKbGuard(`Ошибка загрузки «${file.name}»: ${msg}`);
       }
     }
     setIsUploadingKb(false);
     if (uploadedIds.length) {
-      setKbDocumentIds(prev => Array.from(new Set([...prev, ...uploadedIds])));
+      let nextIds: number[] = [];
+      setKbDocumentIds(prev => {
+        nextIds = Array.from(new Set([...prev, ...uploadedIds]));
+        return nextIds;
+      });
+      await persistAgentKbDocumentIds(selectedAgentId, nextIds);
       showNotification(
         'success',
-        `Загружено файлов: ${uploadedIds.length}. Сохраните агента, чтобы привязка сохранилась.`,
+        uploadedIds.length === 1
+          ? 'Файл добавлен в базу агента'
+          : `Добавлено файлов: ${uploadedIds.length}`,
       );
-    }
-    if (errors.length) {
-      showNotification('error', errors.slice(0, 3).join('; '));
     }
     await loadKbDocuments();
   };
@@ -636,7 +793,14 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
       const url = `${getApiUrl(API_ENDPOINTS.KB_DOCUMENTS_DELETE)}/${docId}`;
       await fetch(url, { method: 'DELETE' });
       setKbDocuments(prev => prev.filter(d => d.id !== docId));
-      setKbDocumentIds(prev => prev.filter(id => id !== docId));
+      let nextIds: number[] = [];
+      setKbDocumentIds(prev => {
+        nextIds = prev.filter(id => id !== docId);
+        return nextIds;
+      });
+      if (typeof selectedAgentId === 'number') {
+        await persistAgentKbDocumentIds(selectedAgentId, nextIds);
+      }
     } catch (e) { /* silent */ }
   };
 
@@ -664,19 +828,8 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
       ],
       config: {
         category,
-        // Модель всегда в формате <provider_id>/<model_id>; локальный провайдер — id «local»
-        model: (() => {
-          let m = model.replace(/^1lm-svc:\/\//i, 'llm-svc://').replace(/\s+/g, '');
-          if (m && !m.startsWith('llm-svc://') && !m.includes('/') && !m.toLowerCase().endsWith('.gguf')) {
-            m = `local/${m}`;
-          }
-          return m;
-        })(),
-        model_params: {
-          ...modelParams,
-          // Провайдер в params — сырой id из /api/llm-providers (local, …)
-          provider: (modelParams as any)?.provider || (model.includes('/') ? model.split('/')[0] : 'local'),
-        },
+        model: model.replace(/^1lm-svc:\/\//i, 'llm-svc://').replace(/\s+/g, ''),
+        model_params: modelParams,
         model_settings: agentModelSettings,
         code_interpreter: codeInterpreter,
         web_search: webSearch,
@@ -749,19 +902,33 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
       setTimeout(() => setSaveSuccess(false), 3000);
       await loadAgents();
 
-      if (token) {
-        const sp = instructions.trim() || 'Системные инструкции не заданы.';
-        const applied = await applyAgentModelAndSettings(token, {
-          system_prompt: sp,
-          model_path: model.trim() || null,
-          model_settings: agentModelSettings as unknown as Record<string, unknown>,
+      if (token && model.trim()) {
+        const loaded = await loadAgentModelOnly(token, model.trim());
+        if (loaded.ok) {
+          showNotification('success', 'Модель агента загружена на сервер');
+        } else {
+          showNotification('warning', `Агент сохранён; не удалось загрузить модель: ${loaded.message}`);
+        }
+      }
+
+      // Настройки РАГ уезжают ПОСЛЕ агента и одним запросом: до этого момента id
+      // нового агента ещё не существует. Здесь же backend решает, менялось ли то,
+      // что лежит в индексе, и ставит перечанковку.
+      if (token && savedId && savedId !== 'new') {
+        const ragApplied = await saveEntityRagSettings({
+          scope: 'agent',
+          entityId: savedId,
+          entityName: name.trim(),
+          instructions: instructions.trim() || 'Системные инструкции не заданы.',
+          draft: ragDraft,
         });
-        if (applied.ok && model.trim()) {
-          showNotification('success', 'Модель и настройки применены на сервере — ответы в чате пойдут с этой моделью');
-        } else if (applied.ok && !model.trim()) {
-          showNotification('info', 'Промпт и настройки применены; укажите модель в параметрах — пока чат без смены модели');
-        } else if (!applied.ok) {
-          showNotification('warning', `Агент сохранён; не удалось применить на сервер: ${applied.message}`);
+        if (ragApplied.ok) {
+          setRagDraft(null);
+        } else {
+          showNotification(
+            'warning',
+            `Агент сохранён; настройки РАГ не применены: ${ragApplied.message}`,
+          );
         }
       }
     } catch (e: any) {
@@ -838,12 +1005,53 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
     window.dispatchEvent(new CustomEvent('agentSelected', { detail: agent }));
   };
 
+  const selectedKbDocuments = useMemo(() => {
+    const idSet = new Set(kbDocumentIds);
+    return kbDocuments.filter(doc => {
+      if (idSet.has(doc.id)) return true;
+      // Файлы уже в RAG с metadata.agent_id, а config агента ещё без id —
+      // всё равно показываем карточки рядом с «Добавить файлы».
+      return (
+        typeof selectedAgentId === 'number' &&
+        doc.agentId != null &&
+        doc.agentId === selectedAgentId
+      );
+    });
+  }, [kbDocuments, kbDocumentIds, selectedAgentId]);
+
+  // Подтянуть id из RAG в локальный список (и при необходимости в config).
+  useEffect(() => {
+    if (typeof selectedAgentId !== 'number' || !fileSearchEnabled) return;
+    const fromRag = kbDocuments
+      .filter(d => d.agentId === selectedAgentId)
+      .map(d => d.id);
+    if (!fromRag.length) return;
+    const missing = fromRag.filter(id => !kbDocumentIds.includes(id));
+    if (!missing.length) return;
+    const nextIds = Array.from(new Set([...kbDocumentIds, ...fromRag]));
+    setKbDocumentIds(nextIds);
+    void persistAgentKbDocumentIds(selectedAgentId, nextIds);
+  }, [
+    selectedAgentId,
+    fileSearchEnabled,
+    kbDocuments,
+    kbDocumentIds,
+    persistAgentKbDocumentIds,
+  ]);
+
+  const ragReadyEntityId = typeof selectedAgentId === 'number' ? selectedAgentId : null;
+  const ragReadyEntityName =
+    typeof selectedAgentId === 'number'
+      ? agents.find((a) => a.id === selectedAgentId)?.name
+      : undefined;
+  const { readyMessage: ragReadyMessage, clearReadyMessage: clearRagReadyMessage } =
+    useRagEntityReadyMessage('agent', ragReadyEntityId, ragReadyEntityName);
+
   if (!isOpen) return null;
 
   const agentIdStr = selectedAgentId !== 'new'
     ? `agent_${String(selectedAgentId).padStart(6, '0')}`
     : '';
-  const selectedKbDocuments = kbDocuments.filter(doc => kbDocumentIds.includes(doc.id));
 
   // ─── Роль текущего пользователя для выбранного агента ────────────────────────
   const selectedAgent = selectedAgentId !== 'new' ? agents.find(a => a.id === selectedAgentId) : null;
@@ -874,8 +1082,13 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
           providerIds={providerIds}
           initialParams={Object.keys(modelParams).length ? modelParams : undefined}
           initialModelSettings={agentModelSettings}
-          onSaveModelSettings={setAgentModelSettings}
+          onSaveModelSettings={readOnly ? undefined : setAgentModelSettings}
+          readOnly={readOnly}
           onSave={(newModel, params) => {
+            if (readOnly) {
+              setShowModelParamsPanel(false);
+              return;
+            }
             setModel(newModel);
             setModelParams(params ?? {});
             setShowModelParamsPanel(false);
@@ -885,7 +1098,19 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
         <RAGSettings
           variant="panel"
           lockedScope="agent"
+          entityId={typeof selectedAgentId === 'number' ? selectedAgentId : null}
+          entityName={selectedAgent?.name}
+          entityInstructionsPrompt={instructions}
+          draft
+          draftValue={ragDraft}
+          onDraftChange={readOnly ? undefined : setRagDraft}
+          readOnly={readOnly}
           isDarkMode={true}
+          panelTitle={
+            selectedAgent?.name
+              ? `Настройки РАГ: ${selectedAgent.name}`
+              : 'Настройки РАГ для агента'
+          }
           onClose={() => setShowAgentRagSettingsPanel(false)}
         />
       ) : (
@@ -1012,8 +1237,8 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
         >
           <Typography sx={{ fontSize: '0.72rem', color: 'rgba(255,255,255,0.75)' }}>
             {readOnly
-              ? 'Агент доступен в режиме «Зритель» — просмотр и использование; изменение недоступно.'
-              : 'Агент доступен в режиме «Редактор» — можно изменять; удаление и шаринг — только у владельца.'}
+              ? 'Общий агент · роль «Зритель» — только просмотр и использование, изменение недоступно.'
+              : 'Общий агент · роль «Редактор» — можно изменять; удаление и повторный шаринг доступны только владельцу.'}
           </Typography>
         </Box>
       )}
@@ -1028,8 +1253,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
           display: 'flex',
           flexDirection: 'column',
           gap: 1.5,
-          ...(readOnly ? { opacity: 0.75 } : {}),
-          ...(readOnly ? { '& > *': { pointerEvents: 'none' } } : {}),
+          // Зрителю нужны клики по «Модель LLM» и «Настройки РАГ» — не глушим весь form.
           ...SIDEBAR_HIDE_SCROLLBAR_SX,
         }}
       >
@@ -1064,6 +1288,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
             size="small"
             fullWidth
             required
+            disabled={readOnly}
             sx={nameFieldSx}
             inputProps={{ maxLength: 255 }}
           />
@@ -1083,6 +1308,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
             variant="outlined"
             size="small"
             fullWidth
+            disabled={readOnly}
             sx={formFieldInputSx}
           />
         </Box>
@@ -1097,7 +1323,10 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
               label="Категория"
               value={category}
               readOnly
-              onClick={() => setCategoryPopoverAnchor(categoryOutlinedRef.current)}
+              onClick={() => {
+                if (readOnly) return;
+                setCategoryPopoverAnchor(categoryOutlinedRef.current);
+              }}
               endAdornment={
                 <InputAdornment position="end">
                   <ExpandMoreIcon
@@ -1108,7 +1337,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
             />
           </FormControl>
           <Popover
-            open={Boolean(categoryPopoverAnchor)}
+            open={!readOnly && Boolean(categoryPopoverAnchor)}
             anchorEl={categoryPopoverAnchor}
             onClose={() => setCategoryPopoverAnchor(null)}
             anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
@@ -1137,25 +1366,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
         </Box>
 
         {/* Instructions */}
-        <Box sx={{ position: 'relative' }}>
-          <Button
-            size="small"
-            startIcon={<SparkleIcon sx={{ fontSize: '0.8rem !important' }} />}
-            sx={{
-              position: 'absolute',
-              right: 0,
-              top: 0,
-              zIndex: 1,
-              fontSize: '0.7rem',
-              textTransform: 'none',
-              color: 'rgba(255,255,255,0.5)',
-              py: 0,
-              minWidth: 0,
-              '&:hover': { color: 'rgba(255,255,255,0.8)', bgcolor: 'transparent' },
-            }}
-          >
-            Переменные
-          </Button>
+        <Box>
           <TextField
             value={instructions}
             onChange={e => setInstructions(e.target.value)}
@@ -1167,6 +1378,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
             multiline
             minRows={3}
             maxRows={8}
+            disabled={readOnly}
             sx={formFieldInputSx}
           />
         </Box>
@@ -1277,10 +1489,8 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
             </Box>
             <Button
               size="small"
-              startIcon={isUploadingKb ? <CircularProgress size={13} sx={{ color: 'inherit' }} /> : <AttachIcon sx={{ fontSize: '0.85rem !important' }} />}
+              startIcon={<AttachIcon sx={{ fontSize: '0.85rem !important' }} />}
               fullWidth
-              disabled={isUploadingKb || readOnly}
-              onClick={() => kbFileInputRef.current?.click()}
               sx={{
                 fontSize: '0.72rem',
                 textTransform: 'none',
@@ -1289,10 +1499,9 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
                 py: 0.75,
                 justifyContent: 'flex-start',
                 '&:hover': { bgcolor: 'rgba(255,255,255,0.06)', borderColor: 'rgba(255,255,255,0.35)' },
-                '&:disabled': { color: 'rgba(255,255,255,0.3)', borderColor: 'rgba(255,255,255,0.1)' },
               }}
             >
-              {isUploadingKb ? 'Загрузка...' : 'Загрузить файл контекста'}
+              Загрузить файл контекста
             </Button>
           </Box>
         </Box>
@@ -1339,6 +1548,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
               <Checkbox
                 size="small"
                 checked={skillsEnabled}
+                disabled={readOnly}
                 onChange={(e) => setSkillsEnabled(e.target.checked)}
                 sx={{ color: 'rgba(255,255,255,0.4)', '&.Mui-checked': { color: '#2196f3' }, p: 0.5 }}
               />
@@ -1350,9 +1560,6 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
             }
             sx={{ m: 0, mb: 1 }}
           />
-          <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.45)', display: 'block', mb: 1 }}>
-            Allowlist: пустой список = все доступные. Manual `$` и always-apply работают независимо.
-          </Typography>
           {!skillsEnabled ? (
             <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.35)' }}>
               Skills выключены для этого агента
@@ -1369,6 +1576,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
                   control={
                     <Checkbox
                       size="small"
+                      disabled={readOnly}
                       checked={skillIds.includes(sk.slug)}
                       onChange={(e) => {
                         setSkillIds((prev) =>
@@ -1403,6 +1611,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
               control={
                 <Checkbox
                   size="small"
+                  disabled={readOnly}
                   checked={mcpEnabled}
                   onChange={(e) => {
                     const checked = e.target.checked;
@@ -1441,7 +1650,10 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
                     }
                     readOnly
                     placeholder="Выберите MCP-серверы"
-                    onClick={() => setMcpPopoverAnchor(mcpTriggerRef.current)}
+                    onClick={() => {
+                      if (readOnly) return;
+                      setMcpPopoverAnchor(mcpTriggerRef.current);
+                    }}
                     endAdornment={
                       <InputAdornment position="end">
                         <ExpandMoreIcon
@@ -1452,7 +1664,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
                   />
                 </FormControl>
                 <Popover
-                  open={Boolean(mcpPopoverAnchor)}
+                  open={!readOnly && Boolean(mcpPopoverAnchor)}
                   anchorEl={mcpPopoverAnchor}
                   onClose={() => setMcpPopoverAnchor(null)}
                   anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
@@ -1515,7 +1727,12 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
               control={
                 <Checkbox
                   checked={fileSearchEnabled}
-                  onChange={e => setFileSearchEnabled(e.target.checked)}
+                  disabled={readOnly}
+                  onChange={e => {
+                    const on = e.target.checked;
+                    setFileSearchEnabled(on);
+                    if (on) setKbGuardMessage(null);
+                  }}
                   size="small"
                   sx={{ color: 'rgba(255,255,255,0.4)', '&.Mui-checked': { color: '#2196f3' }, p: 0.5 }}
                 />
@@ -1569,6 +1786,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
                     }}
                   >
                     {/* Крестик удаления */}
+                    {!readOnly && (
                     <IconButton
                       size="small"
                       onClick={() => handleKbDelete(doc.id)}
@@ -1583,6 +1801,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
                     >
                       <CloseIcon sx={{ fontSize: 11 }} />
                     </IconButton>
+                    )}
 
                     {/* Иконка + имя в строку */}
                     <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, minWidth: 0, pr: 2 }}>
@@ -1642,6 +1861,50 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
               </Box>
             ) : null}
 
+            {ragReadyMessage && (
+              <Alert
+                severity="success"
+                onClose={clearRagReadyMessage}
+                sx={{
+                  mt: 0.75,
+                  mb: 0.5,
+                  py: 0.25,
+                  px: 1,
+                  fontSize: '0.72rem',
+                  bgcolor: 'rgba(76, 175, 80, 0.12)',
+                  color: '#81c784',
+                  border: '1px solid rgba(76, 175, 80, 0.35)',
+                  '& .MuiAlert-icon': { color: '#4caf50', fontSize: '1.1rem', py: 0.5 },
+                  '& .MuiAlert-message': { py: 0.6 },
+                  '& .MuiAlert-action': { pt: 0.25 },
+                }}
+              >
+                {ragReadyMessage}
+              </Alert>
+            )}
+
+            {kbGuardMessage && (
+              <Alert
+                severity="warning"
+                onClose={() => setKbGuardMessage(null)}
+                sx={{
+                  mt: 0.75,
+                  mb: 0.5,
+                  py: 0.25,
+                  px: 1,
+                  fontSize: '0.72rem',
+                  bgcolor: 'rgba(255, 152, 0, 0.12)',
+                  color: '#ffb74d',
+                  border: '1px solid rgba(255, 152, 0, 0.35)',
+                  '& .MuiAlert-icon': { color: '#ff9800', fontSize: '1.1rem', py: 0.5 },
+                  '& .MuiAlert-message': { py: 0.6 },
+                  '& .MuiAlert-action': { pt: 0.25 },
+                }}
+              >
+                {kbGuardMessage}
+              </Alert>
+            )}
+
             {/* Upload button */}
             <input
               ref={kbFileInputRef}
@@ -1649,14 +1912,24 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
               multiple
               accept=".pdf,.docx,.doc,.docm,.xlsx,.xls,.xlsm,.txt,.csv,.md,.log,.rtf"
               style={{ display: 'none' }}
-              onChange={e => { if (e.target.files) handleKbUpload(e.target.files); e.target.value = ''; }}
+              onChange={e => {
+                const list = e.target.files;
+                if (!list?.length) return;
+                // Снимок ДО очистки input: FileList живой и обнуляется вместе с value.
+                const snapshot = Array.from(list);
+                e.target.value = '';
+                void handleKbUpload(snapshot);
+              }}
             />
             <Button
               size="small"
               startIcon={<SettingsIcon sx={{ fontSize: '0.85rem !important' }} />}
               fullWidth
-              disabled={readOnly}
-              onClick={() => setShowAgentRagSettingsPanel(true)}
+              disabled={!fileSearchEnabled}
+              onClick={() => {
+                setKbGuardMessage(null);
+                setShowAgentRagSettingsPanel(true);
+              }}
               sx={{
                 mt: 0.5,
                 fontSize: '0.72rem',
@@ -1675,7 +1948,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
               size="small"
               startIcon={isUploadingKb ? <CircularProgress size={13} sx={{ color: 'inherit' }} /> : <UploadIcon sx={{ fontSize: '0.85rem !important' }} />}
               fullWidth
-              disabled={isUploadingKb || readOnly}
+              disabled={isUploadingKb || readOnly || !fileSearchEnabled}
               onClick={() => kbFileInputRef.current?.click()}
               sx={{
                 mt: 0.5,
@@ -1746,6 +2019,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
                 variant="outlined"
                 size="small"
                 fullWidth
+                disabled={readOnly}
                 sx={formFieldInputSx}
               />
             </Box>
@@ -1759,6 +2033,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
                 size="small"
                 fullWidth
                 type="email"
+                disabled={readOnly}
                 sx={formFieldInputSx}
               />
             </Box>
@@ -1919,7 +2194,6 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
                 fontWeight: 600,
                 fontSize: '0.82rem',
                 py: 0.9,
-                flex: '1 1 120px',
                 '&:hover': { bgcolor: '#388e3c' },
                 '&:disabled': { bgcolor: 'rgba(46,125,50,0.4)', color: 'rgba(255,255,255,0.5)' },
               }}
@@ -1937,7 +2211,6 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
                 fontWeight: 600,
                 fontSize: '0.82rem',
                 py: 0.9,
-                flex: '1 1 120px',
                 color: 'rgba(255,255,255,0.85)',
                 borderColor: 'rgba(255,255,255,0.25)',
                 '&:hover': { borderColor: 'rgba(255,255,255,0.5)', bgcolor: 'rgba(255,255,255,0.06)' },

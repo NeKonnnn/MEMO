@@ -81,8 +81,19 @@ def effective_use_reranking(
     *,
     query_text: Optional[str] = None,
 ) -> bool:
-    """raw_cosine / flat - без реранка всегда (это режимы 'сырой выдачи')
-    Остальные - по настройке пользователя и конфигу
+    """raw_cosine / flat — без реранка всегда (это режимы «сырой выдачи»).
+    Остальные — по настройке пользователя и конфигу: реранк это постобработка
+    порядка, и она осмысленна для любого способа набрать кандидатов. Раньше
+    vector и lexical гасили его жёстко — галочка в интерфейсе стояла, эффекта
+    не было, предупреждения тоже.
+
+    hybrid    — вектор+BM25; реранк включается только если он разрешён в конфиге.
+    reranking — только реранк по конфигу.
+    auto      — по конфигу и флагу запроса.
+
+    Дополнительно: для кириллических запросов с английским-only реранкером реранк
+    принудительно выключается (см. ```should_disable_rerank_for_query```). Это в несколько
+    раз повышает качество на русскоязычном корпусе без замены модели.
     """
     st = (strategy or "auto").lower()
     # Сырые режимы: постобработка в них отключена по определению — стратегия
@@ -343,21 +354,35 @@ def filter_by_min_vector_similarity(
 def should_diversify_hits(
     hits: List[Tuple[DocumentVector, float]],
     *,
+    score_of: Optional[Any] = None,
     min_unique_docs: int = 3,
     min_top_score_for_diversify: float = 0.24,
     max_top_gap_for_diversify: float = 0.12,
 ) -> bool:
     """Решает, нужна ли диверсификация по документам.
 
-    Идея: если top-1 явно лучше top-2, диверсификация часто вносит шум.
+    Идея: если top-1 явно лучше top-2, диверсификация часто вносит шум —
+    у одного документа есть что сказать, и резать его до одного чанка нельзя.
+
+    Пороги (0.24 / 0.12) заданы в шкале COSINE. К моменту вызова ```hits[i][1]```
+    может быть уже не cosine, а weighted RRF (~0.016) — тогда ```s1 < 0.24```
+    выполняется всегда, ответ всегда True, и «top-1 явно лучше» не срабатывает
+    никогда. ```score_of``` позволяет передать настоящий cosine чанка; вернул
+    None — считаем шкалу неизвестной и диверсифицируем, как раньше.
     """
     if len(hits) < 3:
         return False
     uniq_docs = len({h[0].document_id for h in hits if h[0].document_id is not None})
     if uniq_docs < min_unique_docs:
         return False
-    s1 = float(hits[0][1])
-    s2 = float(hits[1][1])
+    if score_of is None:
+        s1: Optional[float] = float(hits[0][1])
+        s2: Optional[float] = float(hits[1][1])
+    else:
+        s1 = score_of(hits[0])
+        s2 = score_of(hits[1])
+        if s1 is None or s2 is None:
+            return True
     if s1 < min_top_score_for_diversify:
         return True
     return (s1 - s2) <= max_top_gap_for_diversify

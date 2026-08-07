@@ -89,6 +89,39 @@ async def _resolve_full_names(user_ids: List[str]) -> Dict[str, Optional[str]]:
     return result
 
 
+async def _reject_foreign_kb_documents(
+    agent_repo, agent_id: Optional[int], config: Optional[dict]
+) -> None:
+    """Не дать привязать файл, который уже числится за другим агентом.
+
+    Файл принадлежит ровно одному агенту: перечанковка идёт по настройкам
+    агента, и общий файл один из них молча перекроил бы под себя.
+    """
+    if not isinstance(config, dict):
+        return
+    raw = config.get("kb_document_ids")
+    if not isinstance(raw, list) or not raw:
+        return
+    ids: List[int] = []
+    for value in raw:
+        try:
+            ids.append(int(value))
+        except (TypeError, ValueError):
+            continue
+    if not ids:
+        return
+    foreign = await agent_repo.find_documents_claimed_by_other_agents(agent_id, ids)
+    if foreign:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Файлы уже привязаны к другому агенту и не могут использоваться "
+                f"двумя сразу: {', '.join(str(i) for i in foreign)}. "
+                "Загрузите их в этого агента отдельно."
+            ),
+        )
+
+
 @router.post("/", response_model=dict, status_code=201)
 async def create_agent(
     request: Request, agent_data: AgentCreate, current_user: Annotated[dict, Depends(get_current_user)]
@@ -96,6 +129,7 @@ async def create_agent(
     """Создание нового агента"""
     try:
         agent_repo = get_agent_repository()
+        await _reject_foreign_kb_documents(agent_repo, None, agent_data.config)
         agent_id = await agent_repo.create_agent(
             agent_data=agent_data,
             author_id=current_user["user_id"],
@@ -216,6 +250,7 @@ async def update_agent(
     """Обновление агента (только автор)"""
     try:
         agent_repo = get_agent_repository()
+        await _reject_foreign_kb_documents(agent_repo, agent_id, agent_data.config)
         success = await agent_repo.update_agent(
             agent_id=agent_id, agent_data=agent_data, author_id=current_user["user_id"]
         )

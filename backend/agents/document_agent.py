@@ -12,7 +12,7 @@ from backend.rag_query.prompts import (
     RAG_STRICT_NOT_FOUND_MESSAGE,
     merge_strict_rag_system_prompt,
 )
-from backend.rag_query.relevance import scores_to_relevance_percents
+from backend.rag_query.relevance import hits_to_relevance_percents
 from backend.realtime.rag_evidence import (
     RAG_NO_RELEVANT_CONTEXT_MESSAGE,
     build_rag_id_to_filename,
@@ -34,7 +34,6 @@ from .base_agent import BaseAgent
 logger = get_logger(__name__)
 
 Hit = Tuple[str, float, Optional[int], Optional[int]]
-
 
 class DocumentAgent(BaseAgent):
     """Агент для поиска по KB и библиотеке памяти (не global store)."""
@@ -68,15 +67,27 @@ class DocumentAgent(BaseAgent):
                 return "Сервис поиска по документам (SVC-RAG) недоступен. Пожалуйста, убедитесь, что система инициализирована."
 
             logger.info("[DocumentAgent] Поиск в KB + memory: %s", message)
-            k = get_rag_chat_top_k()
+            # KB агента: top_k берём из настроек агента. Memory ниже ограничивает
+            # выдачу своим значением из env.
+            k = get_rag_chat_top_k("agent")
             hits: List[Hit] = []
             id_map: Dict[Any, str] = {}
             scopes_used: List[str] = []
 
+            # Если у агента есть свой список KB-документов, поиск обязан идти
+            # только по нему — иначе в выдачу приезжают чужие файлы.
+            agent_doc_ids = [
+                int(d)
+                for d in ((context or {}).get("agent_kb_doc_ids") or [])
+                if d is not None
+            ]
             try:
                 kb_hits = (
                     await rag_client.kb_search(
-                        message, k=k, strategy=current_rag_strategy
+                        message,
+                        k=k,
+                        strategy=current_rag_strategy,
+                        document_ids=agent_doc_ids or None,
                     )
                     or []
                 )
@@ -123,7 +134,7 @@ class DocumentAgent(BaseAgent):
                 return RAG_NO_RELEVANT_CONTEXT_MESSAGE
 
             logger.info("[DocumentAgent] Найдено фрагментов: %s", len(hits))
-            pcts = scores_to_relevance_percents([h[1] for h in hits])
+            pcts = hits_to_relevance_percents(hits)
             # Номер чанка и релевантность — только в лог: в CONTEXT они не нужны,
             # модель копирует эту разметку в ответ пользователю.
             logger.debug(
@@ -135,6 +146,8 @@ class DocumentAgent(BaseAgent):
             )
             context_parts = []
             total = 0
+            # Документный агент работает по документам проекта — бюджет тот же,
+            # что у проектного RAG (RAG_CONTEXT_MAX_TOKENS_PROJECT).
             budget = rag_context_max_chars("project")
             for i, (content, _score, doc_id, chunk_idx) in enumerate(hits, 1):
                 title = rag_document_label(doc_id, id_map)

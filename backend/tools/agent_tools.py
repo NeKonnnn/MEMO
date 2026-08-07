@@ -12,7 +12,6 @@ from langchain_core.tools import tool
 import backend.app_state as state
 from backend.settings.rag_client import RagReindexInProgress
 from backend.agents.document_agent import DocumentAgent
-from backend.services.user_rag_settings import runtime_rag_top_k
 from backend.settings.logging import get_logger
 from backend.tools.tool_context import get_tool_context
 
@@ -154,12 +153,18 @@ def retrieve_rag_context(request: str) -> str:
             },
             ensure_ascii=False,
         )
-    default_k = int(runtime_rag_top_k("agent") or state.get_rag_chat_top_k())
-    try:
-        k = int(payload.get("k") or default_k)
-    except (TypeError, ValueError):
-        k = default_k
-    k = max(1, min(k, 64))
+    # top_k у каждого стора свой: у проекта и агента это их собственные настройки.
+    # Явное k из payload перекрывает оба — планировщик попросил конкретное число.
+    def _store_k(scope: str) -> int:
+        base = int(state.get_rag_chat_top_k(scope))
+        try:
+            value = int(payload.get("k") or base)
+        except (TypeError, ValueError):
+            value = base
+        return max(1, min(value, 64))
+
+    k = _store_k("project")
+    kb_k = _store_k("agent")
     # Выбор пользователя в UI является источником истины. LLM-планировщик не должен
     # иметь возможности незаметно заменить explicit vector на auto/graph/hybrid.
     ui_strategy = str(ctx.get("rag_strategy") or "").strip().lower()
@@ -209,7 +214,7 @@ def retrieve_rag_context(request: str) -> str:
                 try:
                     from backend.realtime.helpers import kb_search_agent_documents
 
-                    hits = await kb_search_agent_documents(rag_client, query, agent_kb_doc_ids, k=k, strategy=strategy)
+                    hits = await kb_search_agent_documents(rag_client, query, agent_kb_doc_ids, k=kb_k, strategy=strategy)
                     for c, s, doc_id, chunk_idx in hits or []:
                         results.append(
                             {

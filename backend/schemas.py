@@ -102,6 +102,9 @@ class DocumentQueryRequest(BaseModel):
 
 class RAGSettings(BaseModel):
     scope: Optional[str] = None
+    project_id: Optional[str] = None
+    agent_id: Optional[int] = None
+    entity_name: Optional[str] = None
     strategy: Optional[str] = None  # auto | hybrid | vector | lexical | raw_cosine | graph
     rag_memory_strategy: Optional[str] = None
     agentic_rag_enabled: Optional[bool] = None
@@ -126,7 +129,7 @@ class RAGSettings(BaseModel):
     rag_rerank_top_n: Optional[int] = None
     # Пользовательский системный промпт для ответа с RAG-контекстом
     rag_system_prompt: Optional[str] = None
-    # Пути выбранных моделей (local/<папка> в models/rag)
+    # Пути выбранных моделей (local/<папка>, phoenix/<id>, corsur/<id>)
     rag_embedding_model_path: Optional[str] = None
     rag_reranker_model_path: Optional[str] = None
 
@@ -135,6 +138,9 @@ class RagModelSelectRequest(BaseModel):
     model_type: str  # embedding | reranker
     model_path: str
     scope: Optional[str] = None
+    project_id: Optional[str] = None
+    agent_id: Optional[int] = None
+    entity_name: Optional[str] = None
 
 
 class AgentModeRequest(BaseModel):

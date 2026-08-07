@@ -1,5 +1,4 @@
 import React, { useState, useRef, useEffect } from 'react';
-import WorkspacePicker from './WorkspacePicker';
 import {
   Dialog,
   DialogTitle,
@@ -61,6 +60,7 @@ import type { Project } from '../contexts/AppContext';
 import { getProjectIconGlyphSx } from '../constants/menuStyles';
 import ProjectRagLibraryInline from './ProjectRagLibraryInline';
 import RAGSettings from './settings/RAGSettings';
+import { saveEntityRagSettings, type EntityRagDraft } from '../utils/entityRagSettings';
 
 const iconOptions = [
   { name: 'folder', icon: FolderIcon },
@@ -125,7 +125,8 @@ export default function EditProjectModal({ open, onClose, project, onSave }: Edi
   const [selectedColor, setSelectedColor] = useState('#ffffff');
   const [memory, setMemory] = useState<'default' | 'project-only'>('default');
   const [instructions, setInstructions] = useState('');
-  const [workspacePath, setWorkspacePath] = useState('');
+  /** Черновик настроек РАГ: записывается по «Сохранить» проекта, не раньше. */
+  const [ragDraft, setRagDraft] = useState<EntityRagDraft | null>(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [showRagSettingsPanel, setShowRagSettingsPanel] = useState(false);
   const [showIconPicker, setShowIconPicker] = useState(false);
@@ -141,9 +142,11 @@ export default function EditProjectModal({ open, onClose, project, onSave }: Edi
       setSelectedColor(project.iconColor || '#ffffff');
       setMemory(project.memory || 'default');
       setInstructions(project.instructions || '');
-      setWorkspacePath(project.workspacePath || '');
       setShowAdvanced(false);
       setShowRagSettingsPanel(false);
+      // Черновик принадлежит тому проекту, у которого его набрали: открыли
+      // другой — сбрасываем, иначе его настройки уехали бы не туда.
+      setRagDraft(null);
     }
   }, [open, project]);
 
@@ -166,17 +169,34 @@ export default function EditProjectModal({ open, onClose, project, onSave }: Edi
     onClose();
   };
 
-  const handleSave = () => {
+  const handleSave = async () => {
     if (!project || !projectName.trim()) return;
+    const trimmedName = projectName.trim();
+    const trimmedInstructions = instructions.trim();
     onSave(project.id, {
-      name: projectName.trim(),
+      name: trimmedName,
       icon: iconType === 'icon' ? (selectedIcon || undefined) : (selectedEmoji || undefined),
       iconType,
       iconColor: selectedColor,
       memory,
-      instructions: instructions.trim(),
-      workspacePath: workspacePath.trim() || undefined,
+      instructions: trimmedInstructions,
     });
+
+    // Настройки РАГ пишутся здесь, по «Сохранить» проекта: панель их только
+    // накапливает. Нужна ли перечанковка, решает backend.
+    const ragApplied = await saveEntityRagSettings({
+      scope: 'project',
+      entityId: project.id,
+      entityName: trimmedName,
+      instructions: trimmedInstructions,
+      draft: ragDraft,
+    });
+    if (ragApplied.ok) {
+      setRagDraft(null);
+    } else {
+      console.warn(`[RAG] Проект сохранён; настройки РАГ не применены: ${ragApplied.message}`);
+    }
+
     handleClose();
   };
 
@@ -247,8 +267,14 @@ export default function EditProjectModal({ open, onClose, project, onSave }: Edi
           <RAGSettings
             variant="panel"
             lockedScope="project"
+            entityId={project.id}
+            entityName={project.name}
+            entityInstructionsPrompt={instructions}
+            draft
+            draftValue={ragDraft}
+            onDraftChange={setRagDraft}
             isDarkMode={theme.palette.mode === 'dark'}
-            panelTitle="Настройки РАГ для проектов"
+            panelTitle={`Настройки РАГ: ${project.name}`}
             onClose={() => setShowRagSettingsPanel(false)}
           />
         </Box>
@@ -416,11 +442,11 @@ export default function EditProjectModal({ open, onClose, project, onSave }: Edi
               color: 'text.primary',
             }}
           >
-            Настройки РАГ для проектов
+            Настройки РАГ для этого проекта
           </Button>
         </Box>
 
-        {/* Память / инструкции / workspace */}
+        {/* Память / инструкции */}
         <Box sx={{ mb: 2 }}>
           <Button
             fullWidth
@@ -528,17 +554,6 @@ export default function EditProjectModal({ open, onClose, project, onSave }: Edi
                       color: theme.palette.mode === 'dark' ? 'white' : 'text.primary',
                     },
                   }}
-                />
-              </Box>
-              <Box sx={{ mb: 2 }}>
-                <Typography variant="body2" fontWeight="500" sx={{ mb: 1 }}>
-                  Workspace (coding agent)
-                </Typography>
-                <WorkspacePicker
-                  value={workspacePath}
-                  onChange={setWorkspacePath}
-                  isDarkMode={theme.palette.mode === 'dark'}
-                  showGlobalDefault
                 />
               </Box>
             </Box>

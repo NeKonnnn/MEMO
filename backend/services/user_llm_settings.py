@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from copy import deepcopy
 from typing import Any, Dict, Optional
 
@@ -14,6 +15,51 @@ from backend.context_prompts import ContextPromptManager
 from backend.settings.logging import get_logger
 
 logger = get_logger(__name__)
+
+_user_model_runtime: ContextVar[Optional[Dict[str, Any]]] = ContextVar(
+    "user_model_runtime", default=None
+)
+
+_MODEL_SETTING_KEYS = (
+    "context_size",
+    "output_tokens",
+    "temperature",
+    "top_p",
+    "repeat_penalty",
+    "top_k",
+    "min_p",
+    "frequency_penalty",
+    "presence_penalty",
+    "use_gpu",
+    "streaming",
+    "streaming_speed",
+    "verbose",
+)
+
+
+def bind_user_model_runtime(override: Optional[Dict[str, Any]]):
+    """Перекрыть глобальные model_settings на время запроса чата с активным агентом."""
+    token = _user_model_runtime.set(
+        dict(override) if isinstance(override, dict) and override else None
+    )
+    return token
+
+
+def reset_user_model_runtime(token) -> None:
+    _user_model_runtime.reset(token)
+
+
+def get_active_model_settings() -> Dict[str, Any]:
+    """Текущие настройки генерации: per-agent override или глобальные."""
+    override = _user_model_runtime.get()
+    base = _default_model_settings()
+    if not isinstance(override, dict) or not override:
+        return dict(base)
+    merged = dict(base)
+    for key in _MODEL_SETTING_KEYS:
+        if key in override and override[key] is not None:
+            merged[key] = override[key]
+    return merged
 
 
 def _default_model_settings() -> Dict[str, Any]:

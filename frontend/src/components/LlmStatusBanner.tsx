@@ -1,8 +1,8 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Box, IconButton, Typography } from '@mui/material';
 import { Close as CloseIcon } from '@mui/icons-material';
 import { getApiUrl } from '../config/api';
-import { getSettings } from '../settings';
+import { getSettings, initSettings } from '../settings';
 import { TOP_ERROR_BANNER_AUTO_DISMISS_MS } from './TopErrorBanner';
 
 /**
@@ -13,40 +13,63 @@ export default function LlmStatusBanner() {
   const [open, setOpen] = useState(false);
   const [message, setMessage] = useState('');
   const [dismissed, setDismissed] = useState(false);
+  const lastPollTsRef = useRef<number | null>(null);
 
   useEffect(() => {
     let interval: ReturnType<typeof setInterval> | undefined;
+    let cancelled = false;
 
-    const poll = async () => {
+    const startPolling = async () => {
+      let settings;
       try {
-        getSettings();
+        settings = getSettings();
       } catch {
-        return;
-      }
-      try {
-        const res = await fetch(getApiUrl('/api/llm/status'));
-        if (!res.ok) return;
-        const data = await res.json();
-        if (data.use_llm_svc === true && data.connected === false) {
-          setOpen(!dismissed);
-          setMessage(
-            typeof data.message === 'string' && data.message.trim()
-              ? data.message
-              : 'Подключиться к LLM не удалось. Проверьте сервис моделей и конфигурацию на сервере.'
-          );
-        } else {
-          setOpen(false);
-          setDismissed(false);
-          setMessage('');
+        try {
+          settings = await initSettings();
+        } catch {
+          return;
         }
-      } catch {
-        setOpen(false);
       }
+      if (cancelled) return;
+      const pollIntervalSeconds = settings.app.llmStatusPollSeconds;
+      const tracePollEnabled = settings.app.llmStatusPollTrace === true;
+
+      const poll = async () => {
+        if (tracePollEnabled) {
+          const now = Date.now();
+          const prev = lastPollTsRef.current;
+          const deltaSec = prev ? ((now - prev) / 1000).toFixed(2) : 'first';
+          lastPollTsRef.current = now;
+          console.info(`[LLM_STATUS_POLL] /api/llm/status tick interval=${pollIntervalSeconds}s delta=${deltaSec}s`);
+        }
+        try {
+          const res = await fetch(getApiUrl('/api/llm/status'));
+          if (!res.ok) return;
+          const data = await res.json();
+          if (data.use_llm_svc === true && data.connected === false) {
+            setOpen(!dismissed);
+            setMessage(
+              typeof data.message === 'string' && data.message.trim()
+                ? data.message
+                : 'Подключиться к LLM не удалось. Проверьте сервис моделей и конфигурацию на сервере.'
+            );
+          } else {
+            setOpen(false);
+            setDismissed(false);
+            setMessage('');
+          }
+        } catch {
+          setOpen(false);
+        }
+      };
+
+      void poll();
+      interval = setInterval(poll, pollIntervalSeconds * 1000);
     };
 
-    poll();
-    interval = setInterval(poll, 30000);
+    void startPolling();
     return () => {
+      cancelled = true;
       if (interval) clearInterval(interval);
     };
   }, [dismissed]);

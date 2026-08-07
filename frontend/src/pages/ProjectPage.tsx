@@ -72,6 +72,7 @@ import {
   Refresh as RefreshIcon,
   Clear as ClearIcon,
   AutoStories as KbIcon,
+  ChevronLeft as ChevronLeftIcon,
   ChevronRight as ChevronRightIcon,
   Check as CheckIcon,
   HubOutlined as GearMenuMcpIcon,
@@ -81,10 +82,14 @@ import {
   Bolt as FastModeIcon,
   AutoAwesome as AutoModeIcon,
   HistoryEdu as SkillsNavIcon,
+  YouTube as YouTubeIcon,
+  Upload as UploadIcon,
+  Square as SquareIcon,
 } from '@mui/icons-material';
 import { useAppContext, useAppActions, chatIsListedInAllChatsSection } from '../contexts/AppContext';
 import { useSocket } from '../contexts/SocketContext';
 import VoiceChatDialog from '../components/VoiceChatDialog';
+import TranscriptionResultModal from '../components/TranscriptionResultModal';
 import ChatInputBar from '../components/ChatInputBar';
 import ChatInputStatusCluster from '../components/ChatInputStatusCluster';
 import ChatGearAgentsPanel from '../components/ChatGearAgentsPanel';
@@ -103,12 +108,15 @@ import { useChatInputMcpIndicators } from '../mcp/hooks/useChatInputMcpIndicator
 import { useMcpStreamingTools } from '../mcp/hooks/useMcpStreamingTools';
 import McpLiveToolsIndicator from '../mcp/components/McpLiveToolsIndicator';
 import { copyMcpToolIds, projectMcpChatKey } from '../mcp/selectionStorage';
-import { getApiUrl } from '../config/api';
+import { getApiUrl, API_ENDPOINTS } from '../config/api';
+import { incrementTabNotification } from '../utils/tabNotifications';
 import { useTheme } from '@mui/material/styles';
 import AgentConstructorPanel from '../components/AgentConstructorPanel';
 import GalleryNavButton from '../components/GalleryNavButton';
 import ModelSelector from '../components/ModelSelector';
 import AgentSelector from '../components/AgentSelector';
+import { usePendingAgentConstructorOpen } from '../hooks/usePendingAgentConstructorOpen';
+import { clearActiveAgent } from '../utils/clearActiveAgent';
 import {
   getProjectIconGlyphSx,
   getDropdownItemSx,
@@ -140,7 +148,11 @@ import {
   SidebarRailTranscribeIcon,
   SidebarRailAgentIcon,
 } from '../constants/sidebarRailIcons';
-import { getSidebarPanelBackground } from '../constants/sidebarPanelColor';
+import {
+  getSidebarPanelBackground,
+  getSidebarChromeSx,
+  getSidebarForcedContrastSx,
+} from '../constants/sidebarPanelColor';
 import { getWorkZoneBackgroundColor, getWorkZoneCustomImage, isWorkZoneAnimatedMode } from '../constants/workZoneBackground';
 import { useWorkZoneBgMode } from '../hooks/useWorkZoneBgMode';
 import { useMyAgentSelection, useOrchestratorAgentsAnyActive } from '../hooks/useChatInputAgentIndicators';
@@ -252,29 +264,6 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
     return () => window.removeEventListener('interfaceSettingsChanged', syncInterfaceSettings);
   }, []);
 
-  useEffect(() => {
-    const onAgent = () => {
-      startTransition(() => {
-        setRightSidebarHidden(false);
-        setRightSidebarOpen(true);
-        setAgentConstructorOpen(true);
-      });
-    };
-    const onTranscription = () => {
-      startTransition(() => {
-        setRightSidebarHidden(false);
-        setRightSidebarOpen(true);
-        setTranscriptionModalOpen(true);
-      });
-    };
-    window.addEventListener(ASTRA_OPEN_AGENT_CONSTRUCTOR, onAgent);
-    window.addEventListener(ASTRA_OPEN_TRANSCRIPTION_SIDEBAR, onTranscription);
-    return () => {
-      window.removeEventListener(ASTRA_OPEN_AGENT_CONSTRUCTOR, onAgent);
-      window.removeEventListener(ASTRA_OPEN_TRANSCRIPTION_SIDEBAR, onTranscription);
-    };
-  }, []);
-
   const [chatMenuAnchor, setChatMenuAnchor] = useState<null | HTMLElement>(null);
   const [selectedChatId, setSelectedChatId] = useState<string | null>(null);
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
@@ -304,6 +293,13 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
   const [agentStatus, setAgentStatus] = useState<ProjectPageAgentStatus | null>(null);
   const orchestratorAgentsAnyActive = useOrchestratorAgentsAnyActive(Boolean(agentStatus?.is_initialized));
   const [transcriptionModalOpen, setTranscriptionModalOpen] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [transcriptionResult, setTranscriptionResult] = useState('');
+  const [transcriptionMenuOpen, setTranscriptionMenuOpen] = useState(false);
+  const [transcriptionYoutubeUrl, setTranscriptionYoutubeUrl] = useState('');
+  const [transcriptionId, setTranscriptionId] = useState<string | null>(null);
+  const transcriptionFileInputRef = useRef<HTMLInputElement>(null);
+  const [showVoiceDialog, setShowVoiceDialog] = useState(false);
   const [chatInputStyle, setChatInputStyle] = useState<'compact' | 'classic'>(() =>
     (localStorage.getItem('chat_input_style') as 'compact' | 'classic') || 'compact'
   );
@@ -423,6 +419,11 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
     }
   }, []);
 
+  const handleClearMyAgent = useCallback(() => {
+    clearActiveAgent();
+    showNotification('info', 'Агент снят');
+  }, [showNotification]);
+
   const libraryInputBadge = useMemo(
     () => (
       <ChatInputStatusCluster
@@ -431,6 +432,7 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
         onLibraryToggle={toggleKbRag}
         standardAgentsActive={orchestratorAgentsAnyActive}
         myAgentName={myAgentSelection?.name ?? null}
+        onAgentToggle={myAgentSelection?.name ? handleClearMyAgent : undefined}
         activeMcpServers={activeMcpServers}
         onMcpClick={handleOpenMcpGearPanel}
       />
@@ -441,6 +443,7 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
       toggleKbRag,
       orchestratorAgentsAnyActive,
       myAgentSelection?.name,
+      handleClearMyAgent,
       activeMcpServers,
       handleOpenMcpGearPanel,
     ],
@@ -518,6 +521,35 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
   const workZoneAnimated = isWorkZoneAnimatedMode(workZoneMode);
   const workZoneBgColor = getWorkZoneBackgroundColor(isDarkMode, workZoneMode);
   const workZoneCustomImage = getWorkZoneCustomImage();
+
+  const openConstructorSidebar = useCallback(() => {
+    startTransition(() => {
+      setRightSidebarHidden(false);
+      setRightSidebarOpen(true);
+      setAgentConstructorOpen(true);
+    });
+  }, []);
+
+  usePendingAgentConstructorOpen(openConstructorSidebar);
+
+  useEffect(() => {
+    const onAgent = () => {
+      openConstructorSidebar();
+    };
+    const onTranscription = () => {
+      startTransition(() => {
+        setRightSidebarHidden(false);
+        setRightSidebarOpen(true);
+        setTranscriptionMenuOpen(true);
+      });
+    };
+    window.addEventListener(ASTRA_OPEN_AGENT_CONSTRUCTOR, onAgent);
+    window.addEventListener(ASTRA_OPEN_TRANSCRIPTION_SIDEBAR, onTranscription);
+    return () => {
+      window.removeEventListener(ASTRA_OPEN_AGENT_CONSTRUCTOR, onAgent);
+      window.removeEventListener(ASTRA_OPEN_TRANSCRIPTION_SIDEBAR, onTranscription);
+    };
+  }, [openConstructorSidebar]);
 
   useEffect(() => {
     const onColorChanged = () => setRightSidebarPanelBg(getSidebarPanelBackground());
@@ -680,6 +712,126 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
 
   const handleRemoveFile = (index: number) => {
     setUploadedFiles(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const handleTranscriptionFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files?.length) return;
+    const file = files[0];
+    const allowedTypes = [
+      'audio/mpeg', 'audio/wav', 'audio/m4a', 'audio/aac', 'audio/flac',
+      'video/mp4', 'video/avi', 'video/mov', 'video/mkv', 'video/webm',
+    ];
+    const isValidType = allowedTypes.some(type =>
+      file.type.includes(type.split('/')[1]) || file.name.toLowerCase().includes(type.split('/')[1])
+    );
+    if (!isValidType) {
+      showNotification('error', 'Поддерживаются только аудио и видео файлы');
+      e.target.value = '';
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024 * 1024) {
+      showNotification('error', 'Размер файла не должен превышать 5GB');
+      e.target.value = '';
+      return;
+    }
+    e.target.value = '';
+    startFileTranscriptionFromSidebar(file);
+  };
+
+  const startFileTranscriptionFromSidebar = async (file: File) => {
+    setIsTranscribing(true);
+    const currentId = `transcribe_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    setTranscriptionId(currentId);
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('request_id', currentId);
+      const response = await fetch(getApiUrl(API_ENDPOINTS.TRANSCRIBE_UPLOAD), {
+        method: 'POST',
+        body: formData,
+      });
+      if (!response.ok) {
+        if (response.status === 499) {
+          const errorData = await response.json().catch(() => ({ detail: 'Транскрибация была остановлена' }));
+          throw Object.assign(new Error(errorData.detail || 'Транскрибация была остановлена'), { status: 499 });
+        }
+        const errorData = await response.json().catch(() => ({ detail: 'Ошибка при транскрибации' }));
+        throw new Error(errorData.detail || 'Ошибка при транскрибации');
+      }
+      const result = await response.json();
+      if (result.success) {
+        if (result.transcription_id) setTranscriptionId(result.transcription_id);
+        const text = result.transcription ?? '';
+        setTranscriptionResult(text);
+        showNotification('success', 'Транскрибация завершена');
+        incrementTabNotification();
+      } else {
+        showNotification('error', result.message || 'Ошибка при транскрибации');
+      }
+    } catch (err: any) {
+      if (err?.status === 499 || err?.message?.includes('остановлена')) {
+        showNotification('info', 'Транскрибация была остановлена');
+      } else {
+        showNotification('error', err?.message || 'Ошибка при отправке файла');
+      }
+    } finally {
+      setIsTranscribing(false);
+      setTranscriptionId(null);
+    }
+  };
+
+  const handleStopTranscriptionFromSidebar = async () => {
+    if (!transcriptionId) return;
+    try {
+      const response = await fetch(getApiUrl('/api/transcribe/stop'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ transcription_id: transcriptionId }),
+      });
+      const result = await response.json();
+      if (result.success) {
+        showNotification('info', 'Транскрибация остановлена');
+      } else {
+        showNotification('error', result.message || 'Ошибка остановки');
+      }
+    } catch {
+      showNotification('error', 'Ошибка при остановке транскрибации');
+    }
+    setTranscriptionId(null);
+    setIsTranscribing(false);
+  };
+
+  const startYouTubeTranscriptionFromSidebar = async () => {
+    const url = transcriptionYoutubeUrl.trim();
+    if (!url) {
+      showNotification('warning', 'Введите URL YouTube видео');
+      return;
+    }
+    if (!url.includes('youtube.com') && !url.includes('youtu.be')) {
+      showNotification('error', 'Некорректный URL YouTube');
+      return;
+    }
+    setIsTranscribing(true);
+    try {
+      const response = await fetch(getApiUrl(API_ENDPOINTS.TRANSCRIBE_YOUTUBE), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url }),
+      });
+      const result = await response.json();
+      if (result.success) {
+        setTranscriptionResult(result.transcription ?? '');
+        showNotification('success', 'Транскрибация YouTube завершена');
+        incrementTabNotification();
+      } else {
+        showNotification('error', result.message || 'Ошибка при транскрибации YouTube');
+      }
+    } catch {
+      showNotification('error', 'Ошибка при обработке YouTube URL');
+    } finally {
+      setIsTranscribing(false);
+    }
   };
 
   const handleMenuOpen = (event: React.MouseEvent<HTMLElement>) => {
@@ -930,7 +1082,7 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
           onSendClick={handleSendMessage}
           sendDisabled={!inputMessage.trim() || (!isConnected && !isConnecting) || isSending || ragSendBlocked}
           isSending={isSending}
-          onVoiceClick={() => setTranscriptionModalOpen(true)}
+          onVoiceClick={() => setShowVoiceDialog(true)}
           voiceDisabled={isSending}
           voiceTooltip="Голосовой ввод"
           libraryBadge={libraryInputBadge}
@@ -1525,8 +1677,19 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
         </Popover>
 
         <VoiceChatDialog
+          open={showVoiceDialog}
+          onClose={() => setShowVoiceDialog(false)}
+        />
+
+        <TranscriptionResultModal
           open={transcriptionModalOpen}
           onClose={() => setTranscriptionModalOpen(false)}
+          transcriptionResult={transcriptionResult}
+          onResultChange={(text) => setTranscriptionResult(text)}
+          onInsertToChat={(text) => {
+            setInputMessage(text);
+            setTimeout(() => inputRef.current?.focus(), 100);
+          }}
         />
 
         {/* Диалог подтверждения удаления (как в сайдбаре) */}
@@ -1594,9 +1757,10 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
             '& .MuiDrawer-paper': {
               width: rightSidebarOpen ? 240 : 64,
               boxSizing: 'border-box',
-              background: rightSidebarPanelBg,
-              borderLeft: '1px solid rgba(255,255,255,0.08)',
-              transition: 'width 0.3s ease',
+              ...getSidebarChromeSx(rightSidebarPanelBg),
+              ...getSidebarForcedContrastSx(rightSidebarPanelBg),
+              borderLeft: '1px solid var(--sidebar-border-color, rgba(255,255,255,0.08))',
+              transition: 'width 0.3s ease, background 0.3s ease, color 0.3s ease',
               overflowX: 'hidden',
               overflowY: 'auto',
               display: 'flex',
@@ -1643,7 +1807,10 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
                   <Tooltip title="Транскрибация" placement="left">
                     <Box component="span" sx={{ display: 'flex', width: '100%', justifyContent: 'center' }}>
                       <ListItemButton
-                        onClick={() => setTranscriptionModalOpen(true)}
+                        onClick={() => {
+                          setRightSidebarOpen(true);
+                          setTranscriptionMenuOpen(true);
+                        }}
                         sx={getSidebarRailCollapsedListItemButtonSx(isDarkMode)}
                       >
                         <SidebarRailTranscribeIcon sx={SIDEBAR_LIST_ICON_SX} />
@@ -1652,6 +1819,18 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
                   </Tooltip>
                 </ListItem>
                 <GalleryNavButton variant="collapsed" isDarkMode={isDarkMode} />
+                <ListItem disablePadding sx={{ mb: 0.5, display: 'block' }}>
+                  <Tooltip title="Skills" placement="left">
+                    <Box component="span" sx={{ display: 'flex', width: '100%', justifyContent: 'center' }}>
+                      <ListItemButton
+                        onClick={() => navigate('/skills')}
+                        sx={getSidebarRailCollapsedListItemButtonSx(isDarkMode)}
+                      >
+                        <SkillsNavIcon sx={SIDEBAR_LIST_ICON_SX} />
+                      </ListItemButton>
+                    </Box>
+                  </Tooltip>
+                </ListItem>
                 <ListItem disablePadding sx={{ mb: 0.5, display: 'block' }}>
                   <Tooltip title="Конструктор агента" placement="left">
                     <Box component="span" sx={{ display: 'flex', width: '100%', justifyContent: 'center' }}>
@@ -1752,13 +1931,13 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
               <List sx={{ py: 0, px: 1, flexShrink: 0 }}>
                 <ListItem disablePadding sx={{ mb: 0.5 }}>
                   <ListItemButton
-                    onClick={() => setTranscriptionModalOpen(true)}
+                    onClick={() => setTranscriptionMenuOpen(prev => !prev)}
                     sx={{
                       ...SIDEBAR_CHAT_ROW_LIST_ITEM_BUTTON_SX,
                       color: 'white',
-                      backgroundColor: transcriptionModalOpen ? 'rgba(255,255,255,0.15)' : 'transparent',
+                      backgroundColor: transcriptionMenuOpen ? 'rgba(255,255,255,0.15)' : 'transparent',
                       '&:hover': {
-                        backgroundColor: transcriptionModalOpen ? 'rgba(255,255,255,0.2)' : 'rgba(255,255,255,0.08)',
+                        backgroundColor: transcriptionMenuOpen ? 'rgba(255,255,255,0.2)' : 'rgba(255,255,255,0.08)',
                       },
                     }}
                   >
@@ -1780,8 +1959,157 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
                     />
                   </ListItemButton>
                 </ListItem>
+                {transcriptionMenuOpen && (
+                  <Box sx={{ borderTop: '1px solid rgba(255,255,255,0.08)', p: 1.5, display: 'flex', flexDirection: 'column', gap: 1 }}>
+                    <input
+                      ref={transcriptionFileInputRef}
+                      type="file"
+                      accept="audio/*,video/*"
+                      hidden
+                      onChange={handleTranscriptionFileSelect}
+                    />
+                    {isTranscribing && (
+                      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.75 }}>
+                        <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.8)', fontSize: '0.78rem' }}>
+                          Транскрибация идёт...
+                        </Typography>
+                        <Box sx={{ display: 'flex', gap: 0.5, alignItems: 'center' }}>
+                          <CircularProgress size={16} sx={{ color: 'primary.main' }} />
+                          <Button
+                            size="small"
+                            startIcon={<SquareIcon sx={{ fontSize: '0.75rem' }} />}
+                            onClick={handleStopTranscriptionFromSidebar}
+                            disabled={!transcriptionId}
+                            sx={{
+                              fontSize: '0.7rem',
+                              textTransform: 'none',
+                              color: 'rgba(255,255,255,0.7)',
+                              py: 0.5,
+                              minWidth: 0,
+                              '&:hover': { bgcolor: 'rgba(255,255,255,0.08)' },
+                            }}
+                          >
+                            Остановить
+                          </Button>
+                        </Box>
+                      </Box>
+                    )}
+                    {transcriptionResult && !isTranscribing && (
+                      <Button
+                        size="small"
+                        fullWidth
+                        variant="outlined"
+                        onClick={() => setTranscriptionModalOpen(true)}
+                        sx={{
+                          fontSize: '0.78rem',
+                          textTransform: 'none',
+                          color: 'primary.main',
+                          borderColor: 'primary.main',
+                          py: 0.75,
+                          '&:hover': { borderColor: 'primary.light', bgcolor: 'rgba(33,150,243,0.08)' },
+                        }}
+                      >
+                        Посмотреть результат
+                      </Button>
+                    )}
+                    <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.6)', fontSize: '0.7rem', display: 'block', lineHeight: 1.35 }}>
+                      Форматы: MP3, WAV, M4A, AAC, FLAC, MP4, AVI, MOV, MKV, WebM
+                      <br />
+                      Максимальный размер: 5GB
+                    </Typography>
+                    <Button
+                      size="small"
+                      fullWidth
+                      startIcon={<UploadIcon sx={{ fontSize: '0.85rem !important' }} />}
+                      onClick={() => transcriptionFileInputRef.current?.click()}
+                      disabled={isTranscribing}
+                      sx={{
+                        fontSize: '0.72rem',
+                        textTransform: 'none',
+                        color: 'rgba(255,255,255,0.6)',
+                        border: '1px dashed rgba(255,255,255,0.2)',
+                        py: 0.75,
+                        justifyContent: 'flex-start',
+                        '&:hover': { bgcolor: 'rgba(255,255,255,0.06)', borderColor: 'rgba(255,255,255,0.35)' },
+                        '&:disabled': { color: 'rgba(255,255,255,0.35)', borderColor: 'rgba(255,255,255,0.1)' },
+                      }}
+                    >
+                      Загрузить файл
+                    </Button>
+                    <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.6)', fontSize: '0.7rem', display: 'block', mt: 0.5 }}>
+                      Вставить ссылку на ютуб
+                    </Typography>
+                    <TextField
+                      size="small"
+                      fullWidth
+                      placeholder="https://www.youtube.com/watch?v=..."
+                      value={transcriptionYoutubeUrl}
+                      onChange={(e) => setTranscriptionYoutubeUrl(e.target.value)}
+                      disabled={isTranscribing}
+                      sx={{
+                        '& .MuiOutlinedInput-root': {
+                          fontSize: '0.78rem',
+                          bgcolor: 'rgba(255,255,255,0.06)',
+                          color: 'rgba(255,255,255,0.9)',
+                          borderColor: 'rgba(255,255,255,0.2)',
+                          '&:hover .MuiOutlinedInput-notchedOutline': { borderColor: 'rgba(255,255,255,0.35)' },
+                          '&.Mui-focused .MuiOutlinedInput-notchedOutline': { borderColor: 'primary.main' },
+                        },
+                        '& .MuiInputBase-input::placeholder': { color: 'rgba(255,255,255,0.4)', opacity: 1 },
+                      }}
+                    />
+                    <Button
+                      size="small"
+                      fullWidth
+                      startIcon={<YouTubeIcon sx={{ fontSize: '0.85rem !important' }} />}
+                      onClick={startYouTubeTranscriptionFromSidebar}
+                      disabled={!transcriptionYoutubeUrl.trim() || isTranscribing}
+                      sx={{
+                        fontSize: '0.72rem',
+                        textTransform: 'none',
+                        color: 'rgba(255,255,255,0.9)',
+                        bgcolor: 'rgba(255,255,255,0.08)',
+                        py: 0.65,
+                        '&:hover': { bgcolor: 'rgba(255,255,255,0.12)' },
+                        '&:disabled': { color: 'rgba(255,255,255,0.4)' },
+                      }}
+                    >
+                      Транскрибировать
+                    </Button>
+                  </Box>
+                )}
 
                 <GalleryNavButton variant="expanded" isDarkMode={isDarkMode} />
+
+                <ListItem disablePadding sx={{ mb: 0.5 }}>
+                  <ListItemButton
+                    onClick={() => navigate('/skills')}
+                    sx={{
+                      ...SIDEBAR_CHAT_ROW_LIST_ITEM_BUTTON_SX,
+                      color: 'white',
+                      '&:hover': {
+                        backgroundColor: 'rgba(255,255,255,0.08)',
+                      },
+                    }}
+                  >
+                    <ListItemIcon
+                      sx={{
+                        color: '#ffffff',
+                        minWidth: 40,
+                        mr: `${SIDEBAR_LIST_ICON_TO_TEXT_GAP_PX}px`,
+                        '& .MuiSvgIcon-root': { fontSize: '1.375rem' },
+                      }}
+                    >
+                      <SkillsNavIcon />
+                    </ListItemIcon>
+                    <ListItemText
+                      primary="Skills"
+                      primaryTypographyProps={{
+                        sx: { fontSize: '0.8rem', fontWeight: 400, color: '#ffffff' },
+                      }}
+                    />
+                  </ListItemButton>
+                </ListItem>
 
                 <ListItem disablePadding sx={{ mb: 0.5 }}>
                   <ListItemButton
@@ -1854,18 +2182,15 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
               }}
               sx={{
                 bgcolor: 'transparent',
-                color: 'white',
-                opacity: 1,
-                width: 40,
-                height: 40,
-                borderRadius: 1,
+                color: 'text.primary',
+                opacity: 0.7,
                 '&:hover': {
                   bgcolor: 'transparent',
                   opacity: 1,
                 },
               }}
             >
-              <ChevronRightIcon sx={{ transform: 'rotate(180deg)' }} />
+              <ChevronLeftIcon />
             </IconButton>
           </Tooltip>
         </Box>

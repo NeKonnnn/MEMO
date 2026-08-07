@@ -628,6 +628,44 @@ WHERE id = ${param_num}
             logger.exception("Не удалось вычислить осиротевшие kb_document_ids")
             return []
 
+    async def find_documents_claimed_by_other_agents(
+        self, agent_id: Optional[int], document_ids: List[int]
+    ) -> List[int]:
+        """Из переданных id вернуть те, что уже числятся за ДРУГИМ агентом.
+
+        Файл принадлежит ровно одному агенту: иначе перечанковка одного перекроит
+        чанки второго его параметрами, и второй об этом не узнает. Источник истины —
+        ``agents.config->'kb_document_ids'``, тот же, что у ``find_orphan_kb_document_ids``.
+
+        При ошибке возвращаем пустой список: лучше пропустить спорную привязку,
+        чем запретить пользователю сохранить своего агента.
+        """
+        wanted = sorted({int(d) for d in (document_ids or []) if d is not None})
+        if not wanted:
+            return []
+        try:
+            async with await self.db_connection.acquire() as conn:
+                rows = await conn.fetch(
+                    """
+                    SELECT DISTINCT x.doc_id::int AS doc_id
+                    FROM agents a,
+                         LATERAL jsonb_array_elements_text(
+                             CASE WHEN jsonb_typeof(a.config->'kb_document_ids') = 'array'
+                                  THEN a.config->'kb_document_ids'
+                                  ELSE '[]'::jsonb END
+                         ) AS x(doc_id)
+                    WHERE ($1::int IS NULL OR a.id <> $1::int)
+                      AND x.doc_id ~ '^[0-9]+$'
+                      AND x.doc_id::int = ANY($2::int[])
+                    """,
+                    int(agent_id) if agent_id is not None else None,
+                    wanted,
+                )
+                return sorted({int(r["doc_id"]) for r in rows})
+        except Exception:
+            logger.exception("Не удалось проверить принадлежность kb_document_ids")
+            return []
+
     async def delete_agent(self, agent_id: int, author_id: str) -> bool:
         """
         Удаление агента (только автор может удалить)
@@ -653,10 +691,29 @@ WHERE id = ${param_num}
                     return False
                 await conn.execute("DELETE FROM agents WHERE id = $1", agent_id)
                 logger.info(f"Удалён агент: {agent_id}")
-                return True
+            # Настройки лежат в отдельной таблице без внешнего ключа (agents.id —
+            # INTEGER, user_projects.id — VARCHAR, один FK на двоих не сделать),
+            # поэтому убираем их явно. Иначе новый агент с тем же id унаследовал бы
+            # чужие параметры нарезки.
+            await self._delete_entity_settings(agent_id)
+            return True
         except Exception:
             logger.exception("Ошибка при удалении агента")
             return False
+
+    async def _delete_entity_settings(self, agent_id: int) -> None:
+        """Убрать RAG-настройки удалённого агента. Сбой тут агента не воскрешает."""
+        try:
+            from backend.database.init_db import get_entity_settings_repository
+
+            repo = get_entity_settings_repository()
+            if repo is not None:
+                await repo.delete("agent", str(agent_id))
+        except Exception:
+            logger.debug(
+                "Не удалось убрать настройки агента %s — подчистятся на старте", agent_id,
+                exc_info=True,
+            )
 
     async def rate_agent(self, agent_id: int, user_id: str, rating: int) -> bool:
         """

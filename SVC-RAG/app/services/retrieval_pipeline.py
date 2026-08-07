@@ -33,6 +33,7 @@ from app.database.models import DocumentVector
 from app.database.search_filters import DocumentVectorSearchFilters
 from app.services.bm25_index import InMemoryBm25Index, hybrid_combine_vector_bm25
 from app.services.hit_postprocess import apply_rerank_min_and_window
+from app.services.hit_types import RagHit, cosine_similarity
 from app.services.rag_search_helpers import (
     diversify_hits_by_document,
     diversify_hybrid_rrf_hits,
@@ -161,6 +162,7 @@ async def run_retrieval_pipeline(
     vector_query: Optional[str],
     k: int,
     document_id: Optional[int],
+    document_ids: Optional[List[int]] = None,
     use_reranking: Optional[bool],
     strategy: Optional[str],
     filters: Optional[DocumentVectorSearchFilters],
@@ -177,7 +179,6 @@ async def run_retrieval_pipeline(
     embed_model: Optional[str] = None,
     rerank_client: Optional[RagModelsClient] = None,
     rerank_model: Optional[str] = None,
-    document_ids: Optional[List[int]] = None,
     # Метаданные для retrieval_eval / логов — опциональны:
     eval_gold_document_ids: Optional[List[int]] = None,
     eval_gold_chunks: Optional[List[Tuple[int, int]]] = None,
@@ -190,6 +191,55 @@ async def run_retrieval_pipeline(
     vq = (vector_query or "").strip()
     t0 = time.perf_counter()
     timer = StageTimer("SEARCH", store=store, k=k)
+
+    # Сырой cosine чанка — единственная шкала, сопоставимая между запросами.
+    # Заполняется сразу после pgvector, до merge/boost/rerank, и доезжает
+    # до ответа отдельным полем: по ```score``` показать «релевантность 84%»
+    # нельзя, там может быть RRF (~0.016) или логит cross-encoder.
+    chunk_cosine: Dict[Tuple[Any, Any], float] = {}
+    # Эмбеддинг запроса — чтобы досчитать cosine чанкам, которые пришли мимо
+    # pgvector (BM25, entity lane, filename-anchor, parent-expansion). Иначе
+    # у половины выдачи процент был бы «н/д» или, хуже, посчитан по RRF.
+    query_vector: List[float] = []
+
+    async def _ensure_query_vector() -> None:
+        """Эмбеддинг запроса ради cosine там, где самому поиску он не нужен.
+
+        Лексическая ветка эмбеддингов не считает вовсе. Без этого вызова её
+        чанки остались бы единственными без релевантности, а процент должен
+        считаться одинаково на всех стратегиях. Один вызов на поиск; сбой
+        на выдачу не влияет — cosine просто останется неизвестным.
+        """
+        nonlocal query_vector
+        source = vq or q_text
+        if query_vector or not source or not rag_client:
+            return
+        try:
+            with timer.stage("embed_query_for_cosine"):
+                emb = await rag_client.embed([source], model=embed_model, kind="query")
+        except Exception as e:
+            logger.warning("[%s] cosine_embed_failed: %s", store, e)
+            trace.warn(f"cosine_embed_failed: {e}")
+            return
+        if emb:
+            query_vector = list(emb[0] or [])
+
+    def _chunk_cosine(dv: DocumentVector) -> Optional[float]:
+        key = (dv.document_id, dv.chunk_index)
+        cached = chunk_cosine.get(key)
+        if cached is not None:
+            return cached
+        if not query_vector:
+            return None
+        value = cosine_similarity(query_vector, getattr(dv, "embedding", None) or [])
+        if value is not None:
+            chunk_cosine[key] = value
+        return value
+
+    def _row(dv: DocumentVector, score: Any) -> RagHit:
+        return RagHit(
+            dv.content, float(score), dv.document_id, dv.chunk_index, _chunk_cosine(dv)
+        )
 
     # Белый список документов (например, привязанные к агенту). Векторный,
     # лексический и substring-поиск фильтруются репозиторием на стороне SQL,
@@ -332,12 +382,14 @@ async def run_retrieval_pipeline(
     else:
         pipeline_parts = ["embed_query", f"pgvector_cosine(limit={fetch_lim})"]
         if resolved != "raw_cosine":
-            pipeline_parts.append("keyword_fts_merge(OR)")
-            if entity_tokens:
-                pipeline_parts.append(f"entity_lane(tokens={len(entity_tokens)})")
+            # Порядок соответствует коду: косинусный порог идёт ДО слияния
+            # с keyword, иначе он применялся бы к RRF-скорам.
             pipeline_parts.append(
                 f"min_vector_similarity({float(getattr(cfg, 'min_vector_similarity', 0.0) or 0.0):.2f})"
             )
+            pipeline_parts.append("keyword_fts_merge(OR)")
+            if entity_tokens:
+                pipeline_parts.append(f"entity_lane(tokens={len(entity_tokens)})")
             pipeline_parts.append(f"low_signal_filter(min_len={int(getattr(cfg, 'min_chunk_length', 40))})")
             pipeline_parts.append("keyword_boost")
         if resolved == "graph":
@@ -389,6 +441,7 @@ async def run_retrieval_pipeline(
                 gold_chunks=eval_gold_chunks,
                 llm_judge=eval_llm_judge,
             )
+            trace.seconds = time.perf_counter() - t0
             return _done([], trace)
         with timer.stage("bm25"):
             bm25_rows = await bm25_index.search(q_text, max(k * 6, 48))
@@ -413,6 +466,7 @@ async def run_retrieval_pipeline(
                 gold_chunks=eval_gold_chunks,
                 llm_judge=eval_llm_judge,
             )
+            trace.seconds = time.perf_counter() - t0
             return _done([], trace)
         max_bm25 = max((float(score) for _, _, score in bm25_rows), default=1.0) or 1.0
         lex_hits: List[Tuple[DocumentVector, float]] = []
@@ -421,6 +475,7 @@ async def run_retrieval_pipeline(
         )
         if fetch_one is None:
             trace.warn("lexical: get_vector_by_document_and_chunk недоступен")
+            trace.seconds = time.perf_counter() - t0
             return _done([], trace)
         # Под реранк нужен пул больше k: реранжировать k из k бессмысленно.
         # Без реранка добираем ровно k, как было, — лишних чтений не делаем.
@@ -452,10 +507,12 @@ async def run_retrieval_pipeline(
             except Exception as e:
                 logger.warning("[%s] lexical rerank failed: %s", store, e)
                 trace.warn(f"rerank_failed: {e}")
-        out_lexical = [
-            (dv.content, float(sc), dv.document_id, dv.chunk_index)
-            for dv, sc in lex_hits[:k]
-        ]
+        # Сам поиск эмбеддингов не использовал — считаем их только ради
+        # релевантности, и только для тех чанков, что реально уйдут в ответ.
+        lex_out = lex_hits[:k]
+        if lex_out:
+            await _ensure_query_vector()
+        out_lexical = [_row(dv, sc) for dv, sc in lex_out]
         trace.add("bm25_search", count=len(out_lexical))
         trace.used_rerank = used_rr_lex
         await log_retrieval_with_eval(
@@ -505,6 +562,10 @@ async def run_retrieval_pipeline(
         trace.warn("empty_embedding: сервис rag-models вернул пустой список")
         return _done([], trace)
 
+    # С этого момента cosine можно досчитать любому чанку, у которого есть
+    # эмбеддинг, — в том числе найденному лексически.
+    query_vector = list(query_emb[0] or [])
+
     with timer.stage("vector"):
         hits: List[Tuple[DocumentVector, float]] = await search_vectors(query_emb[0], fetch_lim)
     trace.add("vector_search", count=len(hits), details={"limit": fetch_lim})
@@ -533,6 +594,7 @@ async def run_retrieval_pipeline(
             s = float(sc)
         except (TypeError, ValueError):
             continue
+        chunk_cosine[(dv.document_id, dv.chunk_index)] = s
         did = dv.document_id
         if did is None:
             continue
@@ -540,8 +602,9 @@ async def run_retrieval_pipeline(
             doc_vector_score[did] = s
 
     if resolved == "raw_cosine":
-        rows = [(dv.content, float(sc), dv.document_id, dv.chunk_index) for dv, sc in hits[:k]]
+        rows = [_row(dv, sc) for dv, sc in hits[:k]]
         trace.add("raw_cosine_cut", count=len(rows))
+        trace.seconds = time.perf_counter() - t0
         await log_retrieval_with_eval(
             store=log_store_label or store,
             strategy_resolved="raw_cosine",
@@ -597,10 +660,7 @@ async def run_retrieval_pipeline(
             except Exception as e:
                 logger.warning("[%s] vector rerank failed: %s", store, e)
                 trace.warn(f"rerank_failed: {e}")
-        rows = [
-            (dv.content, float(sc), dv.document_id, dv.chunk_index) 
-            for dv, sc in vec_hits[:k]
-        ]
+        rows = [_row(dv, sc) for dv, sc in vec_hits[:k]]
         trace.add("vector_cosine_only", count=len(rows))
         trace.used_rerank = used_rr_vec
         await log_retrieval_with_eval(
@@ -718,7 +778,7 @@ async def run_retrieval_pipeline(
                 logger.warning("[%s] hybrid rerank failed: %s", store, e)
                 trace.warn(f"hybrid_rerank_failed: {e}")
 
-        rows = [(dv.content, float(sc), dv.document_id, dv.chunk_index) for dv, sc in hits[:k]]
+        rows = [_row(dv, sc) for dv, sc in hits[:k]]
         if used_rr and vector_repo_for_window is not None:
             rows = await apply_rerank_min_and_window(
                 vector_repo_for_window,
@@ -734,6 +794,7 @@ async def run_retrieval_pipeline(
             f"{'hybrid_rrf_diversify' if hybrid_diversified else 'no_diversify'} -> "
             f"{'cross_encoder_rerank' if used_rr else 'no_rerank'}"
         )
+        trace.seconds = time.perf_counter() - t0
         await log_retrieval_with_eval(
             store=log_store_label or store,
             strategy_resolved="hybrid",
@@ -756,6 +817,31 @@ async def run_retrieval_pipeline(
             llm_judge=eval_llm_judge,
         )
         return _done(rows, trace)
+
+    # --- Cosine-порог: ТОЛЬКО по сырым vector-скорам, до слияния с keyword ---
+    #
+    # Раньше этот фильтр стоял ниже, ПОСЛЕ merge_vector_and_keyword_hits.
+    # А merge отдаёт weighted RRF: максимум ~1/61 ≈ 0.0164, то есть ЛЮБОЙ скор
+    # там ниже min_vector_similarity=0.05. Порог срезал всю выдачу целиком,
+    # срабатывал rescue top-N, и пул схлопывался со 120 кандидатов до 12 —
+    # ещё до диверсификации и parent-expansion. Именно поэтому фрагменты,
+    # которые находила либра, до ответа не доезжали.
+    #
+    # Hybrid-ветка выше делает ровно это же и в правильном порядке.
+    # Entity-хиты фильтр не задевает: они приходят из keyword/ILIKE/filename
+    # каналов и подмешиваются уже после него.
+    min_sim = float(getattr(cfg, "min_vector_similarity", 0.0) or 0.0)
+    before = len(hits)
+    hits = filter_by_min_vector_similarity(hits, min_sim, k)
+    trace.add(
+        "min_similarity_filter",
+        count=len(hits),
+        details={
+            "min_vector_similarity": min_sim,
+            "before": before,
+            "scale": "cosine (до RRF-слияния)",
+        },
+    )
 
     # --- Keyword FTS (OR-семантика) ---
     # Используется для auto→reranking / graph и прочих режимов с постобработкой.
@@ -921,25 +1007,8 @@ async def run_retrieval_pipeline(
             },
         )
 
-    # --- Фильтры. Entity-хиты в них «бессмертны». ---
-    min_sim = float(getattr(cfg, "min_vector_similarity", 0.0) or 0.0)
-    before = len(hits)
-    if entity_keys:
-        pinned = [h for h in hits if (h[0].document_id, h[0].chunk_index) in entity_keys]
-        rest = [h for h in hits if (h[0].document_id, h[0].chunk_index) not in entity_keys]
-        rest = filter_by_min_vector_similarity(rest, min_sim, k)
-        hits = pinned + rest
-    else:
-        hits = filter_by_min_vector_similarity(hits, min_sim, k)
-    trace.add(
-        "min_similarity_filter",
-        count=len(hits),
-        details={
-            "min_vector_similarity": min_sim,
-            "before": before,
-            "pinned_by_entity": len(entity_keys),
-        },
-    )
+    # --- Фильтры по тексту чанка. Entity-хиты в них «бессмертны». ---
+    # Cosine-порог здесь не применяется: он работал выше, по своей шкале
 
     before = len(hits)
     if entity_keys:
@@ -975,8 +1044,19 @@ async def run_retrieval_pipeline(
         for dv, _ in hits
         if (dv.document_id, dv.chunk_index) in entity_keys and dv.document_id is not None
     }
-    if document_id is None and hits and resolved != "graph" and not enumeration and should_diversify_hits(hits):
+    if (
+        document_id is None 
+        and hits 
+        and resolved != "graph" 
+        and not enumeration 
+        and should_diversify_hits(
+            hits,
+            score_of=lambda h: chunk_cosine.get((h[0].document_id, h[0].chunk_index)),
+        )
+    ):
         pool = max(int(cfg.rerank_top_k or 20), k * 6, 56)
+        # Решение принимаем по сырому cosine: hits здесь уже в шкале RRF,
+        # а пороги внутри — косинусные (см. should_diversify_hits).
         hits = diversify_hits_by_document(
             hits,
             min(pool, len(hits)),
@@ -1297,7 +1377,7 @@ async def run_retrieval_pipeline(
         hits_sorted = hits_sorted[:final_limit]
 
     # hits_sorted уже ограничен выше с учётом cap'ов — не режем повторно.
-    rows = [(dv.content, float(sc), dv.document_id, dv.chunk_index) for dv, sc in hits_sorted]
+    rows = [_row(dv, sc) for dv, sc in hits_sorted]
     final = await apply_rerank_min_and_window(
         vector_repo_for_window,
         rows,
@@ -1326,4 +1406,5 @@ async def run_retrieval_pipeline(
         gold_chunks=eval_gold_chunks,
         llm_judge=eval_llm_judge,
     )
+    trace.seconds = time.perf_counter() - t0
     return _done(final, trace)

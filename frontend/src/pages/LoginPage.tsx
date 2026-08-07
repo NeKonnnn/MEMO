@@ -11,12 +11,14 @@ import {
   Container,
   IconButton,
   InputAdornment,
+  Divider,
 } from '@mui/material';
 import {
   RemoveRedEye as VisibilityIcon,
   VisibilityOff as VisibilityOffIcon,
   WbSunny as SunIcon,
   Brightness3 as MoonIcon,
+  AdminPanelSettings as SsoIcon,
 } from '@mui/icons-material';
 import { useAuth, AuthLoginError } from '../contexts/AuthContext';
 import { useNavigate } from 'react-router-dom';
@@ -26,7 +28,7 @@ import {
   LOGIN_LOCKOUT_EXHAUSTED_MESSAGE,
   type LoginLockoutConfig,
 } from '../settings';
-import { fetchLoginLockoutPolicy } from '../config/api';
+import { fetchLoginLockoutPolicy, getApiUrl, API_ENDPOINTS } from '../config/api';
 import LoginSessionNotice from '../components/LoginSessionNotice';
 
 export default function LoginPage() {
@@ -37,6 +39,9 @@ export default function LoginPage() {
   const [lockoutPolicy, setLockoutPolicy] = useState<LoginLockoutConfig | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+  const [keycloakSsoEnabled, setKeycloakSsoEnabled] = useState(false);
+  const [keycloakLoginUrl, setKeycloakLoginUrl] = useState('');
+  const [isSsoRedirecting, setIsSsoRedirecting] = useState(false);
   const [isDarkMode, setIsDarkMode] = useState(() => {
     const saved = localStorage.getItem('theme');
     return saved ? saved === 'dark' : false;
@@ -50,6 +55,11 @@ export default function LoginPage() {
     (async () => {
       try {
         await initSettings();
+      } catch (error) {
+        console.warn('Не удалось загрузить настройки frontend:', error);
+      }
+
+      try {
         const cfg = await fetchLoginLockoutPolicy();
         if (!cancelled) {
           setLockoutPolicy(cfg);
@@ -59,6 +69,26 @@ export default function LoginPage() {
           'Не удалось загрузить политику блокировки с backend (GET /api/auth/login-lockout-policy):',
           e,
         );
+      }
+
+      try {
+        const ssoResponse = await fetch(getApiUrl(API_ENDPOINTS.AUTH_SSO_PROVIDERS));
+        if (!ssoResponse.ok) {
+          console.warn(
+            'SSO-провайдеры: backend вернул HTTP %s для GET /api/auth/sso/providers',
+            ssoResponse.status,
+          );
+          return;
+        }
+        const ssoData = await ssoResponse.json();
+        if (!cancelled && ssoData.keycloak_enabled) {
+          setKeycloakSsoEnabled(true);
+          setKeycloakLoginUrl(
+            ssoData.keycloak_login_url || getApiUrl(API_ENDPOINTS.AUTH_SSO_KEYCLOAK_LOGIN),
+          );
+        }
+      } catch (ssoError) {
+        console.warn('Не удалось загрузить SSO-провайдеры:', ssoError);
       }
     })();
     return () => {
@@ -75,8 +105,29 @@ export default function LoginPage() {
   const togglePasswordVisibility = () => {
     setShowPassword(!showPassword);
   };
+
+  const handleSsoLogin = () => {
+    if (!keycloakLoginUrl || isLoading || isSsoRedirecting) return;
+    setIsSsoRedirecting(true);
+    window.location.href = keycloakLoginUrl;
+  };
+
+  const ssoButtonBg = isDarkMode ? '#2a2a2a' : '#f5f5f5';
+  const ssoButtonHoverBg = isDarkMode ? '#333333' : '#ebebeb';
+  const ssoButtonBorder = isDarkMode ? 'rgba(255,255,255,0.18)' : 'rgba(0,0,0,0.12)';
+  const ssoButtonText = isDarkMode ? '#fff' : '#1a1a1a';
+
   const inputBackgroundColor = isDarkMode ? '#2a2a2a' : '#ffffff';
   const inputTextColor = isDarkMode ? '#fff' : '#000';
+
+  /** Высота и скругление как у MuiOutlinedInput (TextField по умолчанию). */
+  const controlHeight = 56;
+  const controlBorderRadius = 1;
+  const controlButtonSx = {
+    height: controlHeight,
+    minHeight: controlHeight,
+    borderRadius: controlBorderRadius,
+  };
 
   React.useEffect(() => {
     document.body.style.backgroundColor = isDarkMode ? '#121212' : '#f5f5f5';
@@ -199,9 +250,10 @@ export default function LoginPage() {
                 sx={{
                   mt: 1,
                   color: isDarkMode ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.6)',
+                  textAlign: 'center',
                 }}
               >
-                Используйте ваши учетные данные
+                Используйте ваши данные корпоративной учетной записи
               </Typography>
             </Box>
 
@@ -352,11 +404,11 @@ export default function LoginPage() {
                 type="submit"
                 variant="contained"
                 size="large"
-                disabled={isLoading}
+                disabled={isLoading || isSsoRedirecting}
                 sx={{
                   mt: 3,
-                  mb: 2,
-                  py: 1.5,
+                  mb: 0,
+                  ...controlButtonSx,
                   bgcolor: 'primary.main',
                   '&:hover': {
                     bgcolor: 'primary.dark',
@@ -370,6 +422,52 @@ export default function LoginPage() {
                 )}
               </Button>
             </form>
+
+            {keycloakSsoEnabled && (
+              <>
+                <Divider sx={{ my: 2.5 }}>
+                  <Typography
+                    variant="body2"
+                    sx={{ color: isDarkMode ? 'rgba(255,255,255,0.55)' : 'rgba(0,0,0,0.45)' }}
+                  >
+                    или
+                  </Typography>
+                </Divider>
+                <Button
+                  fullWidth
+                  type="button"
+                  variant="outlined"
+                  size="large"
+                  disabled={isLoading || isSsoRedirecting}
+                  onClick={handleSsoLogin}
+                  aria-label="Войти через SSO"
+                  startIcon={
+                    isSsoRedirecting ? (
+                      <CircularProgress size={20} color="inherit" />
+                    ) : (
+                      <SsoIcon sx={{ fontSize: 22 }} />
+                    )
+                  }
+                  sx={{
+                    ...controlButtonSx,
+                    textTransform: 'none',
+                    fontSize: '1rem',
+                    fontWeight: 500,
+                    color: ssoButtonText,
+                    bgcolor: ssoButtonBg,
+                    borderColor: ssoButtonBorder,
+                    justifyContent: 'center',
+                    gap: 1,
+                    '&:hover': {
+                      bgcolor: ssoButtonHoverBg,
+                      borderColor: isDarkMode ? 'rgba(255,255,255,0.28)' : 'rgba(0,0,0,0.2)',
+                    },
+                  }}
+                >
+                  {isSsoRedirecting ? 'Переход к SSO…' : 'Войти через SSO'}
+                </Button>
+              </>
+            )}
           </CardContent>
         </Card>
       </Box>

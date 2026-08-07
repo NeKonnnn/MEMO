@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { Box, IconButton, Typography, Tooltip, Link, Paper, Table, TableBody, TableCell, TableContainer, TableHead, TableRow } from '@mui/material';
-import { ContentCopy as CopyIcon, Check as CheckIcon, Info as InfoIcon, Warning as WarningIcon, Error as ErrorIcon, CheckCircle as SuccessIcon, GetApp as DownloadIcon } from '@mui/icons-material';
+import { ContentCopy as CopyIcon, Check as CheckIcon, Info as InfoIcon, Warning as WarningIcon, Error as ErrorIcon, CheckCircle as SuccessIcon, GetApp as DownloadIcon, Slideshow as SlideshowIcon } from '@mui/icons-material';
+import { isGpbPresentationHtml, isHtmlFenceLanguage, openPresentationViewer } from '../utils/presentationViewer';
 import Editor, { loader } from '@monaco-editor/react';
 import * as XLSX from 'xlsx';
 import CodeSelectionMenu from './CodeSelectionMenu';
@@ -39,12 +40,86 @@ const getFontSizeValue = (size: FontSize): string => {
   }
 };
 
-/** Markdown-заголовки: чуть крупнее body, без MUI h1–h4 (там 2–3rem). */
+/** Markdown-заголовки: чуть крупнее body, без MUI h1–h6 (там 2–3rem). */
 const MARKDOWN_HEADING_SCALE: Record<string, number> = {
   '1': 1.35,
   '2': 1.2,
   '3': 1.1,
   '4': 1.05,
+  '5': 1.03,
+  '6': 1.0,
+};
+
+/** Расширение файла для скачивания блока кода по языку fence / Monaco. */
+const LANGUAGE_EXTENSIONS: Record<string, string> = {
+  javascript: 'js',
+  typescript: 'ts',
+  python: 'py',
+  ruby: 'rb',
+  bash: 'sh',
+  shell: 'sh',
+  sh: 'sh',
+  zsh: 'sh',
+  powershell: 'ps1',
+  ps1: 'ps1',
+  batch: 'bat',
+  cmd: 'bat',
+  yaml: 'yml',
+  yml: 'yml',
+  json: 'json',
+  html: 'html',
+  css: 'css',
+  scss: 'scss',
+  less: 'less',
+  xml: 'xml',
+  sql: 'sql',
+  java: 'java',
+  kotlin: 'kt',
+  go: 'go',
+  rust: 'rs',
+  rs: 'rs',
+  c: 'c',
+  cpp: 'cpp',
+  'c++': 'cpp',
+  cc: 'cpp',
+  cxx: 'cpp',
+  csharp: 'cs',
+  'c#': 'cs',
+  cs: 'cs',
+  php: 'php',
+  swift: 'swift',
+  r: 'r',
+  matlab: 'm',
+  lua: 'lua',
+  perl: 'pl',
+  haskell: 'hs',
+  hs: 'hs',
+  scala: 'scala',
+  dart: 'dart',
+  vb: 'vb',
+  vba: 'vba',
+  pascal: 'pas',
+  fortran: 'f90',
+  f90: 'f90',
+  f95: 'f95',
+  dockerfile: 'Dockerfile',
+  makefile: 'Makefile',
+  markdown: 'md',
+  md: 'md',
+  plaintext: 'txt',
+  text: 'txt',
+  txt: 'txt',
+  js: 'js',
+  ts: 'ts',
+  jsx: 'jsx',
+  tsx: 'tsx',
+  py: 'py',
+  rb: 'rb',
+};
+
+const getCodeFileExtension = (language: string): string => {
+  const key = (language || 'txt').toLowerCase().trim();
+  return LANGUAGE_EXTENSIONS[key] || key.replace(/[^a-z0-9_+-]/gi, '') || 'txt';
 };
 
 function markdownHeadingFontSize(level: string, baseFontSize: string): string {
@@ -182,7 +257,7 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
       )
       .forEach((el) => el.remove());
 
-    // Клон с emotion-классами: временно в DOM, чтобы getComputedStyle видел bold/italic/underline.
+    // Клон с emotion-классами: временно в DOM, чтобы getComputedStyle видел bold/italic.
     temp.setAttribute('data-astra-copy-root', '1');
     temp.style.cssText =
       'position:fixed;left:-99999px;top:0;width:680px;opacity:0;pointer-events:none;white-space:normal;';
@@ -195,20 +270,17 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;');
 
-    type StyleFlags = { bold: boolean; italic: boolean; underline: boolean; strike: boolean };
-
     const isBold = (cs: CSSStyleDeclaration) =>
       cs.fontWeight === 'bold' || cs.fontWeight === 'bolder' || parseInt(cs.fontWeight, 10) >= 600;
     const isItalic = (cs: CSSStyleDeclaration) => cs.fontStyle === 'italic' || cs.fontStyle === 'oblique';
-    const deco = (cs: CSSStyleDeclaration) =>
-      `${cs.textDecorationLine || ''} ${cs.textDecoration || ''}`.toLowerCase();
-    const isUnderline = (cs: CSSStyleDeclaration) => deco(cs).includes('underline');
-    const isStrike = (cs: CSSStyleDeclaration) => deco(cs).includes('line-through');
 
     const BLOCK_RE =
       /^(div|p|li|ul|ol|h[1-6]|tr|blockquote|pre|table|thead|tbody|tfoot|section|article|header|footer|hr)$/i;
 
-    const serialize = (node: Node, inherited: StyleFlags): { plain: string; html: string } => {
+    const serialize = (
+      node: Node,
+      inherited: { bold: boolean; italic: boolean },
+    ): { plain: string; html: string } => {
       if (node.nodeType === Node.TEXT_NODE) {
         const text = (node.textContent || '').replace(/\u00A0/g, ' ');
         return { plain: text, html: escapeText(text) };
@@ -230,13 +302,9 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
 
       const boldHere = cs ? isBold(cs) : tag === 'strong' || tag === 'b';
       const italicHere = cs ? isItalic(cs) : tag === 'em' || tag === 'i';
-      const underlineHere = cs ? isUnderline(cs) : tag === 'u' || tag === 'ins';
-      const strikeHere = cs ? isStrike(cs) : tag === 's' || tag === 'del' || tag === 'strike';
-      const nextInherited: StyleFlags = {
+      const nextInherited = {
         bold: inherited.bold || boldHere,
         italic: inherited.italic || italicHere,
-        underline: inherited.underline || underlineHere,
-        strike: inherited.strike || strikeHere,
       };
 
       let plain = '';
@@ -251,8 +319,6 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
         let h = innerHtml;
         if (boldHere && !inherited.bold) h = `<strong>${h}</strong>`;
         if (italicHere && !inherited.italic) h = `<em>${h}</em>`;
-        if (underlineHere && !inherited.underline) h = `<u>${h}</u>`;
-        if (strikeHere && !inherited.strike) h = `<s>${h}</s>`;
         return { plain: innerPlain, html: h };
       };
 
@@ -329,6 +395,9 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
       }
 
       const wrapped = wrapInline(html, plain);
+      if (tag === 'ul' || tag === 'ol' || tag === 'li') {
+        return wrapped;
+      }
       if (BLOCK_RE.test(tag) || (cs && (cs.display === 'block' || cs.display === 'flex'))) {
         const hasBlockChild = /<(p|div|ul|ol|h[1-6]|li|pre|blockquote|table|tr)\b/i.test(html);
         const plainOut = wrapped.plain
@@ -351,12 +420,7 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
     let html = '';
     try {
       for (let i = 0; i < temp.childNodes.length; i += 1) {
-        const part = serialize(temp.childNodes[i], {
-          bold: false,
-          italic: false,
-          underline: false,
-          strike: false,
-        });
+        const part = serialize(temp.childNodes[i], { bold: false, italic: false });
         plain += part.plain;
         html += part.html;
       }
@@ -383,6 +447,7 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
       html = `<p>${html}</p>`;
     }
 
+    // Полный HTML-фрагмент для Word / почты / rich editors
     const richHtml = html
       ? `<!DOCTYPE html><html><body><!--StartFragment-->${html}<!--EndFragment--></body></html>`
       : '';
@@ -466,6 +531,38 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
       setTimeout(() => setCopiedCode(null), 2000);
     } catch (error) {
       console.error('Failed to copy code:', error);
+    }
+  };
+
+  const handleOpenPresentation = (code: string) => {
+    try {
+      openPresentationViewer(code);
+    } catch (error) {
+      console.error('Failed to open presentation viewer:', error);
+    }
+  };
+
+  const handleDownloadCode = (code: string, language: string) => {
+    try {
+      const ext = getCodeFileExtension(language);
+      const now = new Date();
+      const dateStr = now.toISOString().slice(0, 19).replace(/:/g, '-').replace('T', '_');
+      // Dockerfile / Makefile — без лишней точки в имени
+      const fileName = ext.includes('.') || /^[A-Z]/.test(ext)
+        ? `${ext}_${dateStr}`
+        : `code_${dateStr}.${ext}`;
+
+      const blob = new Blob([code], { type: 'text/plain;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = fileName;
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error('Failed to download code:', error);
     }
   };
 
@@ -817,46 +914,68 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
 
   // Рендеринг таблицы
   const renderTable = (headers: string[], rows: string[][], index: number) => {
+    const tableScrollSx = {
+      maxWidth: '100%',
+      overflowX: 'auto',
+      overflowY: 'hidden',
+      borderRadius: 1,
+      '&::-webkit-scrollbar': {
+        height: 6,
+      },
+      '&::-webkit-scrollbar-track': {
+        backgroundColor: 'rgba(255, 255, 255, 0.05)',
+        borderRadius: 3,
+      },
+      '&::-webkit-scrollbar-thumb': {
+        backgroundColor: 'rgba(255, 255, 255, 0.22)',
+        borderRadius: 3,
+        '&:hover': {
+          backgroundColor: 'rgba(255, 255, 255, 0.32)',
+        },
+      },
+      scrollbarWidth: 'thin',
+      scrollbarColor: 'rgba(255,255,255,0.22) rgba(255,255,255,0.05)',
+    };
+
+    const headerCellSx = {
+      fontWeight: 'bold',
+      color: 'white',
+      borderBottom: '1px solid rgba(224, 224, 224, 0.3)',
+      borderTop: 'none',
+      borderLeft: 'none',
+      borderRight: 'none',
+      fontSize: '0.875rem',
+      whiteSpace: 'pre-wrap',
+      wordBreak: 'break-word',
+      py: 1.25,
+      px: 2,
+    };
+
+    const bodyCellSx = {
+      borderBottom: '1px solid rgba(224, 224, 224, 0.3)',
+      borderTop: 'none',
+      borderLeft: 'none',
+      borderRight: 'none',
+      fontSize: '0.875rem',
+      whiteSpace: 'pre-wrap',
+      wordBreak: 'break-word',
+      py: 1.25,
+      px: 2,
+    };
+
     return (
-      <Box key={index} sx={{ my: 2, position: 'relative' }}>
-        {/* Кнопка экспорта в Excel */}
-        <Box
-          sx={{
-            display: 'flex',
-            justifyContent: 'flex-end',
-            mb: 1,
-          }}
-        >
-          <Tooltip title="Скачать таблицу в Excel">
-            <IconButton
-              size="small"
-              onClick={() => exportTableToExcel(headers, rows, index)}
-              sx={{
-                color: 'primary.main',
-                '&:hover': {
-                  backgroundColor: 'action.hover',
-                },
-              }}
-            >
-              <DownloadIcon fontSize="small" />
-            </IconButton>
-          </Tooltip>
-        </Box>
-        
-        <TableContainer component={Paper} sx={{ maxWidth: '100%', overflow: 'auto' }}>
-          <Table size="small" sx={{ minWidth: 650 }}>
+      <Box key={index} sx={{ my: 2, position: 'relative', maxWidth: '100%', minWidth: 0 }}>
+        <TableContainer component={Paper} sx={tableScrollSx}>
+          <Table size="small" sx={{ minWidth: 650, width: '100%' }}>
             {headers.length > 0 && (
               <TableHead>
                 <TableRow sx={{ backgroundColor: 'primary.dark' }}>
                   {headers.map((header, idx) => (
-                    <TableCell 
-                      key={idx} 
-                      sx={{ 
-                        fontWeight: 'bold',
-                        color: 'white',
-                        border: '1px solid rgba(224, 224, 224, 0.3)',
-                        fontSize: '0.875rem',
-                        whiteSpace: 'pre-wrap',
+                    <TableCell
+                      key={idx}
+                      sx={{
+                        ...headerCellSx,
+                        ...(idx === headers.length - 1 ? { pr: 6 } : {}),
                       }}
                     >
                       {parseInlineMarkdown(processCellMarkdown(header))}
@@ -867,20 +986,18 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
             )}
             <TableBody>
               {rows.map((row, rowIdx) => (
-                <TableRow 
+                <TableRow
                   key={rowIdx}
-                  sx={{ 
+                  sx={{
                     '&:nth-of-type(odd)': { backgroundColor: 'action.hover' },
-                    '&:hover': { backgroundColor: 'action.selected' }
+                    '&:hover': { backgroundColor: 'action.selected' },
                   }}
                 >
                   {row.map((cell, cellIdx) => (
-                    <TableCell 
+                    <TableCell
                       key={cellIdx}
-                      sx={{ 
-                        border: '1px solid rgba(224, 224, 224, 0.3)',
-                        fontSize: '0.875rem',
-                        whiteSpace: 'pre-wrap',
+                      sx={{
+                        ...bodyCellSx,
                         fontFamily: cell.match(/^\d+$/) ? 'monospace' : 'inherit',
                       }}
                     >
@@ -892,6 +1009,37 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
             </TableBody>
           </Table>
         </TableContainer>
+
+        <Box
+          sx={{
+            position: 'absolute',
+            top: 0,
+            right: 4,
+            height: 41,
+            display: 'flex',
+            alignItems: 'center',
+            zIndex: 2,
+            pointerEvents: 'none',
+            '& > *': { pointerEvents: 'auto' },
+          }}
+        >
+          <Tooltip title="Скачать таблицу в Excel">
+            <IconButton
+              size="small"
+              onClick={() => exportTableToExcel(headers, rows, index)}
+              sx={{
+                color: 'rgba(255, 255, 255, 0.75)',
+                transition: 'all 0.2s',
+                '&:hover': {
+                  backgroundColor: 'rgba(255,255,255,0.1)',
+                  color: '#fff',
+                },
+              }}
+            >
+              <DownloadIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
+        </Box>
       </Box>
     );
   };
@@ -1022,7 +1170,8 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
 
   // Рендер кодового блока с подсветкой синтаксиса
   const renderCodeBlock = (codeBlock: string, index: number) => {
-    let codeMatch = codeBlock.match(/```(\w+)\n([\s\S]*?)```/);
+    // Допускаем ```html, ```HTML, ```html с пробелами после языка
+    let codeMatch = codeBlock.match(/```(\w+)[^\n]*\n([\s\S]*?)```/);
     let language = 'text';
     let code = '';
     
@@ -1030,7 +1179,7 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
       language = codeMatch[1];
       code = codeMatch[2];
     } else {
-      const simpleMatch = codeBlock.match(/```\n?([\s\S]*?)```/);
+      const simpleMatch = codeBlock.match(/```[^\n]*\n?([\s\S]*?)```/);
       if (simpleMatch) {
         code = simpleMatch[1];
       }
@@ -1072,6 +1221,15 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
       };
       
       const editorLanguage = languageMap[language] || language || 'plaintext';
+      // Презентация: fence html/HTML ИЛИ содержимое похоже на GPB-слайды
+      // (модель иногда пишет ``` без языка или с другим тегом).
+      const isPresentationHtml =
+        isGpbPresentationHtml(code) &&
+        (isHtmlFenceLanguage(language) ||
+          isHtmlFenceLanguage(editorLanguage) ||
+          language === 'text' ||
+          language === 'plaintext' ||
+          !language);
       const codeLineCount = Math.max(1, code.split('\n').length);
       const editorHeight = Math.max(120, codeLineCount * 22 + 18);
 
@@ -1121,26 +1279,62 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
               >
                 {language}
               </Typography>
-              <Tooltip title={copiedCode === code ? '✓ Скопировано!' : 'Копировать код'}>
-                <IconButton
-                  size="small"
-                  onClick={() => handleCopyCode(code)}
-                  sx={{
-                    color: '#cccccc',
-                    transition: 'all 0.2s',
-                    '&:hover': {
-                      backgroundColor: 'rgba(255,255,255,0.1)',
-                      color: '#4ec9b0',
-                    },
-                  }}
-                >
-                  {copiedCode === code ? (
-                    <CheckIcon fontSize="small" sx={{ color: '#4ec9b0' }} />
-                  ) : (
-                    <CopyIcon fontSize="small" />
-                  )}
-                </IconButton>
-              </Tooltip>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.25 }}>
+                <Tooltip title={copiedCode === code ? '✓ Скопировано!' : 'Копировать код'}>
+                  <IconButton
+                    size="small"
+                    onClick={() => handleCopyCode(code)}
+                    sx={{
+                      color: '#cccccc',
+                      transition: 'all 0.2s',
+                      '&:hover': {
+                        backgroundColor: 'rgba(255,255,255,0.1)',
+                        color: '#4ec9b0',
+                      },
+                    }}
+                  >
+                    {copiedCode === code ? (
+                      <CheckIcon fontSize="small" sx={{ color: '#4ec9b0' }} />
+                    ) : (
+                      <CopyIcon fontSize="small" />
+                    )}
+                  </IconButton>
+                </Tooltip>
+                <Tooltip title="Скачать файл">
+                  <IconButton
+                    size="small"
+                    onClick={() => handleDownloadCode(code, language)}
+                    sx={{
+                      color: '#cccccc',
+                      transition: 'all 0.2s',
+                      '&:hover': {
+                        backgroundColor: 'rgba(255,255,255,0.1)',
+                        color: '#4ec9b0',
+                      },
+                    }}
+                  >
+                    <DownloadIcon fontSize="small" />
+                  </IconButton>
+                </Tooltip>
+                {isPresentationHtml && (
+                  <Tooltip title="Просмотр презентации и экспорт PPTX">
+                    <IconButton
+                      size="small"
+                      onClick={() => handleOpenPresentation(code)}
+                      sx={{
+                        color: '#cccccc',
+                        transition: 'all 0.2s',
+                        '&:hover': {
+                          backgroundColor: 'rgba(255,255,255,0.1)',
+                          color: '#73B0FF',
+                        },
+                      }}
+                    >
+                      <SlideshowIcon fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
+                )}
+              </Box>
             </Box>
             
             {/* Код с подсветкой синтаксиса */}
@@ -1151,6 +1345,13 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
                 position: 'relative',
                 '& .monaco-editor .margin': {
                   backgroundColor: '#1e1e1e',
+                },
+                // Не обрезать трёхзначные номера строк в gutter
+                '& .monaco-editor .margin-view-overlays .line-numbers': {
+                  width: '100% !important',
+                  textAlign: 'right',
+                  paddingRight: '8px',
+                  boxSizing: 'border-box',
                 },
               }}
             >
@@ -1208,9 +1409,11 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
                   contextmenu: true,
                   folding: true,
                   foldingStrategy: 'auto',
-                  glyphMargin: true,
+                  // glyphMargin съедал место у номеров строк — для readonly не нужен
+                  glyphMargin: false,
                   lineNumbers: codeLineCount > 5 ? 'on' : 'off',
-                  lineNumbersMinChars: 3,
+                  // +1 символ запаса: иначе 100+ обрезаются/наезжают
+                  lineNumbersMinChars: Math.max(3, String(codeLineCount).length + 1),
                   renderLineHighlight: 'all',
                   scrollBeyondLastLine: false,
                   wordWrap: 'on',
@@ -1305,11 +1508,11 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
       return `<special-block type="${type}">${content}</special-block>`;
     });
 
-    // Обрабатываем заголовки
-    text = text.replace(/^#### (.*$)/gim, '<h4>$1</h4>');
-    text = text.replace(/^### (.*$)/gim, '<h3>$1</h3>');
-    text = text.replace(/^## (.*$)/gim, '<h2>$1</h2>');
-    text = text.replace(/^# (.*$)/gim, '<h1>$1</h1>');
+    // Обрабатываем заголовки h1–h6 (количество # = уровень)
+    text = text.replace(/^(#{1,6})\s+(.+)$/gim, (_match, hashes: string, headingContent: string) => {
+      const level = hashes.length;
+      return `<h${level}>${headingContent}</h${level}>`;
+    });
 
     // Списки — ДО курсива через *, иначе маркеры «* пункт» на соседних строках
     // схлопываются в один <em> и только последний «- пункт» остаётся в <ul>.
@@ -1380,6 +1583,7 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
      let orderedListCounter = 0; // Счетчик для нумерованных списков
      
      const processedLines = lines.map((line, lineIndex) => {
+      const trimmedLine = line.trim();
       // Обрабатываем специальные блоки
       if (line.includes('<special-block')) {
         const typeMatch = line.match(/type="(\w+)"/);
@@ -1396,19 +1600,22 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
         }
       }
 
-      if (line.startsWith('<h1>') || line.startsWith('<h2>') || line.startsWith('<h3>') || line.startsWith('<h4>')) {
-        const level = line.match(/<h(\d)>/)?.[1] || '3';
-        const content = line.replace(/<h\d>(.*?)<\/h\d>/, '$1');
+      const headingMatch = trimmedLine.match(/^<h([1-6])>(.*)<\/h\1>$/);
+      if (headingMatch) {
+        const level = headingMatch[1];
+        const content = headingMatch[2];
+        const mt =
+          level === '1' ? 2 : level === '2' ? 1.75 : level === '3' ? 1.25 : level === '4' ? 1.1 : 1;
         return (
           <Typography
             key={`${index}-${lineIndex}`}
-            component={`h${level}` as 'h1' | 'h2' | 'h3' | 'h4'}
+            component={`h${level}` as 'h1' | 'h2' | 'h3' | 'h4' | 'h5' | 'h6'}
             variant="body1"
             sx={{
-              mt: level === '1' ? 2 : level === '2' ? 1.75 : 1.25,
+              mt,
               mb: 0.5,
               fontWeight: 600,
-              fontSize: markdownHeadingFontSize(level, fontSizeValue),
+              fontSize: `${markdownHeadingFontSize(level, fontSizeValue)} !important`,
               lineHeight: 1.35,
               color: 'inherit',
             }}
@@ -1886,7 +2093,13 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
   return (
     <Box 
       ref={containerRef}
-      sx={{ position: 'relative' }}
+      sx={{
+        position: 'relative',
+        maxWidth: '100%',
+        minWidth: 0,
+        overflowWrap: 'anywhere',
+        wordBreak: 'break-word',
+      }}
       onMouseUp={onSendMessage && !menuVisible ? handleTextSelection : undefined}
       onDoubleClick={onSendMessage && !menuVisible ? handleDoubleClick : undefined}
       onCopy={(event) => {

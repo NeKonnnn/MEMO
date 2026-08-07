@@ -53,6 +53,8 @@ try:
     from .postgresql.agent_repository import AgentRepository
     from .postgresql.user_settings_repository import UserSettingsRepository
     from .postgresql.skill_repository import SkillRepository
+    from .postgresql.project_repository import ProjectRepository
+    from .postgresql.entity_settings_repository import EntitySettingsRepository
     postgresql_available = True
     logger.debug("PostgreSQL модули импортированы успешно")
 except ImportError as e:
@@ -66,6 +68,8 @@ except ImportError as e:
     AgentRepository = None
     UserSettingsRepository = None
     SkillRepository = None
+    ProjectRepository = None
+    EntitySettingsRepository = None
 
 # Попытка импорта MinIO модулей
 try:
@@ -89,6 +93,8 @@ tag_repo: Optional[TagRepository] = None
 agent_repo: Optional[AgentRepository] = None
 skill_repo: Optional["SkillRepository"] = None
 user_settings_repo: Optional["UserSettingsRepository"] = None
+project_repo: Optional["ProjectRepository"] = None
+entity_settings_repo: Optional["EntitySettingsRepository"] = None
 
 
 def get_mongodb_connection_string() -> str:
@@ -169,7 +175,7 @@ async def init_mongodb() -> bool:
 
 async def init_postgresql() -> bool:
     """Инициализация подключения к PostgreSQL"""
-    global postgresql_connection, document_repo, vector_repo, prompt_repo, tag_repo, agent_repo, skill_repo, user_settings_repo
+    global postgresql_connection, document_repo, vector_repo, prompt_repo, tag_repo, agent_repo, skill_repo, user_settings_repo, project_repo, entity_settings_repo
 
     if not postgresql_available:
         logger.warning("PostgreSQL модули недоступны. Пропускаем инициализацию.")
@@ -201,6 +207,8 @@ async def init_postgresql() -> bool:
             agent_repo = AgentRepository(postgresql_connection)
             skill_repo = SkillRepository(postgresql_connection)
             user_settings_repo = UserSettingsRepository(postgresql_connection)
+            project_repo = ProjectRepository(postgresql_connection)
+            entity_settings_repo = EntitySettingsRepository(postgresql_connection)
 
             # Создаем таблицы
             await document_repo.create_tables()
@@ -209,6 +217,12 @@ async def init_postgresql() -> bool:
             await agent_repo.create_tables()
             await skill_repo.create_tables()
             await user_settings_repo.create_tables()
+            await project_repo.create_tables()
+            # После agents и user_projects: перенос читает их владельцев, а чистка
+            # сирот на них ссылается.
+            await entity_settings_repo.create_tables()
+            await _migrate_entity_rag_settings(entity_settings_repo)
+            await entity_settings_repo.cleanup_orphans()
 
             logger.info("PostgreSQL успешно инициализирован")
             return True
@@ -381,3 +395,35 @@ def get_user_settings_repository():
     if user_settings_repo is None:
         raise RuntimeError("PostgreSQL не инициализирован. Вызовите init_postgresql() сначала.")
     return user_settings_repo
+
+
+def get_project_repository():
+    """Получение репозитория пользовательских проектов"""
+    if not postgresql_available:
+        raise RuntimeError("PostgreSQL модули недоступны. Установите psycopg2.")
+    if project_repo is None:
+        raise RuntimeError("PostgreSQL не инициализирован. Вызовите init_postgresql() сначала.")
+    return project_repo
+
+
+def get_entity_settings_repository():
+    """Получение репозитория RAG-настроек агентов и проектов"""
+    if not postgresql_available:
+        raise RuntimeError("PostgreSQL модули недоступны. Установите psycopg2.")
+    if entity_settings_repo is None:
+        raise RuntimeError("PostgreSQL не инициализирован. Вызовите init_postgresql() сначала.")
+    return entity_settings_repo
+
+
+async def _migrate_entity_rag_settings(repo) -> None:
+    """Разовый перенос настроек из user_llm_settings к сущностям.
+
+    Ошибка переноса не должна ронять старт: настройки просто останутся
+    дефолтными, а в логе будет причина.
+    """
+    try:
+        from backend.services.entity_rag_migration import migrate_user_settings_to_entities
+
+        await migrate_user_settings_to_entities(repo)
+    except Exception:
+        logger.exception("[RAG-CFG-MIGRATE] перенос настроек не выполнен")

@@ -21,6 +21,7 @@ from app.api.rag_common import (
     filters_body_to_domain,
 )
 from app.dependencies import get_memory_rag_service
+from app.services.hit_types import hit_cosine
 from app.services.memory_rag_service import MemoryRagService
 from app.core.logging import get_logger
 
@@ -61,6 +62,7 @@ class MemoryRagSearchHit(BaseModel):
     score: float
     document_id: Optional[int] = None
     chunk_index: Optional[int] = None
+    cosine: Optional[float] = None
 
 class MemoryRagSearchResponse(BaseModel):
     hits: List[MemoryRagSearchHit]
@@ -225,9 +227,13 @@ async def memory_rag_search(
     return MemoryRagSearchResponse(
         hits=[
             MemoryRagSearchHit(
-                content=c, score=s, document_id=doc_id, chunk_index=chunk_idx
+                content=h[0],
+                score=h[1],
+                document_id=h[2],
+                chunk_index=h[3],
+                cosine=hit_cosine(h),
             )
-            for c, s, doc_id, chunk_idx in results
+            for h in results
         ],
         trace=trace.to_dict() if body.debug_trace else None,
     )

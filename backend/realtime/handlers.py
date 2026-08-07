@@ -46,13 +46,15 @@ from backend.services.user_feedback_context import (
     merge_feedback_into_system_prompt,
 )
 from backend.services.user_llm_settings import (
+    bind_user_model_runtime,
     enrich_agent_profile_with_user_settings,
     get_user_prompt_manager,
+    reset_user_model_runtime,
 )
 from backend.services.user_rag_settings import (
     bind_user_rag_runtime,
-    get_user_rag_settings,
-    raw_user_rag_settings,
+    get_entity_rag_settings,
+    get_user_memory_strategy,
     reset_user_rag_runtime,
     runtime_agentic_max_iterations,
     runtime_agentic_rag_enabled,
@@ -519,6 +521,7 @@ def register_handlers(sio):
             await sio.emit("chat_error", {"error": "AI services not available"}, room=sid)
             return
         rag_runtime_token = None
+        model_runtime_token = None
         try:
             user_ctx = await _get_socket_user_context(sio, sid)
             if not user_ctx:
@@ -534,15 +537,6 @@ def register_handlers(sio):
                 )
                 await sio.disconnect(sid)
                 return
-            try:
-                user_id = validated_user.get("user_id")
-                user_rag = await get_user_rag_settings(user_id, "project")
-                user_rag_raw = await raw_user_rag_settings(user_id)
-                rag_runtime_token = bind_user_rag_runtime(user_rag, user_rag_raw)
-            except Exception:
-                logger.exception("Не удалось загрузить персональные RAG-настройки")
-                user_rag = {}
-                rag_runtime_token = bind_user_rag_runtime({})
             user_message = data.get("message", "")
             streaming = data.get("streaming", True)
             _et = data.get("enable_thinking", False)
@@ -565,13 +559,11 @@ def register_handlers(sio):
             inline_images: list = [str(x) for x in _raw_inline_imgs if x] if isinstance(_raw_inline_imgs, list) else []
             user_message_metadata = _build_user_inline_attachments_metadata(data.get("inline_attachments"))
             requested_rag_strategy = str(data.get("rag_strategy") or "").strip().lower()
-            fallback_strategy = str(
-                (user_rag or {}).get("rag_strategy") or runtime_rag_strategy() or "auto"
-            )
+            # Стратегия стора подтянется через runtime settings после bind entity_ids
             effective_rag_strategy = (
                 requested_rag_strategy
                 if requested_rag_strategy in _VALID_RAG_STRATEGIES
-                else fallback_strategy
+                else None
             )
             agent_profile = await _resolve_agent_chat_params(
                 data.get("agent_id"), validated_user.get("user_id") if validated_user else None
@@ -579,6 +571,16 @@ def register_handlers(sio):
             agent_profile = await enrich_agent_profile_with_user_settings(
                 agent_profile, validated_user.get("user_id") if validated_user else None
             )
+            _agent_ms = agent_profile.get("model_settings") if isinstance(agent_profile, dict) else None
+            if data.get("agent_id") and isinstance(_agent_ms, dict) and _agent_ms:
+                model_runtime_token = bind_user_model_runtime(_agent_ms)
+                logger.info(
+                    "[LLM] Тонкая настройка активного агента id=%s применена к запросу",
+                    data.get("agent_id"),
+                )
+            _ams_stream = _agent_ms.get("streaming") if isinstance(_agent_ms, dict) else None
+            if _ams_stream is not None:
+                streaming = bool(_ams_stream)
             if not (data.get("tool_ids") or data.get("mcp_tool_ids")):
                 _agent_mcp = agent_mcp_tool_ids(agent_profile if isinstance(agent_profile, dict) else {})
                 if _agent_mcp:
@@ -612,6 +614,55 @@ def register_handlers(sio):
                 project_id = await get_conversation_project_id(conversation_id)
                 if project_id:
                     logger.debug(f"[chat_message] project_id из MongoDB: {project_id}")
+
+            # Настройки берём у САМИХ сущностей, не у собеседника: агента
+            # могли расшарить, и искать надо теми параметрами, которыми залит
+            # его корпус, а не теми, что стоят у читателя.
+            try:
+                _uid = validated_user.get("user_id")
+                entity_ids: dict = {}
+                if project_id:
+                    entity_ids["project"] = str(project_id)
+                _agent_id_raw = data.get("agent_id")
+                if _agent_id_raw is not None:
+                    try:
+                        _aid = int(_agent_id_raw)
+                        if _aid > 0:
+                            entity_ids["agent"] = str(_aid)
+                    except (TypeError, ValueError):
+                        pass
+                _scopes_snapshot: dict = {}
+                if entity_ids.get("project"):
+                    _scopes_snapshot["project"] = await get_entity_rag_settings(
+                        "project", entity_ids["project"]
+                    )
+                if entity_ids.get("agent"):
+                    _scopes_snapshot["agent"] = await get_entity_rag_settings(
+                        "agent", entity_ids["agent"]
+                    )
+                rag_runtime_token = bind_user_rag_runtime(
+                    _scopes_snapshot, await get_user_memory_strategy(_uid)
+                )
+                _project_log_name = str(data.get("project_name") or "").strip()
+                if entity_ids.get("project"):
+                    logger.info(
+                        "[RAG] Настройки применены для проекта %s",
+                        _project_log_name or entity_ids["project"],
+                    )
+                if entity_ids.get("agent"):
+                    _agent_log_name = str(
+                        (agent_profile or {}).get("name")
+                        or data.get("agent_name")
+                        or ""
+                    ).strip()
+                    logger.info(
+                        "[RAG] Настройки применены для агента %s",
+                        _agent_log_name or entity_ids["agent"],
+                    )
+            except Exception:
+                logger.exception("Не удалось загрузить персональные RAG-настройки")
+                rag_runtime_token = bind_user_rag_runtime({})
+
             project_memory = data.get("project_memory") or "default"
             project_instructions = data.get("project_instructions") or ""
             if project_id and project_memory == "project-only":
@@ -794,6 +845,9 @@ def register_handlers(sio):
             if rag_runtime_token is not None:
                 with logged_suppress(logger):
                     reset_user_rag_runtime(rag_runtime_token)
+            if model_runtime_token is not None:
+                with logged_suppress(logger):
+                    reset_user_model_runtime(model_runtime_token)
 
 
 async def _handle_multi_llm(

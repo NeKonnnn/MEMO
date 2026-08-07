@@ -2,7 +2,6 @@
 from app.core.logging import get_logger
 from typing import Any, Dict, List, Optional
 
-import asyncio
 import os
 
 from fastapi import (
@@ -24,6 +23,7 @@ from app.api.rag_common import (
     filters_body_to_domain,
 )
 from app.dependencies import get_kb_service
+from app.services.hit_types import hit_cosine
 from app.services.kb_service import KbService
 
 logger = get_logger(__name__)
@@ -64,6 +64,7 @@ class KbSearchHit(BaseModel):
     score: float
     document_id: Optional[int] = None
     chunk_index: Optional[int] = None
+    cosine: Optional[float] = None
 
 class KbSearchResponse(BaseModel):
     hits: List[KbSearchHit]
@@ -149,11 +150,10 @@ async def kb_search(
 ):
     """Поиск по Базе Знаний."""
     # Скоупленный реиндекс чужие документы не трогает — блокировать всех незачем.
-    if (
-        _block_search_on_reindex()
-        and _kb_reindex_lock.locked()
-        and _kb_reindex_owner is None
-    ):
+    # Отбиваем только кластерный прогон: он перетряхивает всю таблицу.
+    from app.services.reindex_queue import kb_queue
+
+    if _block_search_on_reindex() and kb_queue.cluster_running():
         raise HTTPException(
             status_code=409,
             detail="Идёт полная переиндексация Базы Знаний — поиск временно недоступен",
@@ -177,8 +177,14 @@ async def kb_search(
     results, trace = payload
     return KbSearchResponse(
         hits=[
-            KbSearchHit(content=c, score=s, document_id=doc_id, chunk_index=chunk_idx)
-            for c, s, doc_id, chunk_idx in results
+            KbSearchHit(
+                content=h[0],
+                score=h[1],
+                document_id=h[2],
+                chunk_index=h[3],
+                cosine=hit_cosine(h),
+            )
+            for h in results
         ],
         trace=trace.to_dict() if body.debug_trace else None,
     )
@@ -188,18 +194,28 @@ class KbReindexRequest(BaseModel):
     chunk_overlap: Optional[int] = None
     chunking_strategy: Optional[str] = None
     owner_user_id: Optional[str] = None
+    # Чью именно БЗ пересобираем. Ключ очереди: у двух агентов одного владельца
+    # пересборки идут независимо и друг друга не прерывают.
+    agent_id: Optional[int] = None
     document_ids: Optional[List[int]] = None
     embedding_model: Optional[str] = None
     embedding_provider: Optional[str] = None
-
-_kb_reindex_lock = asyncio.Lock()
-# Чей реиндекс идёт. None при УДЕРЖИВАЕМОМ локе = глобальный прогон.
-_kb_reindex_owner: Optional[str] = None
 
 def _block_search_on_reindex() -> bool:
     """Отбивать ли поиск во время ГЛОБАЛЬНОГО реиндекса."""
     v = os.getenv("RAG_BLOCK_SEARCH_DURING_REINDEX", "true").strip().lower()
     return v in ("1", "true", "yes", "on")
+
+def _kb_reindex_key(owner_user_id: Optional[str], agent_id: Optional[int]) -> str:
+    """Ключ очереди. Без фильтров — кластерный прогон, он эксклюзивный."""
+    from app.services.reindex_queue import GLOBAL_KEY, entity_key
+
+    if agent_id is not None:
+        return entity_key("agent", agent_id)
+    owner = (owner_user_id or "").strip().lower()
+    if owner:
+        return entity_key("owner", owner)
+    return GLOBAL_KEY
 
 async def _kb_reindex_bg(
     kb: KbService,
@@ -210,44 +226,40 @@ async def _kb_reindex_bg(
     document_ids: Optional[List[int]] = None,
     embedding_model: Optional[str] = None,
     embedding_provider: Optional[str] = None,
+    agent_id: Optional[int] = None,
 ) -> None:
-    if _kb_reindex_lock.locked():
-        logger.info(
-            "[REINDEX kb] уже идёт — новый запуск дождётся завершения предыдущего"
-        )
-    global _kb_reindex_owner
-    from app.services.kb_service import (
-        bump_kb_reindex_generation,
-        current_kb_reindex_generation,
-    )
+    from app.services.kb_service import bump_kb_reindex_generation
+    from app.services.reindex_queue import kb_queue
 
-    gen = bump_kb_reindex_generation()  # до лока: сигналим текущему проходу прерваться
-    async with _kb_reindex_lock:
-        if gen != current_kb_reindex_generation():
-            logger.info("[REINDEX kb] пропуск: поколение устарело до старта")
-            return
-        _kb_reindex_owner = (owner_user_id or "").strip().lower() or None
-        logger.info(
-            "[REINDEX kb] лок взят: owner=%s (поиск %s)",
-            _kb_reindex_owner or "*",
-            "заблокирован" if _kb_reindex_owner is None else "работает",
+    key = _kb_reindex_key(owner_user_id, agent_id)
+    # Поколение поднимаем ДО очереди: если этот же агент уже пересобирается, его
+    # текущий проход должен прерваться — настройки успели поменяться.
+    gen = bump_kb_reindex_generation(key)
+
+    async def _job() -> None:
+        res = await kb.reindex_all(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            chunking_strategy=chunking_strategy,
+            generation=gen,
+            generation_key=key,
+            owner_user_id=owner_user_id,
+            document_ids=document_ids,
+            model=embedding_model,
+            provider=embedding_provider,
         )
-        try:
-            res = await kb.reindex_all(
-                chunk_size=chunk_size,
-                chunk_overlap=chunk_overlap,
-                chunking_strategy=chunking_strategy,
-                generation=gen,
-                owner_user_id=owner_user_id,
-                document_ids=document_ids,
-                model=embedding_model,
-                provider=embedding_provider,
-            )
-            logger.info("[REINDEX kb] фоновая перечанкировка завершена: %s", res)
-        except Exception:
-            logger.exception("[REINDEX kb] фоновая перечанкировка упала")
-        finally:
-            _kb_reindex_owner = None
+        logger.info("[REINDEX kb] %s: перечанкировка завершена: %s", key, res)
+
+    await kb_queue.run(
+        key,
+        gen,
+        _job,
+        meta={
+            "scope": "agent" if agent_id is not None else ("owner" if owner_user_id else "all"),
+            "entity_id": str(agent_id) if agent_id is not None else None,
+            "owner_user_id": (owner_user_id or "").strip().lower() or None,
+        },
+    )
 
 @router.post("/reindex")
 async def kb_reindex(
@@ -270,17 +282,25 @@ async def kb_reindex(
         body.document_ids,
         body.embedding_model,
         body.embedding_provider,
+        body.agent_id,
     )
     return {
         "ok": True,
         "status": "started",
         "owner_user_id": body.owner_user_id,
+        "agent_id": body.agent_id,
         "document_ids": body.document_ids,
+        "queue_key": _kb_reindex_key(body.owner_user_id, body.agent_id),
     }
 
 @router.get("/reindex/status")
 async def kb_reindex_status():
-    return {
-        "reindexing": _kb_reindex_lock.locked(),
-        "owner_user_id": _kb_reindex_owner,
-    }
+    """Статус пересборки БЗ.
+
+    ``reindexing`` и ``owner_user_id`` сохранены для прежней версии backend:
+    первый теперь значит «занят хотя бы один слот». Что именно пересобирается —
+    в ``active``.
+    """
+    from app.services.reindex_queue import kb_queue
+
+    return kb_queue.status()
