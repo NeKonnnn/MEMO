@@ -316,7 +316,7 @@ docker-compose ps
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=NeKonnnn/AstraChat_AI_System&type=date&legend=top-left)](https://www.star-history.com/?repos=NeKonnnn%2FAstra-Studio&type=date&legend=bottom-right)
+![Star History Chart](https://githubusercontent.com)
 
 ---
 
