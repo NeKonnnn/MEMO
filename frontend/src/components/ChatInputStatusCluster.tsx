@@ -5,8 +5,10 @@ import {
   MenuBook as MenuBookIcon,
   SmartToyOutlined as AgentStatusIcon,
   HubOutlined as HubIcon,
+  HistoryEdu as SkillStatusIcon,
 } from '@mui/icons-material';
 import type { ActiveMcpServerIndicator } from '../mcp/hooks/useChatInputMcpIndicators';
+import type { ActiveSkillRef } from '../utils/skillSelectionStorage';
 
 export interface ChatInputStatusClusterProps {
   isDarkMode: boolean;
@@ -21,10 +23,14 @@ export interface ChatInputStatusClusterProps {
   /** Включённые MCP-серверы для текущего чата */
   activeMcpServers?: ActiveMcpServerIndicator[];
   onMcpClick?: () => void;
+  /** Выбранные skills для чата */
+  activeSkills?: ActiveSkillRef[];
+  /** Снять все выбранные skills (клик по сегменту) */
+  onSkillsToggle?: () => void;
 }
 
 /**
- * Индикаторы у поля ввода: библиотека, агент, MCP.
+ * Индикаторы у поля ввода: библиотека, агент, skills, MCP.
  * Несколько активных — одна «пилюля» с вертикальными разделителями.
  */
 export default function ChatInputStatusCluster({
@@ -36,16 +42,27 @@ export default function ChatInputStatusCluster({
   onAgentToggle,
   activeMcpServers = [],
   onMcpClick,
+  activeSkills = [],
+  onSkillsToggle,
 }: ChatInputStatusClusterProps) {
   const theme = useTheme();
   const agentActive = standardAgentsActive || Boolean(myAgentName);
   const mcpActive = activeMcpServers.length > 0;
+  const skillsActive = activeSkills.length > 0;
 
   const mcpLabel = useMemo(() => {
     if (activeMcpServers.length === 0) return '';
     if (activeMcpServers.length === 1) return activeMcpServers[0].display_name;
     return `${activeMcpServers.length} MCP`;
   }, [activeMcpServers]);
+
+  const skillsLabel = useMemo(() => {
+    if (activeSkills.length === 0) return '';
+    if (activeSkills.length === 1) {
+      return (activeSkills[0].name || activeSkills[0].slug || 'Skill').trim();
+    }
+    return `${activeSkills.length} Skills`;
+  }, [activeSkills]);
 
   const tooltipTitle = useMemo(() => {
     const parts: string[] = [];
@@ -65,24 +82,54 @@ export default function ChatInputStatusCluster({
           : `Активен агент «${myAgentName}» (Мои агенты).`,
       );
     }
+    if (skillsActive) {
+      const names = activeSkills.map((s) => s.name || s.slug).join(', ');
+      parts.push(
+        onSkillsToggle
+          ? `Skills: ${names}. Нажмите, чтобы отключить.`
+          : `Skills: ${names}.`,
+      );
+    }
     if (mcpActive) {
       parts.push(
         `MCP: ${activeMcpServers.map((s) => s.display_name).join(', ')}. Инструменты → MCP.`,
       );
     }
     return parts.join(' ');
-  }, [libraryActive, standardAgentsActive, myAgentName, mcpActive, activeMcpServers, onAgentToggle]);
+  }, [
+    libraryActive,
+    standardAgentsActive,
+    myAgentName,
+    skillsActive,
+    activeSkills,
+    mcpActive,
+    activeMcpServers,
+    onAgentToggle,
+    onSkillsToggle,
+  ]);
 
-  if (!libraryActive && !agentActive && !mcpActive) return null;
+  if (!libraryActive && !agentActive && !skillsActive && !mcpActive) return null;
 
   const borderC = alpha(theme.palette.primary.main, 0.4);
   const bg = alpha(theme.palette.primary.main, 0.12);
   const dividerColor = isDarkMode ? 'rgba(255,255,255,0.28)' : 'rgba(0,0,0,0.18)';
 
-  const segments: Array<'library' | 'agent' | 'mcp'> = [];
+  const segments: Array<'library' | 'agent' | 'skills' | 'mcp'> = [];
   if (libraryActive) segments.push('library');
   if (agentActive) segments.push('agent');
+  if (skillsActive) segments.push('skills');
   if (mcpActive) segments.push('mcp');
+
+  const segmentButtonSx = {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    minWidth: 36,
+    height: 36,
+    border: 'none',
+    bgcolor: 'transparent',
+    color: 'primary.main',
+  } as const;
 
   return (
     <Tooltip title={tooltipTitle}>
@@ -124,17 +171,10 @@ export default function ChatInputStatusCluster({
                   onLibraryToggle?.();
                 }}
                 sx={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
+                  ...segmentButtonSx,
                   width: 36,
-                  minWidth: 36,
-                  height: 36,
                   p: 0,
-                  border: 'none',
-                  bgcolor: 'transparent',
                   cursor: onLibraryToggle ? 'pointer' : 'default',
-                  color: 'primary.main',
                   '&:hover': onLibraryToggle ? { bgcolor: alpha(theme.palette.primary.main, 0.12) } : {},
                 }}
               >
@@ -155,15 +195,8 @@ export default function ChatInputStatusCluster({
                     : undefined
                 }
                 sx={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  minWidth: 36,
-                  height: 36,
+                  ...segmentButtonSx,
                   px: libraryActive ? 0.5 : 0.75,
-                  border: 'none',
-                  bgcolor: 'transparent',
-                  color: 'primary.main',
                   cursor: onAgentToggle && myAgentName ? 'pointer' : 'default',
                   '&:hover':
                     onAgentToggle && myAgentName
@@ -172,6 +205,45 @@ export default function ChatInputStatusCluster({
                 }}
               >
                 <AgentStatusIcon sx={{ fontSize: '1.15rem' }} />
+              </Box>
+            ) : null}
+            {seg === 'skills' ? (
+              <Box
+                component={onSkillsToggle ? 'button' : 'div'}
+                type={onSkillsToggle ? 'button' : undefined}
+                onClick={
+                  onSkillsToggle
+                    ? (e: React.MouseEvent) => {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        onSkillsToggle();
+                      }
+                    : undefined
+                }
+                sx={{
+                  ...segmentButtonSx,
+                  gap: 0.35,
+                  px: 0.75,
+                  cursor: onSkillsToggle ? 'pointer' : 'default',
+                  maxWidth: 140,
+                  '&:hover': onSkillsToggle ? { bgcolor: alpha(theme.palette.primary.main, 0.12) } : {},
+                }}
+              >
+                <SkillStatusIcon sx={{ fontSize: '1.15rem', flexShrink: 0 }} />
+                {skillsLabel ? (
+                  <Typography
+                    variant="caption"
+                    sx={{
+                      fontWeight: 600,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                      lineHeight: 1,
+                    }}
+                  >
+                    {skillsLabel}
+                  </Typography>
+                ) : null}
               </Box>
             ) : null}
             {seg === 'mcp' ? (
@@ -188,16 +260,9 @@ export default function ChatInputStatusCluster({
                     : undefined
                 }
                 sx={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
+                  ...segmentButtonSx,
                   gap: 0.35,
-                  minWidth: 36,
-                  height: 36,
                   px: 0.75,
-                  border: 'none',
-                  bgcolor: 'transparent',
-                  color: 'primary.main',
                   cursor: onMcpClick ? 'pointer' : 'default',
                   maxWidth: 140,
                 }}

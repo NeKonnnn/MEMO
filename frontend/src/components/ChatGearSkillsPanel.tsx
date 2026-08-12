@@ -196,7 +196,7 @@ export default function ChatGearSkillsPanel({ isDarkMode }: ChatGearSkillsPanelP
               return (
                 <Box
                   key={skill.id}
-                  onClick={() => toggleActiveSkill(skill.slug, !selected)}
+                  onClick={() => toggleActiveSkill(skill.slug, !selected, title)}
                   sx={{
                     ...dropdownItemSx,
                     display: 'flex',

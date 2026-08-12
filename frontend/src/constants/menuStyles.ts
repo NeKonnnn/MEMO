@@ -181,9 +181,10 @@ export const SIDEBAR_RAIL_ICON_HIT_PX = 40;
 
 /**
  * Только иконка в свернутой колонке rail: квадрат {@link SIDEBAR_RAIL_ICON_HIT_PX} со скруглением `borderRadius: 1`,
- * фон hover как у кнопки меню rail (без смены цвета иконки на primary).
+ * фон hover под светлый/тёмный фон панели (не под тему приложения).
+ * @param panelIsLight — true, если фон боковой панели светлый.
  */
-export function getSidebarRailCollapsedListItemButtonSx(isDarkMode: boolean): SxProps<Theme> {
+export function getSidebarRailCollapsedListItemButtonSx(panelIsLight: boolean): SxProps<Theme> {
   return {
     ...SIDEBAR_CHAT_ROW_LIST_ITEM_BUTTON_SX,
     flex: 'none',
@@ -204,7 +205,7 @@ export function getSidebarRailCollapsedListItemButtonSx(isDarkMode: boolean): Sx
       transition: 'background-color 0.15s ease',
     },
     '&:hover': {
-      backgroundColor: isDarkMode ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)',
+      backgroundColor: panelIsLight ? 'rgba(0, 0, 0, 0.1)' : 'rgba(255, 255, 255, 0.1)',
       transform: 'scale(1.06)',
       '@media (prefers-reduced-motion: reduce)': {
         transform: 'none',
@@ -565,6 +566,36 @@ export const FORM_FIELD_TRIGGER_SX = {
     bgcolor: FIELD_BG_HOVER,
   },
 };
+
+/**
+ * Триггер «Агенты» и аналоги: на светлой боковой панели — чёрный текст и светлая рамка.
+ * @param darkPanel — true для тёмного/цветного сайдбара (как раньше).
+ */
+export function getFormFieldTriggerSx(darkPanel: boolean): Record<string, unknown> {
+  if (darkPanel) return { ...FORM_FIELD_TRIGGER_SX };
+  return {
+    ...FORM_FIELD_TRIGGER_SX,
+    bgcolor: 'transparent',
+    border: '1px solid rgba(0,0,0,0.23)',
+    color: 'rgba(0,0,0,0.87)',
+    '&:hover': {
+      borderColor: 'rgba(0,0,0,0.4)',
+      bgcolor: 'rgba(0,0,0,0.04)',
+    },
+  };
+}
+
+export function getFormFieldTriggerValueSx(darkPanel: boolean): Record<string, unknown> {
+  return {
+    ...FORM_FIELD_TRIGGER_VALUE_TYPOGRAPHY_SX,
+    color: darkPanel ? FIELD_TEXT : 'rgba(0,0,0,0.87)',
+  };
+}
+
+/** Hover строки чата/секции с учётом светлого или тёмного фона панели. */
+export function getSidebarChatRowHoverBg(panelIsLight: boolean): string {
+  return panelIsLight ? 'rgba(0,0,0,0.06)' : 'rgba(255,255,255,0.08)';
+}
 
 // ─── Стиль выпадающего окна (кнопка + Popover), как у «Агенты» / «Категория» ───
 

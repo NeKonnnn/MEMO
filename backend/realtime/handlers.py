@@ -114,6 +114,42 @@ REINDEX_WAIT_MESSAGE = (
     "временно недоступен. Повторите вопрос через пару минут."
 )
 
+# Номер генерации на сокет. Флаг остановки один на сокет, а генераций в один
+# момент может быть две
+_generation_seq: Dict[str, int] = {}
+# Всё, что запущено НЕ ПОЗЖЕ этого номера, считается остановленным.
+_stopped_upto: Dict[str, int] = {}
+# Номер СВОЕЙ генерации. ContextVar, а не аргумент: значение доезжает и в
+# рабочие потоки - _make_ctx_runner копирует контекст перед run_in_executor
+_my_generation: contextvars.ContextVar = contextvars.ContextVar(
+    "chat_generation", default=0
+)
+
+def _begin_generation(sid: str) -> int:
+    """Начать новую генерацию на этом сокете и запомнить её номер в контексте."""
+    seq = _generation_seq.get(sid, 0) + 1
+    _generation_seq[sid] = seq
+    _my_generation.set(seq)
+    return seq
+
+def _generation_stopped(sid: str) -> bool:
+    """Остановлена ли ИМЕННО эта генерация.
+
+    Заменяет stop_generation_flags.get(sid): общий флаг отвечал на вопрос
+    «нажимал ли пользователь стоп хоть когда-нибудь на этом сокете», а не
+    «остановили ли меня». Из-за этого новый запрос снимал стоп со старого.
+    """
+    my = _my_generation.get()
+    if not my:
+        # Номера нет - генерацию начали в обход _begin_generation. Считать её
+        # остановленной нельзя: молча пропадёт весь ответ.
+        return False
+    return _stopped_upto.get(sid, 0) >= my
+
+def _forget_generation(sid: str) -> None:
+    _generation_seq.pop(sid, None)
+    _stopped_upto.pop(sid, None)
+
 async def _abort_chat_reindex(
     sio, sid, conversation_id, project_id, current_user
 ) -> None:
@@ -485,6 +521,7 @@ def register_handlers(sio):
     async def disconnect(sid):
         logger.debug(f"Socket.IO client disconnected: {sid}")
         stop_generation_flags.pop(sid, None)
+        _forget_generation(sid)
 
     @sio.event
     async def ping(sid, data):
@@ -499,6 +536,9 @@ def register_handlers(sio):
     async def stop_generation(sid, data):
         logger.info(f"Socket.IO: команда остановки генерации от {sid}")
         stop_generation_flags[sid] = True
+        # Останавливаем всё, что уже запущено на этом сокете. Генерация,
+        # начатая ПОСЛЕ нажатия, этим стопом не затрагивается.
+        _stopped_upto[sid] = _generation_seq.get(sid, 0)
         await sio.emit(
             "generation_stopped",
             {"content": "Генерация остановлена", "timestamp": datetime.now().isoformat()},
@@ -548,7 +588,9 @@ def register_handlers(sio):
                 enable_thinking = False
             else:
                 enable_thinking = bool(_et)
-            stop_generation_flags[sid] = False
+            # Новая генерация получает свой номер. Общий флаг больше не трогаем:
+            # он снимал стоп с еще живой предыдущей генерации.
+            _begin_generation(sid)
             user_message_id = data.get("message_id", None)
             conversation_id = data.get("conversation_id", None)
             use_kb_rag = bool(data.get("use_kb_rag", False))
@@ -572,11 +614,22 @@ def register_handlers(sio):
                 agent_profile, validated_user.get("user_id") if validated_user else None
             )
             _agent_ms = agent_profile.get("model_settings") if isinstance(agent_profile, dict) else None
-            if data.get("agent_id") and isinstance(_agent_ms, dict) and _agent_ms:
-                model_runtime_token = bind_user_model_runtime(_agent_ms)
+            # Биндим ИТОГ (персональные настройки + карточка агента поверх), а не
+            # одну карточку: иначе ключи, которых в ней нет, приезжали бы из
+            # заводских дефолтов, а «Настройки → Модели» не работали бы нигде.
+            # Без агента итог — это персональные настройки, их тоже надо
+            # применить: раньше обычный чат жил на дефолтах кластера.
+            _eff_ms = (
+                agent_profile.get("effective_model_settings")
+                if isinstance(agent_profile, dict)
+                else None
+            )
+            if isinstance(_eff_ms, dict) and _eff_ms:
+                model_runtime_token = bind_user_model_runtime(_eff_ms)
                 logger.info(
-                    "[LLM] Тонкая настройка активного агента id=%s применена к запросу",
+                    "[LLM] Настройка генерации: агент id=%s поверх персональных user_id=%s",
                     data.get("agent_id"),
+                    validated_user.get("user_id") if validated_user else None,
                 )
             _ams_stream = _agent_ms.get("streaming") if isinstance(_agent_ms, dict) else None
             if _ams_stream is not None:
@@ -757,7 +810,7 @@ def register_handlers(sio):
             loop = asyncio.get_event_loop()
 
             def sync_stream_cb(chunk, acc, stream_role="content"):
-                if stop_generation_flags.get(sid, False):
+                if _generation_stopped(sid):
                     return False
                 asyncio.run_coroutine_threadsafe(async_stream_cb(chunk, acc, stream_role), loop)
                 return True
@@ -1078,6 +1131,17 @@ async def _handle_multi_llm(
             from backend.services.skills import append_to_system_prompt
 
             prompt = append_to_system_prompt(prompt, skill_append)
+        try:
+            from backend.prompts.artifacts import maybe_artifacts_prompt_for_agent
+            from backend.services.skills import append_to_system_prompt as _append_sp
+
+            artifacts_block = maybe_artifacts_prompt_for_agent(
+                agent_profile if isinstance(agent_profile, dict) else None
+            )
+            if artifacts_block:
+                prompt = _append_sp(prompt, artifacts_block)
+        except Exception:
+            logger.exception("[multi-llm] artifacts prompt injection failed")
         return prompt
 
     canned = await maybe_rag_no_evidence_message(
@@ -1227,7 +1291,7 @@ async def _handle_multi_llm(
             model_path = model_name
 
             def _model_stream_cb(chunk, acc):
-                if stop_generation_flags.get(sid, False):
+                if _generation_stopped(sid):
                     return False
                 asyncio.run_coroutine_threadsafe(
                     sio.emit("multi_llm_chunk", {"model": model_name, "chunk": chunk, "accumulated": acc}, room=sid),
@@ -1379,7 +1443,7 @@ async def _handle_agent_mode(
 
     async def agent_stream_cb(chunk, acc, stream_role="content"):
         nonlocal reasoning_trace_accumulated
-        if stop_generation_flags.get(sid, False):
+        if _generation_stopped(sid):
             return False
         if stream_role == "reasoning":
             if isinstance(acc, str) and acc:
@@ -1437,6 +1501,18 @@ async def _handle_agent_mode(
             context["agent_system_prompt"] = (
                 f"{(context.get('agent_system_prompt') or '').rstrip()}\n\n{skill_append}".strip()
             )
+        try:
+            from backend.prompts.artifacts import maybe_artifacts_prompt_for_agent
+
+            artifacts_block = maybe_artifacts_prompt_for_agent(
+                agent_profile if isinstance(agent_profile, dict) else None
+            )
+            if artifacts_block:
+                context["agent_system_prompt"] = (
+                    f"{(context.get('agent_system_prompt') or '').rstrip()}\n\n{artifacts_block}".strip()
+                )
+        except Exception:
+            logger.exception("[agent] artifacts prompt injection failed")
         if lazy_skill_ids:
             context["__skill_ids__"] = lazy_skill_ids
         if allowed_tools_extra:
@@ -1584,8 +1660,7 @@ async def _handle_agent_mode(
     )
     try:
         response = await orchestrator.process_message(effective_message, history=history, context=context)
-        if stop_generation_flags.get(sid, False):
-            stop_generation_flags[sid] = False
+        if _generation_stopped(sid):
             await sio.emit("generation_stopped", {"message": "Генерация остановлена"}, room=sid)
             return
         if response is None:
@@ -1949,6 +2024,17 @@ async def _handle_direct(
             data["tool_ids"] = list(dict.fromkeys([*existing, *allowed_tools_extra]))
     except Exception:
         logger.exception("[direct] skills injection failed")
+    try:
+        from backend.prompts.artifacts import maybe_artifacts_prompt_for_agent
+        from backend.services.skills import append_to_system_prompt
+
+        artifacts_block = maybe_artifacts_prompt_for_agent(
+            agent_profile if isinstance(agent_profile, dict) else None
+        )
+        if artifacts_block:
+            eff_system_prompt = append_to_system_prompt(eff_system_prompt, artifacts_block)
+    except Exception:
+        logger.exception("[direct] artifacts prompt injection failed")
     canned = await maybe_rag_no_evidence_message(
         rag_client,
         block_when_no_evidence=rag_block,
@@ -2127,8 +2213,7 @@ async def _handle_direct(
             response = await asyncio.get_event_loop().run_in_executor(
                 ex, _make_ctx_runner(lambda: _run_ask(True, _direct_stream_cb))
             )
-        if response is None or stop_generation_flags.get(sid, False):
-            stop_generation_flags[sid] = False
+        if response is None or _generation_stopped(sid):
             await sio.emit("generation_stopped", {"message": "Генерация остановлена"}, room=sid)
             chat_timer.mark("llm", time.perf_counter() - _t_llm0)
             chat_timer.log(logger)
@@ -2141,11 +2226,9 @@ async def _handle_direct(
     chat_timer.mark("llm", time.perf_counter() - _t_llm0)
     if context_added and (not canned) and response:
         response = await maybe_replace_ungrounded(final_message[:20000], response, RAG_STRICT_NOT_FOUND_MESSAGE)
-    if stop_generation_flags.get(sid, False):
-        stop_generation_flags[sid] = False
+    if _generation_stopped(sid):
         await sio.emit("generation_stopped", {"message": "Генерация остановлена"}, room=sid)
         return
-    stop_generation_flags[sid] = False
     # Сначала отдаём ответ в UI: зависание Mongo на regenerate не должно
     # блокировать стрим и кнопку «Стоп».
     payload = {

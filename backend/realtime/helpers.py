@@ -10,6 +10,11 @@ from backend.settings.rag_client import RagReindexInProgress
 
 logger = get_logger(__name__)
 
+# Заглушка конструктора агентов. Карточка требует промпт длиной от 10 символов
+# (AgentCreate.system_prompt, min_length=10), поэтому за пустое поле фронт
+# подставляет эту фразу - и дальше она жила как настоящая инструкция агента
+AGENT_PROMPT_PLACEHOLDER = "Системные инструкции не заданы."
+
 
 def _is_structure_query(text: str) -> bool:
     """Запрос про оглавление/структуру/главы - добавляем начало документа в RAG"""
@@ -107,28 +112,36 @@ async def kb_search_agent_documents(
     """Поиск по KB только внутри document_id, привязанных к агенту."""
     if not rag_client or not kb_doc_ids:
         return []
-    hits_out: List[Tuple[str, float, Optional[int], Optional[int]]] = []
-    for doc_id in kb_doc_ids:
+    ids: List[int] = []
+    for raw in kb_doc_ids:
         try:
-            hits = await rag_client.kb_search(
-                query,
-                k=max(1, k),
-                document_id=int(doc_id),
-                strategy=strategy,
-            )
-            if hits:
-                hits_out.extend(hits)
-        except RagReindexInProgress:
-            raise
-        except Exception:
-            logger.exception("KB search по doc_id=")
-    hits_out.sort(key=lambda h: float(h[1]) if h and len(h) > 1 else 0.0, reverse=True)
-    return hits_out[:k]
+            ids.append(int(raw))
+        except (TypeError, ValueError):
+            continue
+    if not ids:
+        return []
+    # ОДИН запрос на все документы агента: раньше был цикл, и svc-rag заново
+    # считал эмбеддинг вопроса для каждого файла (с тяжёлой моделью — минуты).
+    # Заодно top-k теперь считается по корпусу агента, а не по каждому файлу.
+    try:
+        hits = await rag_client.kb_search(
+            query,
+            k=max(1, k),
+            document_ids=ids,
+            strategy=strategy,
+        )
+    except RagReindexInProgress:
+        raise
+    except Exception:
+        logger.exception("KB search по документам агента %s", ids)
+        return []
+    return list(hits)[:k]
 
 
 async def _resolve_agent_chat_params(agent_id_raw, user_id=None) -> dict:
     """Модель и параметры из карточки агента (конструктор)."""
     empty = {
+        "name": None,
         "model_path": None,
         "max_tokens": None,
         "temperature": None,
@@ -139,6 +152,9 @@ async def _resolve_agent_chat_params(agent_id_raw, user_id=None) -> dict:
         "skills_enabled": False,
         "mcp_enabled": False,
         "mcp_server_ids": [],
+        "artifacts_enabled": False,
+        "shadcn_enabled": False,
+        "user_prompt_mode": False,
     }
     if agent_id_raw is None:
         return empty
@@ -160,7 +176,7 @@ async def _resolve_agent_chat_params(agent_id_raw, user_id=None) -> dict:
             return empty
         cfg = ag.config if isinstance(ag.config, dict) else {}
         mp = str(cfg.get("model") or cfg.get("model_path") or "").strip()
-        out = {**empty}
+        out = {**empty, "name": (ag.name or "").strip() or None}
         if mp:
             low = mp.lower()
             if low.startswith("1lm-svc://"):
@@ -174,6 +190,7 @@ async def _resolve_agent_chat_params(agent_id_raw, user_id=None) -> dict:
                 out["model_path"] = f"llm-svc://{mp}"
         ms = cfg.get("model_settings")
         if isinstance(ms, dict):
+            out["model_settings"] = dict(ms)
             if ms.get("output_tokens") is not None:
                 try:
                     out["max_tokens"] = int(ms["output_tokens"])
@@ -185,7 +202,11 @@ async def _resolve_agent_chat_params(agent_id_raw, user_id=None) -> dict:
                 except (TypeError, ValueError):
                     pass
         sp = (ag.system_prompt or "").strip()
-        if sp:
+        # Заглушку отсеиваем здесь, а не у каждого потребителя: из этого поля
+        # промпт агента забирают и обычный чат, и мульти-LLM, и agent mode
+        # Фильтр стоял только в agent mode, в остальных фраза уезжала в модель
+        # как инструкция, а после коммита 5 ещё и с приоритетом над правилами
+        if sp and sp != AGENT_PROMPT_PLACEHOLDER:
             out["system_prompt"] = sp
         out["file_search_enabled"] = bool(cfg.get("file_search_enabled", False))
         raw_kb_ids = cfg.get("kb_document_ids")
@@ -208,12 +229,18 @@ async def _resolve_agent_chat_params(agent_id_raw, user_id=None) -> dict:
         raw_mcp_ids = cfg.get("mcp_server_ids")
         if isinstance(raw_mcp_ids, list):
             out["mcp_server_ids"] = [str(v).strip() for v in raw_mcp_ids if str(v).strip()]
+        out["artifacts_enabled"] = bool(cfg.get("artifacts_enabled", False))
+        out["shadcn_enabled"] = bool(cfg.get("shadcn_enabled", False))
+        out["user_prompt_mode"] = bool(cfg.get("user_prompt_mode", False))
         logger.info(
             f"[chat] agent_id={aid} → model_path={out['model_path']}, "
             f"max_tokens={out['max_tokens']}, temperature={out['temperature']}, "
             f"file_search={out['file_search_enabled']}, "
             f"kb_document_ids={out['kb_document_ids']}, "
-            f"mcp_enabled={out['mcp_enabled']}, mcp_server_ids={out['mcp_server_ids']}"
+            f"mcp_enabled={out['mcp_enabled']}, mcp_server_ids={out['mcp_server_ids']}, "
+            f"artifacts_enabled={out['artifacts_enabled']}, "
+            f"shadcn_enabled={out['shadcn_enabled']}, "
+            f"user_prompt_mode={out['user_prompt_mode']}"
         )
         return out
     except Exception:

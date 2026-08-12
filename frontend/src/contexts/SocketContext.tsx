@@ -1135,6 +1135,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
         }
         isStoppedRef.current = true;
         expectMultiLlmResponseRef.current = false;
+        regenerationStateRef.current = null;
         
         // Убираем флаг стриминга у текущего сообщения
         if (currentChatIdRef.current && currentMessageRef.current) {
@@ -1599,6 +1600,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
       setChatLoading(currentChatIdRef.current, false);
     }
     expectMultiLlmResponseRef.current = false;
+    regenerationStateRef.current = null;
     clearMcpToolActivity();
     
     // Очищаем текущее сообщение и убираем флаг стриминга у всех сообщений

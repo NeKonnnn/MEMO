@@ -1,7 +1,14 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { Box, IconButton, Typography, Tooltip, Link, Paper, Table, TableBody, TableCell, TableContainer, TableHead, TableRow } from '@mui/material';
-import { ContentCopy as CopyIcon, Check as CheckIcon, Info as InfoIcon, Warning as WarningIcon, Error as ErrorIcon, CheckCircle as SuccessIcon, GetApp as DownloadIcon, Slideshow as SlideshowIcon } from '@mui/icons-material';
-import { isGpbPresentationHtml, isHtmlFenceLanguage, openPresentationViewer } from '../utils/presentationViewer';
+import { ContentCopy as CopyIcon, Check as CheckIcon, Info as InfoIcon, Warning as WarningIcon, Error as ErrorIcon, CheckCircle as SuccessIcon, GetApp as DownloadIcon } from '@mui/icons-material';
+import {
+  isGpbPresentationHtml,
+  isGpbPresentationStreaming,
+  isHtmlFenceLanguage,
+} from '../utils/presentationViewer';
+import InlinePresentationViewer from './InlinePresentationViewer';
+import ArtifactCard from './artifacts/ArtifactCard';
+import { splitContentWithArtifacts } from '../utils/artifacts';
 import Editor, { loader } from '@monaco-editor/react';
 import * as XLSX from 'xlsx';
 import CodeSelectionMenu from './CodeSelectionMenu';
@@ -20,6 +27,8 @@ interface MessageRendererProps {
   content: string;
   isStreaming?: boolean;
   onSendMessage?: (message: string) => void;
+  /** Стабильный id сообщения — для ключей артефактов. */
+  messageId?: string;
 }
 
 type FontSize = 'small' | 'medium' | 'large';
@@ -177,7 +186,7 @@ function stripOrphanEmIiTagsOnLine(str: string): string {
   return out;
 }
 
-const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isStreaming = false, onSendMessage }) => {
+const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isStreaming = false, onSendMessage, messageId }) => {
 
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
   const [fontSize, setFontSize] = useState<FontSize>(getFontSize());
@@ -531,14 +540,6 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
       setTimeout(() => setCopiedCode(null), 2000);
     } catch (error) {
       console.error('Failed to copy code:', error);
-    }
-  };
-
-  const handleOpenPresentation = (code: string) => {
-    try {
-      openPresentationViewer(code);
-    } catch (error) {
-      console.error('Failed to open presentation viewer:', error);
     }
   };
 
@@ -1117,54 +1118,79 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
 
   // Функция для парсинга Markdown
   const parseMarkdown = (text: string) => {
-    // Обрабатываем кодовые блоки (включая незавершенные при стриминге)
-    // Сначала ищем полные блоки, потом незавершенные
-    const parts = text.split(/(```[\s\S]*?```|```[\s\S]*$)/g);
-    
-    return parts.map((part, index) => {
-      // Проверяем полные кодовые блоки
-      if (part.startsWith('```') && part.endsWith('```')) {
-        return renderCodeBlock(part, index);
+    // Сначала вырезаем :::artifact — внутри них свои fence ```, обычный split ломается.
+    const segments = splitContentWithArtifacts(text, { messageId, isStreaming });
+
+    return segments.map((segment, segIndex) => {
+      if (segment.kind === 'artifact') {
+        return (
+          <ArtifactCard
+            key={`artifact-${segment.artifact.id}-${segIndex}`}
+            artifact={segment.artifact}
+            isStreaming={isStreaming}
+            autoOpen={Boolean(isStreaming)}
+          />
+        );
       }
-      
-      // Проверяем незавершенные кодовые блоки (при стриминге)
-      if (part.startsWith('```') && !part.endsWith('```') && isStreaming) {
-        // Добавляем временные закрывающие ```, чтобы код отрендерился
-        return renderCodeBlock(part + '\n```', index);
-      }
-      
-      // Проверяем на ASCII таблицу
-      if (isAsciiTable(part)) {
-        const extraction = extractAsciiTable(part);
-        if (extraction) {
-          const { headers, rows } = parseAsciiTable(extraction.table);
-          
-          return (
-            <React.Fragment key={index}>
-              {renderTable(headers, rows, index)}
-              {extraction.remaining.trim() && renderMarkdownText(extraction.remaining, index + 1000)}
-            </React.Fragment>
-          );
-        }
-      }
-      
-      // Проверяем на Markdown таблицу (может быть в любом месте текста)
-      const tableExtraction = extractMarkdownTable(part);
-      if (tableExtraction) {
-        const tableData = parseMarkdownTable(tableExtraction.table);
-        if (tableData) {
-          return (
-            <React.Fragment key={index}>
-              {tableExtraction.before.trim() && renderMarkdownText(tableExtraction.before, index * 1000 + 1)}
-              {renderTable(tableData.headers, tableData.rows, index * 1000 + 2)}
-              {tableExtraction.after.trim() && renderMarkdownText(tableExtraction.after, index * 1000 + 3)}
-            </React.Fragment>
-          );
-        }
-      }
-      
-      // Обрабатываем обычный текст с Markdown
-      return renderMarkdownText(part, index);
+
+      const partText = segment.text;
+      const parts = partText.split(/(```[\s\S]*?```|```[\s\S]*$)/g);
+
+      return (
+        <React.Fragment key={`seg-${segIndex}`}>
+          {parts.map((part, index) => {
+            if (part.startsWith('```') && part.endsWith('```')) {
+              return renderCodeBlock(part, segIndex * 10000 + index);
+            }
+
+            if (part.startsWith('```') && !part.endsWith('```') && isStreaming) {
+              return renderCodeBlock(part + '\n```', segIndex * 10000 + index);
+            }
+
+            if (isAsciiTable(part)) {
+              const extraction = extractAsciiTable(part);
+              if (extraction) {
+                const { headers, rows } = parseAsciiTable(extraction.table);
+                return (
+                  <React.Fragment key={segIndex * 10000 + index}>
+                    {renderTable(headers, rows, segIndex * 10000 + index)}
+                    {extraction.remaining.trim() &&
+                      renderMarkdownText(extraction.remaining, segIndex * 10000 + index + 1000)}
+                  </React.Fragment>
+                );
+              }
+            }
+
+            const tableExtraction = extractMarkdownTable(part);
+            if (tableExtraction) {
+              const tableData = parseMarkdownTable(tableExtraction.table);
+              if (tableData) {
+                return (
+                  <React.Fragment key={segIndex * 10000 + index}>
+                    {tableExtraction.before.trim() &&
+                      renderMarkdownText(
+                        tableExtraction.before,
+                        (segIndex * 10000 + index) * 1000 + 1,
+                      )}
+                    {renderTable(
+                      tableData.headers,
+                      tableData.rows,
+                      (segIndex * 10000 + index) * 1000 + 2,
+                    )}
+                    {tableExtraction.after.trim() &&
+                      renderMarkdownText(
+                        tableExtraction.after,
+                        (segIndex * 10000 + index) * 1000 + 3,
+                      )}
+                  </React.Fragment>
+                );
+              }
+            }
+
+            return renderMarkdownText(part, segIndex * 10000 + index);
+          })}
+        </React.Fragment>
+      );
     });
   };
 
@@ -1221,17 +1247,99 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
       };
       
       const editorLanguage = languageMap[language] || language || 'plaintext';
-      // Презентация: fence html/HTML ИЛИ содержимое похоже на GPB-слайды
-      // (модель иногда пишет ``` без языка или с другим тегом).
+
+      // Fallback: обычный ```mermaid / ```svg без :::artifact всё равно открываем как артефакт
+      // (модели часто забывают обёртку, а пользователю нужна визуализация).
+      const langLower = (language || '').toLowerCase();
+      const looksLikeMermaidSource =
+        /^\s*(graph|flowchart|sequenceDiagram|classDiagram|stateDiagram|erDiagram|journey|gantt|pie|mindmap|timeline|gitGraph|xychart-beta|xychart)\b/m.test(
+          code,
+        );
+      if (langLower === 'mermaid' || (looksLikeMermaidSource && langLower === 'text')) {
+        const artifact = {
+          id: `fence-mermaid-${messageId || 'msg'}-${index}`,
+          identifier: `mermaid-diagram-${index}`,
+          type: 'application/vnd.mermaid',
+          title: 'Диаграмма',
+          content: code,
+          closed: !(isStreaming && !codeBlock.endsWith('```')),
+          messageId,
+        };
+        return (
+          <ArtifactCard
+            key={`fence-artifact-mermaid-${index}`}
+            artifact={artifact}
+            isStreaming={isStreaming}
+            autoOpen={Boolean(isStreaming)}
+          />
+        );
+      }
+      if (langLower === 'svg' || (langLower === 'xml' && /<svg[\s>]/i.test(code))) {
+        const artifact = {
+          id: `fence-svg-${messageId || 'msg'}-${index}`,
+          identifier: `svg-image-${index}`,
+          type: 'image/svg+xml',
+          title: 'SVG',
+          content: code,
+          closed: true,
+          messageId,
+        };
+        return (
+          <ArtifactCard
+            key={`fence-artifact-svg-${index}`}
+            artifact={artifact}
+            isStreaming={isStreaming}
+            autoOpen={Boolean(isStreaming)}
+          />
+        );
+      }
+
+      // Обычный HTML (диаграммы, страницы) → inline-артефакт, НЕ presentation viewer.
+      // Presentation viewer только для GPB-слайдов (.slide / content-zone / …).
       const isPresentationHtml =
-        isGpbPresentationHtml(code) &&
-        (isHtmlFenceLanguage(language) ||
-          isHtmlFenceLanguage(editorLanguage) ||
-          language === 'text' ||
-          language === 'plaintext' ||
-          !language);
+        isGpbPresentationHtml(code) ||
+        (isStreaming && isGpbPresentationStreaming(code, language || editorLanguage));
+
+      if (
+        !isPresentationHtml &&
+        (isHtmlFenceLanguage(language) || isHtmlFenceLanguage(editorLanguage))
+      ) {
+        const artifact = {
+          id: `fence-html-${messageId || 'msg'}-${index}`,
+          identifier: `html-preview-${index}`,
+          type: 'text/html',
+          title: 'HTML',
+          content: code,
+          closed: !(isStreaming && !String(codeBlock).trimEnd().endsWith('```')),
+          messageId,
+        };
+        return (
+          <ArtifactCard
+            key={`fence-artifact-html-${index}`}
+            artifact={artifact}
+            isStreaming={isStreaming}
+            autoOpen={Boolean(isStreaming)}
+          />
+        );
+      }
+
+      // Презентация GPB: при стриме — viewer со спиннером, когда уже есть признаки слайдов.
+      if (isPresentationHtml && isStreaming) {
+        return (
+          <InlinePresentationViewer
+            key={`presentation-${index}`}
+            html={code}
+            isStreaming
+          />
+        );
+      }
+
       const codeLineCount = Math.max(1, code.split('\n').length);
-      const editorHeight = Math.max(120, codeLineCount * 22 + 18);
+      // Для HTML презентаций не раздуваем Monaco на тысячи px — фиксированная высота + скролл.
+      // Иначе в Collapse «Показать HTML» редактор часто рисует пустую половину.
+      const editorHeight = isPresentationHtml
+        ? Math.min(480, Math.max(200, Math.min(codeLineCount, 22) * 22 + 18))
+        : Math.max(120, codeLineCount * 22 + 18);
 
       // Получаем или создаём стабильный путь для этого блока кода.
       // Путь должен быть уникальным глобально (разные MessageRenderer-экземпляры),
@@ -1243,9 +1351,9 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
         editorPath = `readonly://${editorLanguage}/${uid}-${index}.code`;
         codeBlockPathsRef.current.set(pathKey, editorPath);
       }
-      
-      return (
-        <Box key={index} sx={{ position: 'relative', my: 2 }}>
+
+      const codeEditorBlock = (
+        <Box key={isPresentationHtml ? undefined : index} sx={{ position: 'relative', my: isPresentationHtml ? 0 : 2 }}>
           <Box
             sx={{
               backgroundColor: '#1e1e1e',
@@ -1316,27 +1424,9 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
                     <DownloadIcon fontSize="small" />
                   </IconButton>
                 </Tooltip>
-                {isPresentationHtml && (
-                  <Tooltip title="Просмотр презентации и экспорт PPTX">
-                    <IconButton
-                      size="small"
-                      onClick={() => handleOpenPresentation(code)}
-                      sx={{
-                        color: '#cccccc',
-                        transition: 'all 0.2s',
-                        '&:hover': {
-                          backgroundColor: 'rgba(255,255,255,0.1)',
-                          color: '#73B0FF',
-                        },
-                      }}
-                    >
-                      <SlideshowIcon fontSize="small" />
-                    </IconButton>
-                  </Tooltip>
-                )}
               </Box>
             </Box>
-            
+
             {/* Код с подсветкой синтаксиса */}
             <Box
               sx={{
@@ -1346,7 +1436,6 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
                 '& .monaco-editor .margin': {
                   backgroundColor: '#1e1e1e',
                 },
-                // Не обрезать трёхзначные номера строк в gutter
                 '& .monaco-editor .margin-view-overlays .line-numbers': {
                   width: '100% !important',
                   textAlign: 'right',
@@ -1402,6 +1491,13 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
                     },
                   });
                 }}
+                onMount={(editor) => {
+                  // После открытия Collapse Monaco часто остаётся с нулевым viewport.
+                  requestAnimationFrame(() => {
+                    editor.layout();
+                    requestAnimationFrame(() => editor.layout());
+                  });
+                }}
                 options={{
                   readOnly: true,
                   readOnlyMessage: { value: 'Код только для чтения' },
@@ -1409,10 +1505,8 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
                   contextmenu: true,
                   folding: true,
                   foldingStrategy: 'auto',
-                  // glyphMargin съедал место у номеров строк — для readonly не нужен
                   glyphMargin: false,
                   lineNumbers: codeLineCount > 5 ? 'on' : 'off',
-                  // +1 символ запаса: иначе 100+ обрезаются/наезжают
                   lineNumbersMinChars: Math.max(3, String(codeLineCount).length + 1),
                   renderLineHighlight: 'all',
                   scrollBeyondLastLine: false,
@@ -1428,8 +1522,8 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
                   fontSize: 14,
                   lineHeight: 22,
                   scrollbar: {
-                    vertical: 'hidden',
-                    horizontal: 'hidden',
+                    vertical: isPresentationHtml ? 'auto' : 'hidden',
+                    horizontal: isPresentationHtml ? 'auto' : 'hidden',
                     alwaysConsumeMouseWheel: false,
                   },
                   overviewRulerLanes: 0,
@@ -1439,6 +1533,20 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
           </Box>
         </Box>
       );
+
+      // Готовая презентация — viewer в чате, HTML по кнопке «код».
+      if (isPresentationHtml) {
+        return (
+          <InlinePresentationViewer
+            key={`presentation-${index}`}
+            html={code}
+            isStreaming={false}
+            sourceSlot={codeEditorBlock}
+          />
+        );
+      }
+
+      return codeEditorBlock;
     }
     return null;
   };
@@ -2135,10 +2243,14 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
 };
 
 // Мемоизируем компонент, чтобы он НЕ ререндерился при каждом рендере родителя
-// Ререндер произойдет ТОЛЬКО если изменятся props: content, isStreaming, onSendMessage
+// Ререндер произойдет ТОЛЬКО если изменятся props: content, isStreaming, onSendMessage, messageId
 const MessageRenderer = React.memo(MessageRendererComponent, (prevProps, nextProps) => {
-  return prevProps.content === nextProps.content &&
-         prevProps.isStreaming === nextProps.isStreaming;
+  return (
+    prevProps.content === nextProps.content &&
+    prevProps.isStreaming === nextProps.isStreaming &&
+    prevProps.onSendMessage === nextProps.onSendMessage &&
+    prevProps.messageId === nextProps.messageId
+  );
 });
 
 MessageRenderer.displayName = 'MessageRenderer';

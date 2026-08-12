@@ -18,7 +18,6 @@ import {
   ListItemButton,
   ListItemText,
   ListItemIcon,
-  Avatar,
   Chip,
   Alert,
   InputLabel,
@@ -29,7 +28,6 @@ import {
 } from '@mui/material';
 import type { SxProps, Theme } from '@mui/material';
 import {
-  Add as AddIcon,
   Close as CloseIcon,
   Delete as DeleteIcon,
   Upload as UploadIcon,
@@ -61,17 +59,25 @@ import { useAppActions } from '../contexts/AppContext';
 import { loadAgentModelOnly } from '../utils/applyAgentServer';
 import { saveEntityRagSettings, type EntityRagDraft } from '../utils/entityRagSettings';
 import {
+  fetchRagEntityDefaults,
+  resolveRagEmbeddingModelPath,
+  resolveRagRerankerModelPath,
+} from '../constants/ragEntityDefaults';
+import {
   ASTRA_OPEN_AGENT_CONSTRUCTOR,
   ASTRA_OPEN_AGENT_CONSTRUCTOR_ID_KEY,
 } from '../constants/hotkeys';
 import {
-  DROPDOWN_CHEVRON_SX,
+  getDropdownChevronSx,
   getDropdownPopoverPaperSx,
-  DROPDOWN_ITEM_HOVER_BG,
+  getDropdownItemStateSx,
   getDropdownItemSx,
   getFormFieldInputSx,
-  FORM_FIELD_TRIGGER_SX,
-  FORM_FIELD_TRIGGER_VALUE_TYPOGRAPHY_SX,
+  getFormFieldTriggerSx,
+  getFormFieldTriggerValueSx,
+  getCategoryFieldSx,
+  flattenSx,
+  AGENT_CONSTRUCTOR_OUTLINED_INPUT_SX,
   SIDEBAR_HIDE_SCROLLBAR_SX,
 } from '../constants/menuStyles';
 import ModelParametersModal, { type ModelParamsState } from './ModelParametersModal';
@@ -83,6 +89,7 @@ import { applyAgentMcpToChat, persistAgentMcpConfig } from '../utils/applyAgentM
 import RAGSettings from './settings/RAGSettings';
 import { useRagEntityReadyMessage } from '../hooks/useRagEntityReadyMessage';
 import { fetchMergedUserAgents } from '../utils/fetchMergedUserAgents';
+import { getSidebarPanelBackground, getSidebarPanelChrome, getSidebarSecondaryButtonSx } from '../constants/sidebarPanelColor';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -170,12 +177,12 @@ function shortFileName(name: string, max = 22): string {
 function FieldLabel({ text, help, required }: { text: string; help?: string; required?: boolean }) {
   return (
     <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 0.5 }}>
-      <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.85)', fontWeight: 500, fontSize: '0.8rem' }}>
+      <Typography variant="caption" sx={{ color: 'inherit', opacity: 0.85, fontWeight: 500, fontSize: '0.8rem' }}>
         {text}{required && <span style={{ color: '#f44336', marginLeft: 2 }}>*</span>}
       </Typography>
       {help && (
         <Tooltip title={help} placement="top" arrow>
-          <HelpIcon sx={{ fontSize: 13, color: 'rgba(255,255,255,0.35)', cursor: 'help' }} />
+          <HelpIcon sx={{ fontSize: 13, color: 'inherit', opacity: 0.45, cursor: 'help' }} />
         </Tooltip>
       )}
     </Box>
@@ -186,7 +193,17 @@ function FieldLabel({ text, help, required }: { text: string; help?: string; req
 
 function SectionHeader({ children }: { children: React.ReactNode }) {
   return (
-    <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.5)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', fontSize: '0.7rem' }}>
+    <Typography
+      variant="caption"
+      sx={{
+        color: 'inherit',
+        opacity: 0.65,
+        fontWeight: 600,
+        textTransform: 'uppercase',
+        letterSpacing: '0.06em',
+        fontSize: '0.7rem',
+      }}
+    >
       {children}
     </Typography>
   );
@@ -198,9 +215,28 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
   const { token, user } = useAuth();
   const ragUserId = String(user?.user_id || user?.username || '').trim().toLowerCase();
   const { showNotification } = useAppActions();
-  const dropdownItemSx = useMemo(() => getDropdownItemSx(isDarkMode), [isDarkMode]);
-  // Панель конструктора всегда на цветном сайдбаре — текст как у кнопки «Агенты» (белый), не под светлую тему приложения.
-  const formFieldInputSx = useMemo(() => getFormFieldInputSx(true), []);
+  const [panelBg, setPanelBg] = useState(() => getSidebarPanelBackground());
+  const panelChrome = useMemo(() => getSidebarPanelChrome(panelBg), [panelBg]);
+  const secondaryBtnSx = useMemo(() => getSidebarSecondaryButtonSx(panelChrome), [panelChrome]);
+  const secondaryDashedBtnSx = useMemo(
+    () => getSidebarSecondaryButtonSx(panelChrome, { dashed: true }),
+    [panelChrome],
+  );
+  useEffect(() => {
+    const onColorChanged = () => setPanelBg(getSidebarPanelBackground());
+    window.addEventListener('sidebarColorChanged', onColorChanged);
+    return () => window.removeEventListener('sidebarColorChanged', onColorChanged);
+  }, []);
+  /** Тёмный chrome полей/меню — только на тёмной/цветной панели; на белой — чёрный текст. */
+  const darkFields = !panelChrome.isLight;
+  const dropdownItemSx = useMemo(() => getDropdownItemSx(darkFields), [darkFields]);
+  const dropdownChevronSx = useMemo(() => getDropdownChevronSx(darkFields), [darkFields]);
+  const formFieldTriggerSx = useMemo(() => getFormFieldTriggerSx(darkFields), [darkFields]);
+  const formFieldTriggerValueSx = useMemo(
+    () => getFormFieldTriggerValueSx(darkFields),
+    [darkFields],
+  );
+  const formFieldInputSx = useMemo(() => getFormFieldInputSx(darkFields), [darkFields]);
 
   /** Красная звёздочка у обязательного поля (MUI по умолчанию не всегда error.main). */
   const nameFieldSx = useMemo(
@@ -209,30 +245,13 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
     [formFieldInputSx],
   );
 
-  /** Категория: как outlined-поле, но без синей обводки/подписи при фокусе (открытии списка). */
+  /** Категория / MCP / Skills: outlined без синей обводки при фокусе (открытии списка). */
   const categoryFieldSx = useMemo(
     () =>
-      [
-        formFieldInputSx,
-        {
-          '& .MuiOutlinedInput-root': { cursor: 'pointer' },
-          '& .MuiOutlinedInput-root.Mui-focused fieldset': {
-            borderColor: 'rgba(255,255,255,0.23)',
-            borderWidth: '1px',
-          },
-          '& .MuiOutlinedInput-root:hover fieldset': {
-            borderColor: 'rgba(255,255,255,0.4)',
-          },
-          '& .MuiOutlinedInput-root.Mui-focused:hover fieldset': {
-            borderColor: 'rgba(255,255,255,0.4)',
-          },
-          '& .MuiInputLabel-root.Mui-focused': {
-            color: 'rgba(255,255,255,0.7)',
-          },
-          '& .MuiFormLabel-asterisk': { color: '#f44336' },
-        },
-      ] as SxProps<Theme>,
-    [formFieldInputSx],
+      flattenSx(getCategoryFieldSx(darkFields), {
+        '& .MuiFormLabel-asterisk': { color: '#f44336' },
+      }),
+    [darkFields],
   );
 
   const categoryOutlinedRef = useRef<HTMLDivElement>(null);
@@ -287,6 +306,8 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
   const [availableMcpServers, setAvailableMcpServers] = useState<McpServerConfigPublic[]>([]);
   const [mcpPopoverAnchor, setMcpPopoverAnchor] = useState<HTMLElement | null>(null);
   const mcpTriggerRef = useRef<HTMLDivElement>(null);
+  const [skillsPopoverAnchor, setSkillsPopoverAnchor] = useState<HTMLElement | null>(null);
+  const skillsTriggerRef = useRef<HTMLDivElement>(null);
 
   // Support contacts
   const [supportName, setSupportName] = useState('');
@@ -300,6 +321,8 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
   const [showAgentRagSettingsPanel, setShowAgentRagSettingsPanel] = useState(false);
   const [modelParams, setModelParams] = useState<Partial<ModelParamsState>>({});
   const [agentModelSettings, setAgentModelSettings] = useState<ModelSettingsState>({ ...MODEL_SETTINGS_DEFAULT });
+  const [modelSettingsTouched, setModelSettingsTouched] = useState(false);
+  const [userModelSettings, setUserModelSettings] = useState<ModelSettingsState>({ ...MODEL_SETTINGS_DEFAULT });
   const [agentSearchQuery, setAgentSearchQuery] = useState('');
   const [agentPopoverAnchor, setAgentPopoverAnchor] = useState<HTMLElement | null>(null);
   const [categoryPopoverAnchor, setCategoryPopoverAnchor] = useState<HTMLElement | null>(null);
@@ -402,6 +425,22 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
     }
   }, []);
 
+  const loadUserModelSettings = useCallback(async () => {
+    try {
+      const headers: HeadersInit = tokenRef.current
+        ? { Authorization: `Bearer ${tokenRef.current}` }
+        : {};
+      const resp = await fetch(getApiUrl('/api/models/settings'), { headers });
+      if (!resp.ok) return;
+      const data = await resp.json();
+      if (data && typeof data === 'object') {
+        setUserModelSettings({ ...MODEL_SETTINGS_DEFAULT, ...data });
+      }
+    } catch (e) {
+      // silent: панель откроется на заводских значениях
+    }
+  }, []);
+
   const loadKbDocuments = useCallback(async () => {
     setIsLoadingKb(true);
     try {
@@ -481,6 +520,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
     bootstrappedOpenRef.current = true;
 
     void loadModels();
+    void loadUserModelSettings();
     void loadKbDocuments();
     void (async () => {
       try {
@@ -528,7 +568,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
         /* */
       }
     })();
-  }, [isOpen, loadAgents, loadModels, loadKbDocuments, selectExternalAgent]);
+  }, [isOpen, loadAgents, loadModels, loadUserModelSettings, loadKbDocuments, selectExternalAgent]);
 
   // Слушаем событие открытия с agentId (галерея / хоткей с detail)
   useEffect(() => {
@@ -566,9 +606,11 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
     setCategory(cfg.category || 'Общий');
     setModel(cfg.model || '');
     setModelParams((cfg.model_params as Partial<ModelParamsState>) || {});
+    const cfgModelSettings = cfg.model_settings as Partial<ModelSettingsState> | undefined;
+    setModelSettingsTouched(!!cfgModelSettings);
     setAgentModelSettings(
-      (cfg.model_settings as Partial<ModelSettingsState>)
-        ? { ...MODEL_SETTINGS_DEFAULT, ...(cfg.model_settings as Partial<ModelSettingsState>) }
+      cfgModelSettings
+        ? { ...MODEL_SETTINGS_DEFAULT, ...cfgModelSettings }
         : { ...MODEL_SETTINGS_DEFAULT }
     );
     setCodeInterpreter(!!cfg.code_interpreter);
@@ -613,6 +655,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
     setModel(availableModels[0] || '');
     setModelParams({});
     setAgentModelSettings({ ...MODEL_SETTINGS_DEFAULT });
+    setModelSettingsTouched(false);
     setCodeInterpreter(false);
     setWebSearch(false);
     setArtifactsEnabled(false);
@@ -685,7 +728,18 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
       }
     }
 
-    return { embeddingPath, rerankerPath, rerankingEnabled };
+    const envDefaults = await fetchRagEntityDefaults('agent');
+    return {
+      embeddingPath: resolveRagEmbeddingModelPath(
+        embeddingPath,
+        envDefaults.embeddingPath,
+      ),
+      rerankerPath: resolveRagRerankerModelPath(
+        rerankerPath,
+        envDefaults.rerankerPath,
+      ),
+      rerankingEnabled,
+    };
   }, [ragDraft, selectedAgentId]);
 
   // ─── KB Upload ───────────────────────────────────────────────────────────────
@@ -830,7 +884,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
         category,
         model: model.replace(/^1lm-svc:\/\//i, 'llm-svc://').replace(/\s+/g, ''),
         model_params: modelParams,
-        model_settings: agentModelSettings,
+        ...(modelSettingsTouched ? { model_settings: agentModelSettings } : {}),
         code_interpreter: codeInterpreter,
         web_search: webSearch,
         artifacts_enabled: artifactsEnabled,
@@ -919,7 +973,10 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
           scope: 'agent',
           entityId: savedId,
           entityName: name.trim(),
-          instructions: instructions.trim() || 'Системные инструкции не заданы.',
+          // Именно то, что человек написал. Заглушка нужна только карточке
+          // агента (там промпт обязателен), а в настройках РАГ она становилась
+          // системным промптом сущности
+          instructions: instructions.trim(),
           draft: ragDraft,
         });
         if (ragApplied.ok) {
@@ -1068,7 +1125,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
         flexDirection: 'column',
         height: '100%',
         overflow: 'hidden',
-        color: 'white',
+        color: panelChrome.fg,
       }}
     >
       {showModelParamsPanel ? (
@@ -1081,8 +1138,12 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
           providerModels={providerModels}
           providerIds={providerIds}
           initialParams={Object.keys(modelParams).length ? modelParams : undefined}
-          initialModelSettings={agentModelSettings}
-          onSaveModelSettings={readOnly ? undefined : setAgentModelSettings}
+          initialModelSettings={modelSettingsTouched ? agentModelSettings : userModelSettings}
+          onSaveModelSettings={(s) => {
+            // Сохранение в панели — это и есть «у агента своя тонкая настройка».
+            setAgentModelSettings(s);
+            setModelSettingsTouched(true);
+          }}
           readOnly={readOnly}
           onSave={(newModel, params) => {
             if (readOnly) {
@@ -1105,7 +1166,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
           draftValue={ragDraft}
           onDraftChange={readOnly ? undefined : setRagDraft}
           readOnly={readOnly}
-          isDarkMode={true}
+          isDarkMode={darkFields}
           panelTitle={
             selectedAgent?.name
               ? `Настройки РАГ: ${selectedAgent.name}`
@@ -1120,13 +1181,13 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
         {/* Кнопка «Агенты» */}
         <Box
           onClick={e => setAgentPopoverAnchor(e.currentTarget)}
-          sx={FORM_FIELD_TRIGGER_SX}
+          sx={formFieldTriggerSx}
         >
-          <Typography sx={{ ...FORM_FIELD_TRIGGER_VALUE_TYPOGRAPHY_SX, fontWeight: 600 }}>
+          <Typography sx={{ ...formFieldTriggerValueSx, fontWeight: 600 }}>
             Агенты
           </Typography>
           <ExpandMoreIcon
-            sx={{ ...DROPDOWN_CHEVRON_SX, transform: Boolean(agentPopoverAnchor) ? 'rotate(180deg)' : 'none' }}
+            sx={{ ...dropdownChevronSx, transform: Boolean(agentPopoverAnchor) ? 'rotate(180deg)' : 'none' }}
           />
         </Box>
 
@@ -1138,7 +1199,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
           anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
           transformOrigin={{ vertical: 'top', horizontal: 'left' }}
           slotProps={{
-            paper: { sx: getDropdownPopoverPaperSx(agentPopoverAnchor) },
+            paper: { sx: getDropdownPopoverPaperSx(agentPopoverAnchor, darkFields) },
           }}
         >
           {/* Строка поиска */}
@@ -1149,10 +1210,10 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
               px: 1.5,
               py: 0.9,
               gap: 1,
-              borderBottom: '1px solid rgba(255,255,255,0.07)',
+              borderBottom: darkFields ? '1px solid rgba(255,255,255,0.07)' : '1px solid rgba(0,0,0,0.08)',
             }}
           >
-            <SearchIcon sx={{ color: 'rgba(255,255,255,0.35)', fontSize: 16, flexShrink: 0 }} />
+            <SearchIcon sx={{ color: darkFields ? 'rgba(255,255,255,0.35)' : 'rgba(0,0,0,0.4)', fontSize: 16, flexShrink: 0 }} />
             <Box
               component="input"
               autoFocus
@@ -1164,9 +1225,9 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
                 bgcolor: 'transparent',
                 border: 'none',
                 outline: 'none',
-                color: 'white',
+                color: darkFields ? 'white' : 'rgba(0,0,0,0.87)',
                 fontSize: '0.82rem',
-                '&::placeholder': { color: 'rgba(255,255,255,0.3)' },
+                '&::placeholder': { color: darkFields ? 'rgba(255,255,255,0.3)' : 'rgba(0,0,0,0.4)' },
               }}
             />
           </Box>
@@ -1185,9 +1246,9 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
               onClick={() => { setSelectedAgentId('new'); setAgentPopoverAnchor(null); setAgentSearchQuery(''); }}
               sx={{
                 ...dropdownItemSx,
-                color: selectedAgentId === 'new' ? 'white' : 'rgba(255,255,255,0.5)',
+                ...getDropdownItemStateSx(darkFields, selectedAgentId === 'new'),
                 fontStyle: 'italic',
-                bgcolor: selectedAgentId === 'new' ? DROPDOWN_ITEM_HOVER_BG : 'transparent',
+                opacity: selectedAgentId === 'new' ? 1 : 0.7,
               }}
             >
               + Новый агент
@@ -1202,9 +1263,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
                   onClick={() => { setSelectedAgentId(a.id); setAgentPopoverAnchor(null); setAgentSearchQuery(''); }}
                   sx={{
                     ...dropdownItemSx,
-                    color: 'rgba(255,255,255,0.9)',
-                    fontWeight: selectedAgentId === a.id ? 600 : 400,
-                    bgcolor: selectedAgentId === a.id ? DROPDOWN_ITEM_HOVER_BG : 'transparent',
+                    ...getDropdownItemStateSx(darkFields, selectedAgentId === a.id),
                   }}
                 >
                   {a.name}
@@ -1213,7 +1272,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
 
             {/* Ничего не найдено */}
             {agentSearchQuery.trim() && (agents || []).filter(a => a.name.toLowerCase().includes(agentSearchQuery.toLowerCase())).length === 0 && (
-              <Box sx={{ px: 1.5, py: 1.5, fontSize: '0.78rem', color: 'rgba(255,255,255,0.3)', textAlign: 'center' }}>
+              <Box sx={{ px: 1.5, py: 1.5, fontSize: '0.78rem', color: darkFields ? 'rgba(255,255,255,0.3)' : 'rgba(0,0,0,0.4)', textAlign: 'center' }}>
                 Не найдено
               </Box>
             )}
@@ -1235,7 +1294,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
             bgcolor: readOnly ? 'rgba(100,181,246,0.08)' : 'rgba(102,187,106,0.08)',
           }}
         >
-          <Typography sx={{ fontSize: '0.72rem', color: 'rgba(255,255,255,0.75)' }}>
+          <Typography sx={{ fontSize: '0.72rem', color: 'inherit', opacity: 0.8 }}>
             {readOnly
               ? 'Общий агент · роль «Зритель» — только просмотр и использование, изменение недоступно.'
               : 'Общий агент · роль «Редактор» — можно изменять; удаление и повторный шаринг доступны только владельцу.'}
@@ -1258,25 +1317,6 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
         }}
       >
 
-        {/* Кнопка добавления аватара — по центру, как на скриншоте */}
-        <Box sx={{ display: 'flex', justifyContent: 'center', width: '100%', mb: 1.5 }}>
-          <Avatar
-            sx={{
-              width: 64,
-              height: 64,
-              bgcolor: 'rgba(33,150,243,0.25)',
-              border: '1px dashed rgba(255,255,255,0.25)',
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              '&:hover': { bgcolor: 'rgba(33,150,243,0.35)' },
-            }}
-          >
-            <AddIcon sx={{ fontSize: 32, color: 'rgba(255,255,255,0.5)' }} />
-          </Avatar>
-        </Box>
-
         {/* Имя и Описание — такие же по размеру, как поля «Имя» и «Электронная почта» в контактах поддержки */}
         <Box>
           <TextField
@@ -1293,7 +1333,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
             inputProps={{ maxLength: 255 }}
           />
           {agentIdStr && (
-            <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.3)', fontSize: '0.68rem', display: 'block', mt: 0.25 }}>
+            <Typography variant="caption" sx={{ color: panelChrome.fgSubtle, fontSize: '0.68rem', display: 'block', mt: 0.25 }}>
               {agentIdStr}
             </Typography>
           )}
@@ -1323,6 +1363,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
               label="Категория"
               value={category}
               readOnly
+              sx={AGENT_CONSTRUCTOR_OUTLINED_INPUT_SX}
               onClick={() => {
                 if (readOnly) return;
                 setCategoryPopoverAnchor(categoryOutlinedRef.current);
@@ -1330,7 +1371,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
               endAdornment={
                 <InputAdornment position="end">
                   <ExpandMoreIcon
-                    sx={{ ...DROPDOWN_CHEVRON_SX, transform: Boolean(categoryPopoverAnchor) ? 'rotate(180deg)' : 'none' }}
+                    sx={{ ...dropdownChevronSx, transform: Boolean(categoryPopoverAnchor) ? 'rotate(180deg)' : 'none' }}
                   />
                 </InputAdornment>
               }
@@ -1343,7 +1384,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
             anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
             transformOrigin={{ vertical: 'top', horizontal: 'left' }}
             slotProps={{
-              paper: { sx: getDropdownPopoverPaperSx(categoryPopoverAnchor) },
+              paper: { sx: getDropdownPopoverPaperSx(categoryPopoverAnchor, darkFields) },
             }}
           >
             <Box sx={{ py: 0.5 }}>
@@ -1353,9 +1394,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
                   onClick={() => { setCategory(c); setCategoryPopoverAnchor(null); }}
                   sx={{
                     ...dropdownItemSx,
-                    color: category === c ? 'white' : 'rgba(255,255,255,0.9)',
-                    fontWeight: category === c ? 600 : 400,
-                    bgcolor: category === c ? DROPDOWN_ITEM_HOVER_BG : 'transparent',
+                    ...getDropdownItemStateSx(darkFields, category === c),
                   }}
                 >
                   {c}
@@ -1393,10 +1432,11 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
               value={model ? (model.replace('llm-svc://', '').split('/').pop() || model) : ''}
               readOnly
               placeholder="Выберите модель"
+              sx={AGENT_CONSTRUCTOR_OUTLINED_INPUT_SX}
               onClick={() => setShowModelParamsPanel(true)}
               endAdornment={
                 <InputAdornment position="end">
-                  <ExpandMoreIcon sx={DROPDOWN_CHEVRON_SX} />
+                  <ExpandMoreIcon sx={dropdownChevronSx} />
                 </InputAdornment>
               }
             />
@@ -1507,16 +1547,15 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
         </Box>
         */}
 
-        {/* ── Artifacts (скрыто — см. COMMENTS.md) ─────────────────────────── */}
-        {/*
+        {/* ── Artifacts ────────────────────────────────────────────────────── */}
         <Box>
           <SectionHeader>Артефакты</SectionHeader>
           <Box sx={{ mt: 1, display: 'flex', flexDirection: 'column', gap: 0.5 }}>
             {[
-              { label: 'Включить артефакты', help: 'Артефакты — отдельно отображаемый контент (код, таблицы)', val: artifactsEnabled, set: setArtifactsEnabled },
-              { label: 'Включить компоненты shadcn/ui', help: 'Разрешить использование shadcn/ui компонентов', val: shadcnEnabled, set: setShadcnEnabled },
-              { label: 'Режим пользовательского промта', help: 'Расширенный пользовательский режим', val: userPromptMode, set: setUserPromptMode },
-            ].map(({ label, help, val, set }) => (
+              { label: 'Включить артефакты', help: 'Отдельная панель для HTML, Markdown, Mermaid, SVG и React. Промпт подмешивается к инструкциям агента.', val: artifactsEnabled, set: setArtifactsEnabled, disabled: false },
+              { label: 'Включить компоненты shadcn/ui', help: 'Доп. инструкции: модель может использовать shadcn/ui в React-артефактах (нужны включённые артефакты)', val: shadcnEnabled, set: setShadcnEnabled, disabled: !artifactsEnabled },
+              { label: 'Режим пользовательского промта', help: 'ВНИМАНИЕ: отключает стандартный промпт артефактов. Для теста оставьте ВЫКЛ. Включайте только если формат :::artifact описан вручную в инструкциях агента.', val: userPromptMode, set: setUserPromptMode, disabled: !artifactsEnabled },
+            ].map(({ label, help, val, set, disabled }) => (
               <Box key={label} sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
                   <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.78rem' }}>{label}</Typography>
@@ -1526,6 +1565,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
                 </Box>
                 <Switch
                   checked={val}
+                  disabled={disabled}
                   onChange={e => set(e.target.checked)}
                   size="small"
                   sx={{
@@ -1538,69 +1578,119 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
             ))}
           </Box>
         </Box>
-        */}
 
         {/* ── Skills ───────────────────────────────────────────────────────── */}
         <Box sx={{ minWidth: 0 }}>
           <SectionHeader>Skills</SectionHeader>
-          <FormControlLabel
-            control={
-              <Checkbox
-                size="small"
-                checked={skillsEnabled}
-                disabled={readOnly}
-                onChange={(e) => setSkillsEnabled(e.target.checked)}
-                sx={{ color: 'rgba(255,255,255,0.4)', '&.Mui-checked': { color: '#2196f3' }, p: 0.5 }}
-              />
-            }
-            label={
-              <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.75)', fontSize: '0.78rem' }}>
-                Включить skills для агента
-              </Typography>
-            }
-            sx={{ m: 0, mb: 1 }}
-          />
-          {!skillsEnabled ? (
-            <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.35)' }}>
-              Skills выключены для этого агента
-            </Typography>
-          ) : availableSkills.length === 0 ? (
-            <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.35)' }}>
-              Нет доступных skills
-            </Typography>
-          ) : (
-            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.25, maxHeight: 160, overflow: 'auto' }}>
-              {availableSkills.map((sk) => (
-                <FormControlLabel
-                  key={sk.id}
-                  control={
-                    <Checkbox
-                      size="small"
-                      disabled={readOnly}
-                      checked={skillIds.includes(sk.slug)}
-                      onChange={(e) => {
-                        setSkillIds((prev) =>
-                          e.target.checked
-                            ? [...prev.filter((x) => x !== sk.slug), sk.slug]
-                            : prev.filter((x) => x !== sk.slug),
-                        );
-                      }}
-                      sx={{ color: 'rgba(255,255,255,0.4)', '&.Mui-checked': { color: '#2196f3' }, p: 0.5 }}
-                    />
-                  }
-                  label={
-                    <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.75)', fontSize: '0.78rem' }}>
-                      {sk.name}{' '}
-                      <Box component="span" sx={{ opacity: 0.5 }}>
-                        (${sk.slug})
-                      </Box>
-                    </Typography>
-                  }
-                  sx={{ m: 0 }}
+          <Box sx={{ mt: 1 }}>
+            <FormControlLabel
+              control={
+                <Checkbox
+                  size="small"
+                  checked={skillsEnabled}
+                  disabled={readOnly}
+                  onChange={(e) => {
+                    const checked = e.target.checked;
+                    setSkillsEnabled(checked);
+                    if (!checked) setSkillIds([]);
+                  }}
+                  sx={{ color: panelChrome.fgSubtle, '&.Mui-checked': { color: '#2196f3' }, p: 0.5 }}
                 />
-              ))}
-            </Box>
-          )}
+              }
+              label={
+                <Typography variant="caption" sx={{ color: panelChrome.fgMuted, fontSize: '0.78rem' }}>
+                  Включить skills для агента
+                </Typography>
+              }
+              sx={{ m: 0, mb: skillsEnabled ? 1 : 0, '& .MuiFormControlLabel-label': { ml: 0.5 } }}
+            />
+            {skillsEnabled && (
+              <Box>
+                <FormControl variant="outlined" fullWidth size="small" sx={categoryFieldSx}>
+                  <InputLabel htmlFor="agent-constructor-skills">Skills</InputLabel>
+                  <OutlinedInput
+                    ref={skillsTriggerRef}
+                    id="agent-constructor-skills"
+                    label="Skills"
+                    value={
+                      skillIds.length === 0
+                        ? ''
+                        : skillIds.length === 1
+                          ? (availableSkills.find((s) => s.slug === skillIds[0])?.name || skillIds[0])
+                          : `Выбрано: ${skillIds.length}`
+                    }
+                    readOnly
+                    placeholder="Выберите skills"
+                    sx={AGENT_CONSTRUCTOR_OUTLINED_INPUT_SX}
+                    onClick={() => {
+                      if (readOnly) return;
+                      setSkillsPopoverAnchor(skillsTriggerRef.current);
+                    }}
+                    endAdornment={
+                      <InputAdornment position="end">
+                        <ExpandMoreIcon
+                          sx={{ ...dropdownChevronSx, transform: Boolean(skillsPopoverAnchor) ? 'rotate(180deg)' : 'none' }}
+                        />
+                      </InputAdornment>
+                    }
+                  />
+                </FormControl>
+                <Popover
+                  open={!readOnly && Boolean(skillsPopoverAnchor)}
+                  anchorEl={skillsPopoverAnchor}
+                  onClose={() => setSkillsPopoverAnchor(null)}
+                  anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
+                  transformOrigin={{ vertical: 'top', horizontal: 'left' }}
+                  slotProps={{
+                    paper: { sx: getDropdownPopoverPaperSx(skillsPopoverAnchor, darkFields) },
+                  }}
+                >
+                  <Box sx={{ py: 0.5, maxHeight: 220, overflowY: 'auto', ...SIDEBAR_HIDE_SCROLLBAR_SX }}>
+                    {availableSkills.length === 0 ? (
+                      <Box sx={{ px: 1.5, py: 1.5, fontSize: '0.78rem', color: darkFields ? 'rgba(255,255,255,0.35)' : 'rgba(0,0,0,0.45)', textAlign: 'center' }}>
+                        Нет доступных skills
+                      </Box>
+                    ) : (
+                      availableSkills.map((sk) => {
+                        const selected = skillIds.includes(sk.slug);
+                        return (
+                          <Box
+                            key={sk.id}
+                            onClick={() => {
+                              setSkillIds((prev) =>
+                                prev.includes(sk.slug)
+                                  ? prev.filter((x) => x !== sk.slug)
+                                  : [...prev, sk.slug],
+                              );
+                            }}
+                            sx={{
+                              ...dropdownItemSx,
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: 0.75,
+                              ...getDropdownItemStateSx(darkFields, selected),
+                            }}
+                          >
+                            {selected ? (
+                              <CheckBoxIcon sx={{ fontSize: 16, color: '#2196f3', flexShrink: 0 }} />
+                            ) : (
+                              <CheckBoxBlankIcon sx={{ fontSize: 16, color: darkFields ? 'rgba(255,255,255,0.35)' : 'rgba(0,0,0,0.35)', flexShrink: 0 }} />
+                            )}
+                            <Box sx={{ minWidth: 0 }}>
+                              <Box component="span" sx={{ display: 'block' }}>{sk.name}</Box>
+                              <Box component="span" sx={{ display: 'block', opacity: 0.5, fontSize: '0.72rem' }}>
+                                {sk.slug}
+                              </Box>
+                            </Box>
+                          </Box>
+                        );
+                      })
+                    )}
+                  </Box>
+                </Popover>
+              </Box>
+            )}
+          </Box>
         </Box>
 
         {/* ── MCP ──────────────────────────────────────────────────────────── */}
@@ -1618,16 +1708,16 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
                     setMcpEnabled(checked);
                     if (!checked) setMcpServerIds([]);
                   }}
-                  sx={{ color: 'rgba(255,255,255,0.4)', '&.Mui-checked': { color: '#2196f3' }, p: 0.5 }}
+                  sx={{ color: panelChrome.fgSubtle, '&.Mui-checked': { color: '#2196f3' }, p: 0.5 }}
                 />
               }
               label={
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-                  <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.75)', fontSize: '0.78rem' }}>
+                  <Typography variant="caption" sx={{ color: panelChrome.fgMuted, fontSize: '0.78rem' }}>
                     Добавить MCP
                   </Typography>
                   <Tooltip title="Подключить MCP-серверы astrachat к этому агенту. Настройка сохраняется в карточке агента и применяется при использовании из галереи." arrow>
-                    <HelpIcon sx={{ fontSize: 12, color: 'rgba(255,255,255,0.25)' }} />
+                    <HelpIcon sx={{ fontSize: 12, color: panelChrome.fgSubtle }} />
                   </Tooltip>
                 </Box>
               }
@@ -1650,6 +1740,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
                     }
                     readOnly
                     placeholder="Выберите MCP-серверы"
+                    sx={AGENT_CONSTRUCTOR_OUTLINED_INPUT_SX}
                     onClick={() => {
                       if (readOnly) return;
                       setMcpPopoverAnchor(mcpTriggerRef.current);
@@ -1657,7 +1748,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
                     endAdornment={
                       <InputAdornment position="end">
                         <ExpandMoreIcon
-                          sx={{ ...DROPDOWN_CHEVRON_SX, transform: Boolean(mcpPopoverAnchor) ? 'rotate(180deg)' : 'none' }}
+                          sx={{ ...dropdownChevronSx, transform: Boolean(mcpPopoverAnchor) ? 'rotate(180deg)' : 'none' }}
                         />
                       </InputAdornment>
                     }
@@ -1670,12 +1761,12 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
                   anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
                   transformOrigin={{ vertical: 'top', horizontal: 'left' }}
                   slotProps={{
-                    paper: { sx: getDropdownPopoverPaperSx(mcpPopoverAnchor) },
+                    paper: { sx: getDropdownPopoverPaperSx(mcpPopoverAnchor, darkFields) },
                   }}
                 >
                   <Box sx={{ py: 0.5, maxHeight: 220, overflowY: 'auto', ...SIDEBAR_HIDE_SCROLLBAR_SX }}>
                     {availableMcpServers.length === 0 ? (
-                      <Box sx={{ px: 1.5, py: 1.5, fontSize: '0.78rem', color: 'rgba(255,255,255,0.35)', textAlign: 'center' }}>
+                      <Box sx={{ px: 1.5, py: 1.5, fontSize: '0.78rem', color: darkFields ? 'rgba(255,255,255,0.35)' : 'rgba(0,0,0,0.45)', textAlign: 'center' }}>
                         Нет подключённых MCP-серверов
                       </Box>
                     ) : (
@@ -1696,15 +1787,13 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
                               display: 'flex',
                               alignItems: 'center',
                               gap: 0.75,
-                              color: selected ? 'white' : 'rgba(255,255,255,0.9)',
-                              fontWeight: selected ? 600 : 400,
-                              bgcolor: selected ? DROPDOWN_ITEM_HOVER_BG : 'transparent',
+                              ...getDropdownItemStateSx(darkFields, selected),
                             }}
                           >
                             {selected ? (
                               <CheckBoxIcon sx={{ fontSize: 16, color: '#2196f3', flexShrink: 0 }} />
                             ) : (
-                              <CheckBoxBlankIcon sx={{ fontSize: 16, color: 'rgba(255,255,255,0.35)', flexShrink: 0 }} />
+                              <CheckBoxBlankIcon sx={{ fontSize: 16, color: darkFields ? 'rgba(255,255,255,0.35)' : 'rgba(0,0,0,0.35)', flexShrink: 0 }} />
                             )}
                             {srv.display_name || srv.id}
                           </Box>
@@ -1734,19 +1823,23 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
                     if (on) setKbGuardMessage(null);
                   }}
                   size="small"
-                  sx={{ color: 'rgba(255,255,255,0.4)', '&.Mui-checked': { color: '#2196f3' }, p: 0.5 }}
+                  sx={{
+                    color: panelChrome.fgSubtle,
+                    '&.Mui-checked': { color: '#2196f3' },
+                    p: 0.5,
+                  }}
                 />
               }
               label={
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-                  <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.75)', fontSize: '0.78rem' }}>
+                  <Typography variant="caption" sx={{ color: panelChrome.fgMuted, fontSize: '0.78rem' }}>
                     Искать по файлам агента
                   </Typography>
                   <Tooltip
                     title="Файлы привязаны к этому агенту (не общая библиотека и не документы проекта). В чате поиск включается при выбранном агенте с этим флагом. Параметры индексации — в «Настройки РАГ для агента»."
                     arrow
                   >
-                    <HelpIcon sx={{ fontSize: 12, color: 'rgba(255,255,255,0.25)' }} />
+                    <HelpIcon sx={{ fontSize: 12, color: panelChrome.fgSubtle, opacity: 0.7 }} />
                   </Tooltip>
                 </Box>
               }
@@ -1756,7 +1849,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
             {/* KB files list — сетка по 2 карточки в ряд, цвет по типу файла */}
             {isLoadingKb ? (
               <Box sx={{ display: 'flex', justifyContent: 'center', py: 1 }}>
-                <CircularProgress size={16} sx={{ color: 'rgba(255,255,255,0.4)' }} />
+                <CircularProgress size={16} sx={{ color: panelChrome.fgSubtle }} />
               </Box>
             ) : fileSearchEnabled && selectedKbDocuments.length > 0 ? (
               <Box
@@ -1934,12 +2027,9 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
                 mt: 0.5,
                 fontSize: '0.72rem',
                 textTransform: 'none',
-                color: 'rgba(255,255,255,0.6)',
-                border: '1px solid rgba(255,255,255,0.15)',
                 py: 0.75,
                 justifyContent: 'flex-start',
-                '&:hover': { bgcolor: 'rgba(255,255,255,0.06)', borderColor: 'rgba(255,255,255,0.35)' },
-                '&:disabled': { color: 'rgba(255,255,255,0.3)', borderColor: 'rgba(255,255,255,0.1)' },
+                ...secondaryBtnSx,
               }}
             >
               Настройки РАГ для агента
@@ -1954,12 +2044,9 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
                 mt: 0.5,
                 fontSize: '0.72rem',
                 textTransform: 'none',
-                color: 'rgba(255,255,255,0.6)',
-                border: '1px dashed rgba(255,255,255,0.2)',
                 py: 0.75,
                 justifyContent: 'flex-start',
-                '&:hover': { bgcolor: 'rgba(255,255,255,0.06)', borderColor: 'rgba(255,255,255,0.35)' },
-                '&:disabled': { color: 'rgba(255,255,255,0.3)', borderColor: 'rgba(255,255,255,0.1)' },
+                ...secondaryDashedBtnSx,
               }}
             >
               {isUploadingKb ? 'Загрузка...' : 'Добавить файлы'}
@@ -2108,11 +2195,11 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
                 size="small"
                 onClick={() => setShareDialogOpen(true)}
                 sx={{
-                  color: 'rgba(255,255,255,0.4)',
-                  border: '1px solid rgba(255,255,255,0.12)',
+                  color: panelChrome.fgSubtle,
+                  border: panelChrome.buttonBorder,
                   borderRadius: 1,
                   p: 0.75,
-                  '&:hover': { color: '#64b5f6', borderColor: 'rgba(100,181,246,0.4)', bgcolor: 'rgba(100,181,246,0.08)' },
+                  '&:hover': { bgcolor: panelChrome.hoverBg, color: panelChrome.fg },
                 }}
               >
                 <ShareIcon sx={{ fontSize: '1rem' }} />
@@ -2145,18 +2232,18 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
                     textTransform: 'none',
                     fontSize: '0.72rem',
                     fontWeight: 600,
-                    color: selectedAgent?.is_public ? '#81c784' : 'rgba(255,255,255,0.75)',
-                    border: `1px solid ${selectedAgent?.is_public ? 'rgba(129,199,132,0.45)' : 'rgba(255,255,255,0.12)'}`,
-                    bgcolor: selectedAgent?.is_public ? 'rgba(129,199,132,0.12)' : 'transparent',
+                    color: selectedAgent?.is_public ? '#2e7d32' : panelChrome.fgMuted,
+                    border: `1px solid ${selectedAgent?.is_public ? 'rgba(46,125,50,0.45)' : panelChrome.buttonBorder.replace('1px solid ', '')}`,
+                    bgcolor: selectedAgent?.is_public ? 'rgba(46,125,50,0.1)' : 'transparent',
                     py: 0.55,
                     px: 1,
                     whiteSpace: 'nowrap',
                     '&:hover': {
                       bgcolor: selectedAgent?.is_public
-                        ? 'rgba(129,199,132,0.2)'
-                        : 'rgba(255,255,255,0.06)',
+                        ? 'rgba(46,125,50,0.16)'
+                        : panelChrome.hoverBg,
                     },
-                    '&:disabled': { color: 'rgba(255,255,255,0.35)' },
+                    '&:disabled': { color: panelChrome.fgSubtle },
                   }}
                 >
                   {selectedAgent?.is_public ? 'В галерее' : 'Опубликовать в галерее'}
@@ -2170,8 +2257,8 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
                 size="small"
                 onClick={handleDelete}
                 sx={{
-                  color: 'rgba(255,255,255,0.4)',
-                  border: '1px solid rgba(255,255,255,0.12)',
+                  color: panelChrome.fgSubtle,
+                  border: panelChrome.buttonBorder,
                   borderRadius: 1,
                   p: 0.75,
                   '&:hover': { color: '#ef5350', borderColor: 'rgba(239,83,80,0.4)', bgcolor: 'rgba(239,83,80,0.08)' },
@@ -2211,9 +2298,9 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
                 fontWeight: 600,
                 fontSize: '0.82rem',
                 py: 0.9,
-                color: 'rgba(255,255,255,0.85)',
-                borderColor: 'rgba(255,255,255,0.25)',
-                '&:hover': { borderColor: 'rgba(255,255,255,0.5)', bgcolor: 'rgba(255,255,255,0.06)' },
+                color: panelChrome.fg,
+                borderColor: panelChrome.buttonBorderHover,
+                '&:hover': { borderColor: panelChrome.fg, bgcolor: panelChrome.hoverBg },
               }}
             >
               Использовать в чате

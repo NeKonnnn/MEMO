@@ -61,6 +61,7 @@ import {
   Settings as SettingsIcon,
 } from '@mui/icons-material';
 import { getApiUrl, API_ENDPOINTS } from '../config/api';
+import { loadAgentModelOnly } from '../utils/applyAgentServer';
 import { useAuth } from '../contexts/AuthContext';
 import {
   getSidebarPanelBackground,
@@ -915,102 +916,41 @@ export default function PromptGalleryPage() {
         tools: agent.tools,
       }));
 
-      // Применяем системный промпт и настройки агента через API
       if (token) {
         try {
-          // Применяем системный промпт
-          const promptResponse = await fetch(
-            `${getApiUrl(API_ENDPOINTS.CHAT)}/../context-prompts/global`,
+          // Только загрузка модели. Промпт и model_settings не пишем в глобальные
+          // настройки — они подтягиваются из карточки агента на каждый chat_message.
+          const applied = await loadAgentModelOnly(token, agent.config?.model_path || null);
+          if (!applied.ok) {
+            console.warn('Не удалось загрузить модель агента:', applied.message);
+          }
+
+          showNotification(`Агент "${agent.name}" применён! Переходим в чат...`, 'success');
+
+          // Увеличиваем счетчик использований
+          await fetch(
+            `${getApiUrl(API_ENDPOINTS.CHAT)}/../agents/${agent.id}/use`,
             {
-              method: 'PUT',
+              method: 'POST',
               headers: {
-                'Content-Type': 'application/json',
                 'Authorization': `Bearer ${token}`,
               },
-              body: JSON.stringify({ prompt: agent.system_prompt }),
             }
           );
 
-          // Применяем настройки модели, если они указаны
-          if (agent.config?.model_settings) {
-            try {
-              await fetch(
-                `${getApiUrl(API_ENDPOINTS.CHAT)}/../models/settings`,
-                {
-                  method: 'PUT',
-                  headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${token}`,
-                  },
-                  body: JSON.stringify(agent.config.model_settings),
-                }
-              );
-            } catch (error) {
-              console.warn('Не удалось применить настройки модели:', error);
-            }
-          }
-
-          // Загружаем указанную модель, если она указана
-          if (agent.config?.model_path) {
-            try {
-              await fetch(
-                `${getApiUrl(API_ENDPOINTS.CHAT)}/../models/load`,
-                {
-                  method: 'POST',
-                  headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${token}`,
-                  },
-                  body: JSON.stringify({ model_path: agent.config.model_path }),
-                }
-              );
-            } catch (error) {
-              console.warn('Не удалось загрузить модель:', error);
-            }
-          }
-
-          if (promptResponse.ok) {
-            showNotification(`Агент "${agent.name}" применён! Переходим в чат...`, 'success');
-            
-            // Увеличиваем счетчик использований
-            await fetch(
-              `${getApiUrl(API_ENDPOINTS.CHAT)}/../agents/${agent.id}/use`,
-              {
-                method: 'POST',
-                headers: {
-                  'Authorization': `Bearer ${token}`,
-                },
-              }
-            );
-            
-            // Переходим в чат через небольшую задержку, чтобы пользователь увидел уведомление
-            setTimeout(() => {
-              navigate('/');
-              loadAgents(); // Обновляем список для обновления счетчиков
-            }, 1000);
-          } else {
-            // Если не удалось применить через API, просто сохраняем в localStorage
-            showNotification(`Агент "${agent.name}" сохранён! Переходим в чат...`, 'success');
-            setTimeout(() => {
-              navigate('/');
-              loadAgents();
-            }, 1000);
-          }
-        } catch (error) {
-          console.error('Ошибка применения агента:', error);
-          // В случае ошибки все равно переходим в чат
-          showNotification(`Агент "${agent.name}" сохранён! Переходим в чат...`, 'success');
+          // Переходим в чат через небольшую задержку, чтобы пользователь увидел уведомление
           setTimeout(() => {
             navigate('/');
-            loadAgents();
+            loadAgents(); // Обновляем список для обновления счетчиков
           }, 1000);
+        } catch (e) {
+          console.error('Ошибка применения агента:', e);
+          showNotification('Ошибка использования агента', 'error');
         }
       } else {
-        // Если пользователь не авторизован, просто переходим в чат
-        showNotification(`Агент "${agent.name}" сохранён! Переходим в чат...`, 'success');
+        showNotification(`Агент "${agent.name}" выбран! Переходим в чат...`, 'success');
         setTimeout(() => {
           navigate('/');
-          loadAgents();
         }, 1000);
       }
     } catch (error) {

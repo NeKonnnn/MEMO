@@ -56,6 +56,14 @@ def _invoke_stream_callback(callback: Any, chunk: str, acc: str, stream_role: st
         return bool(callback(chunk, acc))
 
 
+def _safe_response_text(response: Any) -> str:
+    """Тело ответа, даже если это недочитанный поток (иначе ResponseNotRead)."""
+    try:
+        return response.text or ""
+    except Exception:
+        return "<тело ответа недоступно: поток не прочитан>"
+
+
 # =============================================================================
 # Очистка ответа LLM от артефактов chat template (перенесено из llm_client.py)
 # =============================================================================
@@ -679,6 +687,15 @@ class OpenAICompatProvider(LLMProvider):
                     headers=headers,
                     json=payload,
                 ) as response:
+                    if response.status_code >= 400:
+                        # Тело потокового ответа не прочитано, и .text в обработчике
+                        # ошибки бросил бы ResponseNotRead. Читаем здесь, пока поток открыт.
+                        try:
+                            await response.aread()
+                        except Exception:
+                            logger.debug(
+                                "[%s] тело ошибки потока прочитать не удалось", self.id
+                            )
                     response.raise_for_status()
                     async for line in response.aiter_lines():
                         if not line or not line.startswith("data: "):
@@ -735,11 +752,12 @@ class OpenAICompatProvider(LLMProvider):
                             logger.info("[%s] поток прерван callback'ом", self.id)
                             return clean_llm_response(accumulated)
         except httpx.HTTPStatusError as e:
+            stream_body = _safe_response_text(e.response)
             logger.error("[%s] stream HTTP %s: %s", self.id, e.response.status_code, e)
             log_cef_int006_llm_api_failure(
                 request_uuid=cef_rid,
                 code_status=str(e.response.status_code),
-                text_status=(e.response.text or "")[:512],
+                text_status=stream_body[:512],
                 service_name=f"openai-compat-{self.id}",
                 status_code=e.response.status_code,
             )
@@ -748,7 +766,7 @@ class OpenAICompatProvider(LLMProvider):
                 try:
                     detail = str((e.response.json() or {}).get("detail", ""))
                 except Exception:
-                    detail = (e.response.text or "")[:500]
+                    detail = stream_body[:500]
                 low = detail.lower()
                 if "not loaded" in low or "не загруж" in low:
                     return (

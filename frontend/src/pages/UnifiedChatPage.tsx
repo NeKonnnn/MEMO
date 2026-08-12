@@ -40,7 +40,6 @@ import { useAuth } from '../contexts/AuthContext';
 import {
   Send as SendIcon,
   Person as PersonIcon,
-  Clear as ClearIcon,
   ContentCopy as CopyIcon,
   Stop as StopIcon,
   Refresh as RefreshIcon,
@@ -115,6 +114,8 @@ import {
   RAG_REINDEX_BLOCK_PLACEHOLDER,
 } from '../utils/ragReindexBlock';
 import { clearActiveAgent } from '../utils/clearActiveAgent';
+import { clearActiveSkills } from '../utils/skillSelectionStorage';
+import { useActiveSkillIndicators } from '../hooks/useActiveSkillIndicators';
 import { useChatContextUsage } from '../hooks/useChatContextUsage';
 import { useChatInputMcpIndicators } from '../mcp/hooks/useChatInputMcpIndicators';
 import { useMcpStreamingTools } from '../mcp/hooks/useMcpStreamingTools';
@@ -134,6 +135,7 @@ import {
   getSidebarPanelBackground,
   getSidebarChromeSx,
   getSidebarForcedContrastSx,
+  isSidebarPanelLight,
 } from '../constants/sidebarPanelColor';
 import { getWorkZoneBackgroundColor, getWorkZoneCustomImage, isWorkZoneAnimatedMode } from '../constants/workZoneBackground';
 import { useWorkZoneBgMode } from '../hooks/useWorkZoneBgMode';
@@ -963,6 +965,7 @@ const MessageCardComponent = ({
                           content={parsedResponse.visibleContent}
                           isStreaming={response.isStreaming && !isResponseReasoningStreaming}
                           onSendMessage={dataRef.current.handleSendMessageFromRenderer}
+                          messageId={`${message.id || index}-m${respIndex}`}
                         />
                         {message.mcpToolCalls?.some((t) => !t.model || t.model === response.model) ? (
                           <McpToolCallsPanel
@@ -1175,6 +1178,7 @@ const MessageCardComponent = ({
                 content={parsedMessage.visibleContent}
                 isStreaming={message.isStreaming && !isReasoningStreaming}
                 onSendMessage={dataRef.current.handleSendMessageFromRenderer}
+                messageId={message.id || `msg-${index}`}
               />
             ) : null}
           </>
@@ -1885,6 +1889,7 @@ export default function UnifiedChatPage({
   const [agentStatus, setAgentStatus] = useState<AgentStatus | null>(null);
   const orchestratorAgentsAnyActive = useOrchestratorAgentsAnyActive(Boolean(agentStatus?.is_initialized));
   const activeMcpServers = useChatInputMcpIndicators(currentChat?.id);
+  const activeSkills = useActiveSkillIndicators();
   const { activeMcpTools } = useMcpStreamingTools();
 
   const mcpInputSuggestions = useMemo(() => {
@@ -2060,6 +2065,11 @@ export default function UnifiedChatPage({
     showNotification('info', 'Агент снят');
   }, [showNotification]);
 
+  const handleClearSkills = useCallback(() => {
+    clearActiveSkills();
+    showNotification('info', 'Skills отключены');
+  }, [showNotification]);
+
   const libraryInputBadge = useMemo(
     () => (
       <ChatInputStatusCluster
@@ -2069,6 +2079,8 @@ export default function UnifiedChatPage({
         standardAgentsActive={orchestratorAgentsAnyActive}
         myAgentName={myAgentSelection?.name ?? null}
         onAgentToggle={myAgentSelection?.name ? handleClearMyAgent : undefined}
+        activeSkills={activeSkills}
+        onSkillsToggle={activeSkills.length ? handleClearSkills : undefined}
         activeMcpServers={activeMcpServers}
         onMcpClick={handleOpenMcpGearPanel}
       />
@@ -2080,6 +2092,8 @@ export default function UnifiedChatPage({
       orchestratorAgentsAnyActive,
       myAgentSelection?.name,
       handleClearMyAgent,
+      activeSkills,
+      handleClearSkills,
       activeMcpServers,
       handleOpenMcpGearPanel,
     ],
@@ -2208,11 +2222,19 @@ export default function UnifiedChatPage({
         : activeMcpServers.length > 1
           ? `${activeMcpServers.length} MCP`
           : '';
+    const skillsLabel =
+      activeSkills.length === 1
+        ? (activeSkills[0].name || activeSkills[0].slug || 'Skill').trim()
+        : activeSkills.length > 1
+          ? `${activeSkills.length} Skills`
+          : '';
     const clusterWidth = estimateLibraryClusterWidthPx(
       useKbRag,
       orchestratorAgentsAnyActive || Boolean(myAgentSelection?.name),
       activeMcpServers.length > 0,
       mcpLabel,
+      activeSkills.length > 0,
+      skillsLabel,
     );
     return getToolsButtonInsetSp(interfaceSettings.chatInputStyle, clusterWidth);
   }, [
@@ -2220,6 +2242,7 @@ export default function UnifiedChatPage({
     orchestratorAgentsAnyActive,
     myAgentSelection?.name,
     activeMcpServers,
+    activeSkills,
     interfaceSettings.chatInputStyle,
   ]);
 
@@ -3587,13 +3610,6 @@ export default function UnifiedChatPage({
     }
   };
 
-  const handleClearChat = (): void => {
-    if (currentChat) {
-      clearMessages(currentChat.id);
-    }
-    handleMenuClose();
-  };
-
   const handleStopGeneration = (): void => {
     stopGeneration();
     showNotification('info', 'Генерация остановлена');
@@ -4956,21 +4972,6 @@ export default function UnifiedChatPage({
                  </Box>
                </span>
              </Tooltip>
-             <Box
-               onClick={handleClearChat}
-               sx={{
-                 ...dropdownItemSx,
-                 display: 'flex',
-                 alignItems: 'center',
-                 gap: 1,
-                 color: isDarkMode ? 'white' : '#333',
-               }}
-             >
-               <ClearIcon sx={{ fontSize: 18, color: isDarkMode ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.6)', flexShrink: 0 }} />
-               <Typography sx={{ flex: 1, minWidth: 0, fontSize: MENU_ACTION_TEXT_SIZE, whiteSpace: 'nowrap' }}>
-                 Очистить чат
-               </Typography>
-             </Box>
            </Box>
           {gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding' ? (
              <Box
@@ -5181,20 +5182,20 @@ export default function UnifiedChatPage({
                         setRightSidebarOpen(true);
                         setTranscriptionMenuOpen(true);
                       }}
-                      sx={getSidebarRailCollapsedListItemButtonSx(isDarkMode)}
+                      sx={getSidebarRailCollapsedListItemButtonSx(isSidebarPanelLight(rightSidebarPanelBg))}
                     >
                       <SidebarRailTranscribeIcon sx={SIDEBAR_LIST_ICON_SX} />
                     </ListItemButton>
                   </Box>
                 </Tooltip>
               </ListItem>
-              <GalleryNavButton variant="collapsed" isDarkMode={isDarkMode} />
+              <GalleryNavButton variant="collapsed" isDarkMode={isDarkMode} panelIsLight={isSidebarPanelLight(rightSidebarPanelBg)} />
               <ListItem disablePadding sx={{ mb: 0.5, display: 'block' }}>
                 <Tooltip title="Skills" placement="left">
                   <Box component="span" sx={{ display: 'flex', width: '100%', justifyContent: 'center' }}>
                     <ListItemButton
                       onClick={() => navigate('/skills')}
-                      sx={getSidebarRailCollapsedListItemButtonSx(isDarkMode)}
+                      sx={getSidebarRailCollapsedListItemButtonSx(isSidebarPanelLight(rightSidebarPanelBg))}
                     >
                       <SkillsNavIcon sx={SIDEBAR_LIST_ICON_SX} />
                     </ListItemButton>
@@ -5209,7 +5210,7 @@ export default function UnifiedChatPage({
                         setRightSidebarOpen(true);
                         setAgentConstructorOpen(true);
                       }}
-                      sx={getSidebarRailCollapsedListItemButtonSx(isDarkMode)}
+                      sx={getSidebarRailCollapsedListItemButtonSx(isSidebarPanelLight(rightSidebarPanelBg))}
                     >
                       <SidebarRailAgentIcon sx={SIDEBAR_LIST_ICON_SX} />
                     </ListItemButton>
@@ -5450,7 +5451,7 @@ export default function UnifiedChatPage({
                   </Button>
                 </Box>
               )}
-              <GalleryNavButton variant="expanded" isDarkMode={isDarkMode} />
+              <GalleryNavButton variant="expanded" isDarkMode={isDarkMode} panelIsLight={isSidebarPanelLight(rightSidebarPanelBg)} />
               <ListItem disablePadding sx={{ mb: 0.5 }}>
                 <ListItemButton
                   onClick={() => navigate('/skills')}

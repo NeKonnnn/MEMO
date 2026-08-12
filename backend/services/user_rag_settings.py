@@ -8,8 +8,8 @@ RAG-настройки агентов и проектов.
 / app_state остаются seed-дефолтами для сущностей, которых не настраивали.
 
 Библиотека (memory) сюда не входит: её модель, чанкинг, пороги и препроцесс —
-только из env, см. ``memory_rag_env``. Из настроек пользователя у неё остаётся
-одна стратегия поиска.
+только из env, см. ``memory_rag_env``. Дефолты project/agent — ``RAG_ENTITY_*``
+в env, см. ``entity_rag_env`` (модели, стратегия, чанкинг, K, порог и т.д.).
 
 На время обработки чата снимки активных сущностей прокидываются через ContextVar
 (см. ``bind_user_rag_runtime``).
@@ -88,54 +88,67 @@ def normalize_entity_id(raw: Any) -> Optional[str]:
 
 def _defaults_from_app_state() -> Dict[str, Any]:
     """Дефолты кластера: settings.json / ConfigMap через app_state."""
+    from backend.services.entity_rag_env import (
+        get_entity_agentic_max_iterations,
+        get_entity_agentic_rag_enabled,
+        get_entity_chat_top_k,
+        get_entity_chunk_overlap,
+        get_entity_chunk_size,
+        get_entity_chunking_strategy,
+        get_entity_embedding_model_path,
+        get_entity_hyde_enabled,
+        get_entity_multi_query_enabled,
+        get_entity_query_fix_typos,
+        get_entity_rag_strategy,
+        get_entity_rerank_top_n,
+        get_entity_reranker_model_path,
+        get_entity_reranking_enabled,
+        get_entity_similarity_threshold,
+        get_entity_system_prompt,
+    )
+
     try:
         from backend import app_state as state
 
+        emb_state = str(getattr(state, "rag_embedding_model_path", "") or "")
+        rer_state = str(getattr(state, "rag_reranker_model_path", "") or "")
         return {
-            "rag_strategy": str(getattr(state, "current_rag_strategy", "auto") or "auto"),
-            "agentic_rag_enabled": bool(getattr(state, "agentic_rag_enabled", True)),
-            "agentic_max_iterations": int(getattr(state, "agentic_max_iterations", 2) or 2),
-            "rag_query_fix_typos": bool(getattr(state, "rag_query_fix_typos", False)),
-            "rag_multi_query_enabled": bool(getattr(state, "rag_multi_query_enabled", False)),
-            "rag_hyde_enabled": bool(getattr(state, "rag_hyde_enabled", False)),
-            "rag_chat_top_k": int(getattr(state, "rag_chat_top_k", 12) or 12),
-            "rag_chunking_strategy": str(
-                getattr(state, "rag_chunking_strategy", "hierarchical") or "hierarchical"
-            ),
-            "rag_chunk_size": int(getattr(state, "rag_chunk_size", 1000) or 1000),
-            "rag_chunk_overlap": int(getattr(state, "rag_chunk_overlap", 200) or 200),
-            "rag_similarity_threshold": float(
-                getattr(state, "rag_similarity_threshold", 0.0) or 0.0
-            ),
-            "rag_reranking_enabled": bool(getattr(state, "rag_reranking_enabled", True)),
-            "rag_rerank_top_n": int(getattr(state, "rag_rerank_top_n", 12) or 12),
-            "rag_system_prompt": str(getattr(state, "rag_system_prompt", "") or ""),
-            "rag_embedding_model_path": str(
-                getattr(state, "rag_embedding_model_path", "") or ""
-            ),
-            "rag_reranker_model_path": str(
-                getattr(state, "rag_reranker_model_path", "") or ""
-            ),
+            "rag_strategy": get_entity_rag_strategy(),
+            "agentic_rag_enabled": get_entity_agentic_rag_enabled(),
+            "agentic_max_iterations": get_entity_agentic_max_iterations(),
+            "rag_query_fix_typos": get_entity_query_fix_typos(),
+            "rag_multi_query_enabled": get_entity_multi_query_enabled(),
+            "rag_hyde_enabled": get_entity_hyde_enabled(),
+            "rag_chat_top_k": get_entity_chat_top_k(),
+            "rag_chunking_strategy": get_entity_chunking_strategy(),
+            "rag_chunk_size": get_entity_chunk_size(),
+            "rag_chunk_overlap": get_entity_chunk_overlap(),
+            "rag_similarity_threshold": get_entity_similarity_threshold(),
+            "rag_reranking_enabled": get_entity_reranking_enabled(),
+            "rag_rerank_top_n": get_entity_rerank_top_n(),
+            "rag_system_prompt": get_entity_system_prompt(),
+            "rag_embedding_model_path": emb_state or get_entity_embedding_model_path(),
+            "rag_reranker_model_path": rer_state or get_entity_reranker_model_path(),
         }
     except Exception:
         logger.exception("user_rag_settings: defaults from app_state failed")
         return {
-            "rag_strategy": "auto",
-            "agentic_rag_enabled": True,
-            "agentic_max_iterations": 2,
-            "rag_query_fix_typos": False,
-            "rag_multi_query_enabled": False,
-            "rag_hyde_enabled": False,
-            "rag_chat_top_k": 12,
-            "rag_chunking_strategy": "hierarchical",
-            "rag_chunk_size": 1000,
-            "rag_chunk_overlap": 200,
-            "rag_similarity_threshold": 0.0,
-            "rag_reranking_enabled": True,
-            "rag_rerank_top_n": 12,
-            "rag_system_prompt": "",
-            "rag_embedding_model_path": "",
-            "rag_reranker_model_path": "",
+            "rag_strategy": get_entity_rag_strategy(),
+            "agentic_rag_enabled": get_entity_agentic_rag_enabled(),
+            "agentic_max_iterations": get_entity_agentic_max_iterations(),
+            "rag_query_fix_typos": get_entity_query_fix_typos(),
+            "rag_multi_query_enabled": get_entity_multi_query_enabled(),
+            "rag_hyde_enabled": get_entity_hyde_enabled(),
+            "rag_chat_top_k": get_entity_chat_top_k(),
+            "rag_chunking_strategy": get_entity_chunking_strategy(),
+            "rag_chunk_size": get_entity_chunk_size(),
+            "rag_chunk_overlap": get_entity_chunk_overlap(),
+            "rag_similarity_threshold": get_entity_similarity_threshold(),
+            "rag_reranking_enabled": get_entity_reranking_enabled(),
+            "rag_rerank_top_n": get_entity_rerank_top_n(),
+            "rag_system_prompt": get_entity_system_prompt(),
+            "rag_embedding_model_path": get_entity_embedding_model_path(),
+            "rag_reranker_model_path": get_entity_reranker_model_path(),
         }
 
 
@@ -143,12 +156,55 @@ def default_rag_settings_snapshot() -> Dict[str, Any]:
     return deepcopy(_defaults_from_app_state())
 
 
+# Старые дефолты кластера (до RAG_ENTITY_*). Если они «заморожены» в Postgres
+# у сущности, не считаем это осознанным выбором — снова следуем за ConfigMap.
+_LEGACY_CLUSTER_ENTITY_DEFAULTS: Dict[str, Any] = {
+    "rag_strategy": "auto",
+    "rag_chunking_strategy": "hierarchical",
+    "rag_chunk_size": 1000,
+    "rag_chunk_overlap": 200,
+    "rag_chat_top_k": 12,
+    "rag_similarity_threshold": 0.0,
+    "rag_reranking_enabled": True,
+    "rag_rerank_top_n": 12,
+    "agentic_rag_enabled": True,
+    "agentic_max_iterations": 2,
+    "rag_query_fix_typos": False,
+    "rag_multi_query_enabled": False,
+    "rag_hyde_enabled": False,
+    "rag_system_prompt": "",
+    "rag_embedding_model_path": "",
+    "rag_reranker_model_path": "",
+}
+
+
+def _values_equal(a: Any, b: Any) -> bool:
+    if a is None or b is None:
+        return a is b
+    if isinstance(a, bool) or isinstance(b, bool):
+        return bool(a) == bool(b)
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        return float(a) == float(b)
+    return str(a).strip() == str(b).strip()
+
+
+def _strip_legacy_default_overrides(stored: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not isinstance(stored, dict):
+        return {}
+    out = dict(stored)
+    for key, legacy_val in _LEGACY_CLUSTER_ENTITY_DEFAULTS.items():
+        if key in out and _values_equal(out[key], legacy_val):
+            del out[key]
+    return out
+
+
 def _merge_with_defaults(stored: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     merged = _defaults_from_app_state()
-    if isinstance(stored, dict):
+    cleaned = _strip_legacy_default_overrides(stored)
+    if cleaned:
         for key in RAG_SETTING_KEYS:
-            if key in stored and stored[key] is not None:
-                merged[key] = stored[key]
+            if key in cleaned and cleaned[key] is not None:
+                merged[key] = cleaned[key]
     return merged
 
 
@@ -189,8 +245,24 @@ async def get_entity_rag_settings(
     repo = _get_entity_repo()
     if repo is None:
         return _defaults_from_app_state()
-    stored = await repo.get(normalize_scope(scope), ek)
-    return _merge_with_defaults(stored)
+    sc_norm = normalize_scope(scope)
+    stored_raw = await repo.get(sc_norm, ek)
+    if isinstance(stored_raw, dict) and stored_raw:
+        cleaned = _strip_legacy_default_overrides(stored_raw)
+        if not cleaned:
+            try:
+                await repo.delete(sc_norm, ek)
+            except Exception:
+                logger.debug(
+                    "entity_rag_settings: не удалось удалить legacy-строку %s/%s",
+                    sc_norm,
+                    ek,
+                    exc_info=True,
+                )
+            stored_raw = None
+        else:
+            stored_raw = cleaned
+    return _merge_with_defaults(stored_raw)
 
 
 async def save_entity_rag_settings(
@@ -213,7 +285,7 @@ async def save_entity_rag_settings(
         logger.warning("entity_rag_settings: репозиторий недоступен — сохранение пропущено")
         return _merge_with_defaults(updates)
 
-    stored = dict(await repo.get(sc, ek) or {})
+    stored = _strip_legacy_default_overrides(dict(await repo.get(sc, ek) or {}))
     for key in RAG_SETTING_KEYS:
         if key in updates and updates[key] is not None:
             stored[key] = updates[key]
@@ -438,7 +510,29 @@ def chunk_params_from_rag_settings(settings: Dict[str, Any]) -> Dict[str, Any]:
 
 def settings_response_dict(settings: Dict[str, Any]) -> Dict[str, Any]:
     """Формат ответа /api/rag/settings."""
-    strategy = str(settings.get("rag_strategy") or "auto")
+    from backend.services.entity_rag_env import (
+        get_entity_agentic_max_iterations,
+        get_entity_agentic_rag_enabled,
+        get_entity_chat_top_k,
+        get_entity_chunk_overlap,
+        get_entity_chunk_size,
+        get_entity_chunking_strategy,
+        get_entity_hyde_enabled,
+        get_entity_multi_query_enabled,
+        get_entity_query_fix_typos,
+        get_entity_rag_strategy,
+        get_entity_rerank_top_n,
+        get_entity_reranking_enabled,
+        get_entity_similarity_threshold,
+        get_entity_system_prompt,
+    )
+
+    strategy = str(settings.get("rag_strategy") or get_entity_rag_strategy())
+    chunking = str(
+        settings.get("rag_chunking_strategy") or get_entity_chunking_strategy()
+    )
+    chunk_size = int(settings.get("rag_chunk_size") or get_entity_chunk_size())
+    chunk_overlap = int(settings.get("rag_chunk_overlap") or get_entity_chunk_overlap())
     return {
         "strategy": strategy,
         "applied_method": strategy,
@@ -451,19 +545,33 @@ def settings_response_dict(settings: Dict[str, Any]) -> Dict[str, Any]:
             "raw_cosine": "Сырой cosine-поиск (без постобработки).",
             "graph": "Графовый RAG: расширение по связям между чанками.",
         }.get(strategy, ""),
-        "agentic_rag_enabled": bool(settings.get("agentic_rag_enabled", True)),
-        "agentic_max_iterations": int(settings.get("agentic_max_iterations") or 2),
-        "rag_query_fix_typos": bool(settings.get("rag_query_fix_typos", False)),
-        "rag_multi_query_enabled": bool(settings.get("rag_multi_query_enabled", False)),
-        "rag_hyde_enabled": bool(settings.get("rag_hyde_enabled", False)),
-        "rag_chat_top_k": int(settings.get("rag_chat_top_k") or 12),
-        "rag_chunking_strategy": str(settings.get("rag_chunking_strategy") or "hierarchical"),
-        "rag_chunk_size": int(settings.get("rag_chunk_size") or 1000),
-        "rag_chunk_overlap": int(settings.get("rag_chunk_overlap") or 200),
-        "rag_similarity_threshold": float(settings.get("rag_similarity_threshold") or 0.0),
-        "rag_reranking_enabled": bool(settings.get("rag_reranking_enabled", True)),
-        "rag_rerank_top_n": int(settings.get("rag_rerank_top_n") or 12),
-        "rag_system_prompt": str(settings.get("rag_system_prompt") or ""),
+        "agentic_rag_enabled": bool(
+            settings.get("agentic_rag_enabled", get_entity_agentic_rag_enabled())
+        ),
+        "agentic_max_iterations": int(
+            settings.get("agentic_max_iterations") or get_entity_agentic_max_iterations()
+        ),
+        "rag_query_fix_typos": bool(
+            settings.get("rag_query_fix_typos", get_entity_query_fix_typos())
+        ),
+        "rag_multi_query_enabled": bool(
+            settings.get("rag_multi_query_enabled", get_entity_multi_query_enabled())
+        ),
+        "rag_hyde_enabled": bool(settings.get("rag_hyde_enabled", get_entity_hyde_enabled())),
+        "rag_chat_top_k": int(settings.get("rag_chat_top_k") or get_entity_chat_top_k()),
+        "rag_chunking_strategy": chunking,
+        "rag_chunk_size": chunk_size,
+        "rag_chunk_overlap": chunk_overlap,
+        "rag_similarity_threshold": float(
+            settings.get("rag_similarity_threshold")
+            if settings.get("rag_similarity_threshold") is not None
+            else get_entity_similarity_threshold()
+        ),
+        "rag_reranking_enabled": bool(
+            settings.get("rag_reranking_enabled", get_entity_reranking_enabled())
+        ),
+        "rag_rerank_top_n": int(settings.get("rag_rerank_top_n") or get_entity_rerank_top_n()),
+        "rag_system_prompt": str(settings.get("rag_system_prompt") or get_entity_system_prompt()),
         "rag_embedding_model_path": str(settings.get("rag_embedding_model_path") or ""),
         "rag_reranker_model_path": str(settings.get("rag_reranker_model_path") or ""),
     }

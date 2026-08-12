@@ -141,6 +141,14 @@ for _name, _import_path in [
 @app.on_event("startup")
 async def startup_event():
     logger.info("Запуск приложения...")
+    try:
+        from backend.rag_query.prompts import prompts_overview
+
+        # Отвечает на вопрос «промпт правили в ConfigMap, он точно доехал?»:
+        # видно, какие блоки взяты из config.yml, а какие остались дефолтными.
+        logger.info("[RAG-PROMPT] действующий промпт: %s", prompts_overview())
+    except Exception:
+        logger.exception("[RAG-PROMPT] сводка промпта недоступна")
     for _k in ("MONGODB_HOST", "MONGODB_PORT", "MONGODB_USER"):
         logger.info(f"{_k}: {os.getenv(_k, '')!r}")
     _pw = os.getenv("MONGODB_PASSWORD", "")

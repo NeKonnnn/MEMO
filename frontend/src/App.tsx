@@ -34,6 +34,7 @@ import LlmStatusBanner from './components/LlmStatusBanner';
 import RagReindexStatusBanner from './components/RagReindexStatusBanner';
 import { RagReindexStatusProvider } from './contexts/RagReindexStatusContext';
 import TabNotificationWatcher from './components/TabNotificationWatcher';
+import SupportAssistantWidget from './components/support/SupportAssistantWidget';
 import './App.css';
 import { MENU_ITEM_HOVER_DARK, MENU_ITEM_HOVER_LIGHT, MENU_BORDER_RADIUS_PX, MENU_ITEM_HOVER_RADIUS_PX, MENU_ITEM_HOVER_MARGIN_PX, MENU_MIN_WIDTH_PX, MENU_ICON_MIN_WIDTH, MENU_ICON_TO_TEXT_GAP_PX, MENU_ICON_FONT_SIZE_PX } from './constants/menuStyles';
 
@@ -336,6 +337,8 @@ function App() {
                             <Route path="/profile" element={<ProfilePage />} />
                             <Route path="/history" element={<HistoryPage />} />
                           </Routes>
+                          {/* Прототип: плавающий помощник поддержки (LLM/RAG — следующий этап) */}
+                          <SupportAssistantWidget />
                         </Box>
                       </Box>
                     </PrivateRoute>

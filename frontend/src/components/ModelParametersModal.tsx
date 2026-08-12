@@ -4,7 +4,6 @@ import {
   DialogContent,
   Box,
   Typography,
-  TextField,
   Button,
   IconButton,
   Slider,
@@ -21,16 +20,20 @@ import {
   ExpandMore as ExpandMoreIcon,
 } from '@mui/icons-material';
 import {
-  getFormFieldInputSx,
+  getCategoryFieldSx,
+  getDropdownChevronSx,
+  getDropdownItemStateSx,
+  getDropdownItemSx,
   getDropdownPopoverPaperSx,
-  DROPDOWN_ITEM_SX,
-  DROPDOWN_ITEM_HOVER_BG,
-  DROPDOWN_CHEVRON_SX,
-  AGENT_CONSTRUCTOR_SAVE_BUTTON_SX,
-  AGENT_CONSTRUCTOR_RESTORE_BUTTON_SX,
+  getFormFieldInputSx,
+  getAgentConstructorSaveButtonSx,
+  getAgentConstructorRestoreButtonSx,
   AGENT_CONSTRUCTOR_SAVE_ICON_SX,
 } from '../constants/menuStyles';
-import { getSidebarPanelBackground } from '../constants/sidebarPanelColor';
+import {
+  getSidebarPanelBackground,
+  getSidebarPanelChrome,
+} from '../constants/sidebarPanelColor';
 import ModelSettingsFields from './ModelSettingsFields';
 import { MODEL_SETTINGS_DEFAULT, type ModelSettingsState } from '../constants/modelSettingsStyles';
 
@@ -80,7 +83,7 @@ interface ModelParametersModalProps {
   providerModels?: ProviderModelOption[];
   /** Порядок/список id провайдеров для выпадающего списка. */
   providerIds?: string[];
-  /** Только просмотр (роль «Зритель»): без изменения параметров и без кнопок сохранения. */
+  /** Только просмотр (роль «Зритель»): значения видны, сохранить/сменить нельзя. */
   readOnly?: boolean;
 }
 
@@ -90,41 +93,6 @@ function providerOfPath(path: string): string {
   if (!p) return '';
   return p.includes('/') ? p.split('/')[0] : '';
 }
-
-const inputSx = {
-  '& .MuiOutlinedInput-root': {
-    bgcolor: 'rgba(0,0,0,0.25)',
-    color: 'white',
-    fontSize: '0.85rem',
-    '& fieldset': { borderColor: 'rgba(255,255,255,0.15)' },
-    '&:hover fieldset': { borderColor: 'rgba(255,255,255,0.3)' },
-    '&.Mui-focused fieldset': { borderColor: 'rgba(33,150,243,0.7)' },
-  },
-  '& .MuiInputBase-input': { color: 'white' },
-  '& .MuiInputLabel-root': { color: 'rgba(255,255,255,0.7)' },
-};
-
-const outlinedSelectSx = {
-  ...getFormFieldInputSx(true),
-  '& .MuiOutlinedInput-root': {
-    ...((getFormFieldInputSx(true) as any)['& .MuiOutlinedInput-root'] ?? {}),
-    cursor: 'pointer',
-  },
-  '& .MuiOutlinedInput-root.Mui-focused fieldset': {
-    borderColor: 'rgba(255,255,255,0.23)',
-    borderWidth: '1px',
-  },
-  '& .MuiOutlinedInput-root:hover fieldset': {
-    borderColor: 'rgba(255,255,255,0.4)',
-  },
-  '& .MuiOutlinedInput-root.Mui-focused:hover fieldset': {
-    borderColor: 'rgba(255,255,255,0.4)',
-  },
-  '& .MuiInputLabel-root.Mui-focused': {
-    color: 'rgba(255,255,255,0.7)',
-  },
-  '& .MuiFormLabel-asterisk': { color: '#f44336' },
-} as const;
 
 const PROVIDER_OPTIONS = [
   { value: 'OpenAI', label: 'OpenAI' },
@@ -149,14 +117,32 @@ export default function ModelParametersModal({
   providerIds,
   readOnly = false,
 }: ModelParametersModalProps) {
+  const [panelBg, setPanelBg] = useState(() => getSidebarPanelBackground());
+  useEffect(() => {
+    const onColorChanged = () => setPanelBg(getSidebarPanelBackground());
+    window.addEventListener('sidebarColorChanged', onColorChanged);
+    return () => window.removeEventListener('sidebarColorChanged', onColorChanged);
+  }, []);
+  const panelChrome = useMemo(() => getSidebarPanelChrome(panelBg), [panelBg]);
+  const darkFields = !panelChrome.isLight;
+
+  const formFieldInputSx = useMemo(() => getFormFieldInputSx(darkFields), [darkFields]);
+  const outlinedSelectSx = useMemo(() => getCategoryFieldSx(darkFields), [darkFields]);
+  const dropdownItemSx = useMemo(() => getDropdownItemSx(darkFields), [darkFields]);
+  const dropdownChevronSx = useMemo(() => getDropdownChevronSx(darkFields), [darkFields]);
+  const saveButtonSx = useMemo(() => getAgentConstructorSaveButtonSx(darkFields), [darkFields]);
+  const restoreButtonSx = useMemo(() => getAgentConstructorRestoreButtonSx(darkFields), [darkFields]);
+
   const [params, setParams] = useState<ModelParamsState>({ ...defaultParams, model: currentModel });
   const [providerAnchor, setProviderAnchor] = useState<HTMLElement | null>(null);
   const [modelAnchor, setModelAnchor] = useState<HTMLElement | null>(null);
   const hasModelSettings =
     initialModelSettings != null && (onSaveModelSettings != null || readOnly);
-  const [modelSettings, setModelSettings] = useState<ModelSettingsState>(() => ({ ...MODEL_SETTINGS_DEFAULT, ...initialModelSettings }));
+  const [modelSettings, setModelSettings] = useState<ModelSettingsState>(() => ({
+    ...MODEL_SETTINGS_DEFAULT,
+    ...initialModelSettings,
+  }));
 
-  // ─── Режим провайдеров (CORSUR / Phoenix …) ──────────────────────────────────
   const providerMode = Array.isArray(providerModels) && providerModels.length > 0;
   const providerOptions = useMemo(() => {
     if (!providerMode) return PROVIDER_OPTIONS;
@@ -166,13 +152,13 @@ export default function ModelParametersModal({
         : Array.from(
             new Set(
               (providerModels || [])
-                .map(m => m.provider_id || providerOfPath(m.path))
+                .map((m) => m.provider_id || providerOfPath(m.path))
                 .filter(Boolean),
             ),
           );
     return ids
-      .filter(id => String(id).toUpperCase() !== 'SC')
-      .map(id => ({ value: id as string, label: id as string }));
+      .filter((id) => String(id).toUpperCase() !== 'SC')
+      .map((id) => ({ value: id as string, label: id as string }));
   }, [providerMode, providerModels, providerIds]);
 
   const selectedProvider = params.provider || '';
@@ -180,14 +166,14 @@ export default function ModelParametersModal({
   const providerFilteredModels = useMemo(() => {
     if (!providerMode) return availableModels;
     return (providerModels || [])
-      .filter(m => (m.provider_id || providerOfPath(m.path)) === selectedProvider)
-      .map(m => m.path);
+      .filter((m) => (m.provider_id || providerOfPath(m.path)) === selectedProvider)
+      .map((m) => m.path);
   }, [providerMode, providerModels, availableModels, selectedProvider]);
 
   const modelLabelOf = useCallback(
     (path: string) => {
       if (providerMode) {
-        const found = (providerModels || []).find(m => m.path === path);
+        const found = (providerModels || []).find((m) => m.path === path);
         if (found) return (found.display_name || found.name || formatModelLabel(path)).replace(/\.gguf$/i, '');
       }
       return formatModelLabel(path);
@@ -201,9 +187,8 @@ export default function ModelParametersModal({
       const derivedProvider = providerMode
         ? providerOfPath(nextModel || '') || (initialParams?.provider as string) || ''
         : (initialParams?.provider as string) || '';
-      const provider =
-        String(derivedProvider).toUpperCase() === 'SC' ? '' : derivedProvider;
-      setParams(prev => ({
+      const provider = String(derivedProvider).toUpperCase() === 'SC' ? '' : derivedProvider;
+      setParams((prev) => ({
         ...defaultParams,
         ...prev,
         ...initialParams,
@@ -233,213 +218,255 @@ export default function ModelParametersModal({
     onClose();
   };
 
-  const labelSx = { color: 'rgba(255,255,255,0.85)', fontSize: '0.8rem', mb: 0.5, display: 'block' };
+  const labelSx = {
+    color: darkFields ? 'rgba(255,255,255,0.85)' : 'rgba(0,0,0,0.87)',
+    fontSize: '0.8rem',
+    mb: 0.5,
+    display: 'block',
+  };
+  const headerBorder = darkFields ? '1px solid rgba(255,255,255,0.08)' : '1px solid rgba(0,0,0,0.08)';
+  const headerTitleColor = darkFields ? 'white' : 'rgba(0,0,0,0.87)';
+  const backBtnColor = darkFields ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.65)';
+  const backBtnHover = darkFields ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)';
+  const mutedCaption = darkFields ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.55)';
+  const emptyMenuColor = darkFields ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.45)';
 
   const content = (
     <>
-      {/* Header: back + title */}
-      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 2, py: 1.5, borderBottom: '1px solid rgba(255,255,255,0.08)', flexShrink: 0 }}>
-        <IconButton size="small" onClick={onClose} sx={{ color: 'rgba(255,255,255,0.7)', '&:hover': { bgcolor: 'rgba(255,255,255,0.08)' } }}>
+      <Box
+        sx={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 1,
+          px: 2,
+          py: 1.5,
+          borderBottom: headerBorder,
+          flexShrink: 0,
+        }}
+      >
+        <IconButton size="small" onClick={onClose} sx={{ color: backBtnColor, '&:hover': { bgcolor: backBtnHover } }}>
           <ArrowBackIcon />
         </IconButton>
-        <Typography variant="h6" sx={{ color: 'white', fontSize: '1rem', fontWeight: 600 }}>
+        <Typography variant="h6" sx={{ color: headerTitleColor, fontSize: '1rem', fontWeight: 600 }}>
           Параметры модели
         </Typography>
       </Box>
 
       <Box sx={{ px: 2, py: 2, display: 'flex', flexDirection: 'column', gap: 2, flex: 1, minHeight: 0, overflow: 'auto' }}>
-          {/* Провайдер — outlined с плавающим лейблом; без синего фокуса */}
-          <Box>
-            <FormControl variant="outlined" fullWidth size="small" required sx={outlinedSelectSx}>
-              <InputLabel htmlFor="model-params-provider">Провайдер</InputLabel>
-              <OutlinedInput
-                id="model-params-provider"
-                label="Провайдер"
-                value={providerOptions.find(o => o.value === params.provider)?.label ?? params.provider}
-                readOnly
-                placeholder="Выберите провайдера"
-                onClick={e => {
-                  if (readOnly) return;
-                  setProviderAnchor(e.currentTarget);
-                }}
-                endAdornment={
-                  <InputAdornment position="end">
-                    <ExpandMoreIcon
-                      sx={{ ...DROPDOWN_CHEVRON_SX, transform: Boolean(providerAnchor) ? 'rotate(180deg)' : 'none' }}
-                    />
-                  </InputAdornment>
-                }
-              />
-            </FormControl>
-            <Popover
-              open={!readOnly && Boolean(providerAnchor)}
-              anchorEl={providerAnchor}
-              onClose={() => setProviderAnchor(null)}
-              anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
-              transformOrigin={{ vertical: 'top', horizontal: 'left' }}
-              slotProps={{ paper: { sx: getDropdownPopoverPaperSx(providerAnchor) } }}
-            >
-              <Box sx={{ py: 0.5 }}>
-                {providerOptions.map(o => (
-                  <Box
-                    key={o.value}
-                    onClick={() => {
-                      setParams(p => {
-                        if (!providerMode) return { ...p, provider: o.value };
-                        // При смене провайдера сбрасываем модель, если она не из этого провайдера
-                        const keepModel = providerOfPath(p.model) === o.value ? p.model : '';
-                        return { ...p, provider: o.value, model: keepModel };
-                      });
-                      setProviderAnchor(null);
-                    }}
-                    sx={{
-                      ...DROPDOWN_ITEM_SX,
-                      color: params.provider === o.value ? 'white' : 'rgba(255,255,255,0.9)',
-                      fontWeight: params.provider === o.value ? 600 : 400,
-                      bgcolor: params.provider === o.value ? DROPDOWN_ITEM_HOVER_BG : 'transparent',
-                    }}
-                  >
-                    {o.label}
-                  </Box>
-                ))}
-                {providerOptions.length === 0 && (
-                  <Box sx={{ px: 1.5, py: 1, fontSize: '0.78rem', color: 'rgba(255,255,255,0.4)' }}>
-                    Нет доступных провайдеров
-                  </Box>
-                )}
-              </Box>
-            </Popover>
-          </Box>
-
-          {/* Модель — outlined с плавающим лейблом; без синего фокуса */}
-          <Box>
-            <FormControl variant="outlined" fullWidth size="small" required sx={outlinedSelectSx}>
-              <InputLabel htmlFor="model-params-model">Модель</InputLabel>
-              <OutlinedInput
-                id="model-params-model"
-                label="Модель"
-                value={params.model ? modelLabelOf(params.model) : ''}
-                placeholder={providerMode && !selectedProvider ? 'Сначала выберите провайдера' : 'Выберите модель'}
-                readOnly
-                onClick={e => {
-                  if (readOnly) return;
-                  if (providerMode && !selectedProvider) {
-                    setProviderAnchor(e.currentTarget);
-                    return;
-                  }
-                  setModelAnchor(e.currentTarget);
-                }}
-                endAdornment={
-                  <InputAdornment position="end">
-                    <ExpandMoreIcon
-                      sx={{ ...DROPDOWN_CHEVRON_SX, transform: Boolean(modelAnchor) ? 'rotate(180deg)' : 'none', flexShrink: 0 }}
-                    />
-                  </InputAdornment>
-                }
-                sx={{ '& .MuiOutlinedInput-input': { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }}
-              />
-            </FormControl>
-            <Popover
-              open={!readOnly && Boolean(modelAnchor)}
-              anchorEl={modelAnchor}
-              onClose={() => setModelAnchor(null)}
-              anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
-              transformOrigin={{ vertical: 'top', horizontal: 'left' }}
-              slotProps={{ paper: { sx: getDropdownPopoverPaperSx(modelAnchor) } }}
-            >
-              <Box
-                sx={{
-                  py: 0.5,
-                  maxHeight: 280,
-                  overflowY: 'auto',
-                  '&::-webkit-scrollbar': { width: 3 },
-                  '&::-webkit-scrollbar-thumb': { bgcolor: 'rgba(255,255,255,0.12)', borderRadius: 2 },
-                }}
-              >
-                {providerFilteredModels.map(m => (
-                  <Box
-                    key={m}
-                    onClick={() => {
-                      setParams(p => ({ ...p, model: m }));
-                      setModelAnchor(null);
-                    }}
-                    sx={{
-                      ...DROPDOWN_ITEM_SX,
-                      color: params.model === m ? 'white' : 'rgba(255,255,255,0.9)',
-                      fontWeight: params.model === m ? 600 : 400,
-                      bgcolor: params.model === m ? DROPDOWN_ITEM_HOVER_BG : 'transparent',
-                      whiteSpace: 'normal',
-                      wordBreak: 'break-word',
-                    }}
-                  >
-                    {modelLabelOf(m)}
-                  </Box>
-                ))}
-                {providerFilteredModels.length === 0 && (
-                  <Box sx={{ px: 1.5, py: 1, fontSize: '0.78rem', color: 'rgba(255,255,255,0.4)' }}>
-                    {providerMode && !selectedProvider ? 'Сначала выберите провайдера' : 'Нет моделей'}
-                  </Box>
-                )}
-              </Box>
-            </Popover>
-          </Box>
-
-          {/* Тонкая настройка модели (при открытии из конструктора агента) */}
-          {hasModelSettings && (
-            <Box sx={{ mt: 1, pointerEvents: readOnly ? 'none' : 'auto', opacity: readOnly ? 0.85 : 1 }}>
-              <ModelSettingsFields
-                value={modelSettings}
-                onChange={readOnly ? () => undefined : setModelSettings}
-                accordion
-                darkPanel
-                compact
-              />
+        <Box>
+          <FormControl variant="outlined" fullWidth size="small" required sx={outlinedSelectSx}>
+            <InputLabel htmlFor="model-params-provider">Провайдер</InputLabel>
+            <OutlinedInput
+              id="model-params-provider"
+              label="Провайдер"
+              value={providerOptions.find((o) => o.value === params.provider)?.label ?? params.provider}
+              readOnly
+              placeholder="Выберите провайдера"
+              onClick={(e) => {
+                if (readOnly) return;
+                setProviderAnchor(e.currentTarget);
+              }}
+              endAdornment={
+                <InputAdornment position="end">
+                  <ExpandMoreIcon
+                    sx={{ ...dropdownChevronSx, transform: Boolean(providerAnchor) ? 'rotate(180deg)' : 'none' }}
+                  />
+                </InputAdornment>
+              }
+            />
+          </FormControl>
+          <Popover
+            open={!readOnly && Boolean(providerAnchor)}
+            anchorEl={providerAnchor}
+            onClose={() => setProviderAnchor(null)}
+            anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
+            transformOrigin={{ vertical: 'top', horizontal: 'left' }}
+            slotProps={{ paper: { sx: getDropdownPopoverPaperSx(providerAnchor, darkFields) } }}
+          >
+            <Box sx={{ py: 0.5 }}>
+              {providerOptions.map((o) => (
+                <Box
+                  key={o.value}
+                  onClick={() => {
+                    setParams((p) => {
+                      if (!providerMode) return { ...p, provider: o.value };
+                      const keepModel = providerOfPath(p.model) === o.value ? p.model : '';
+                      return { ...p, provider: o.value, model: keepModel };
+                    });
+                    setProviderAnchor(null);
+                  }}
+                  sx={{
+                    ...dropdownItemSx,
+                    ...getDropdownItemStateSx(darkFields, params.provider === o.value),
+                  }}
+                >
+                  {o.label}
+                </Box>
+              ))}
+              {providerOptions.length === 0 && (
+                <Box sx={{ px: 1.5, py: 1, fontSize: '0.78rem', color: emptyMenuColor }}>Нет доступных провайдеров</Box>
+              )}
             </Box>
-          )}
-
-          {/* Контекст / токены / слайдеры — скрыты при тонкой настройке из конструктора */}
-          {!hasModelSettings && (
-            <>
-          <Box>
-            <Typography sx={labelSx}>Максимальное количество контекстных токенов</Typography>
-            <TextField size="small" fullWidth value={params.contextTokens} disabled={readOnly} onChange={e => setParams(p => ({ ...p, contextTokens: e.target.value }))} sx={inputSx} />
-          </Box>
-          <Box>
-            <Typography sx={labelSx}>Максимальное количество выводимых токенов</Typography>
-            <TextField size="small" fullWidth value={params.outputTokens} disabled={readOnly} onChange={e => setParams(p => ({ ...p, outputTokens: e.target.value }))} sx={inputSx} />
-          </Box>
-
-          <Box sx={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 2, alignItems: 'stretch' }}>
-            <Box sx={{ display: 'flex', flexDirection: 'column' }}>
-              <Typography sx={{ ...labelSx, minHeight: 28, display: 'flex', alignItems: 'center' }}>Температура — {params.temperature.toFixed(2)}</Typography>
-              <Slider size="small" value={params.temperature} min={0} max={2} step={0.01} disabled={readOnly} onChange={(_, v) => setParams(p => ({ ...p, temperature: v as number }))}
-                sx={{ color: '#2196f3', '& .MuiSlider-thumb': { color: '#2196f3' }, '& .MuiSlider-track': { color: '#2196f3' } }} />
-            </Box>
-            <Box sx={{ display: 'flex', flexDirection: 'column' }}>
-              <Typography sx={{ ...labelSx, minHeight: 28, display: 'flex', alignItems: 'center' }}>Top P — {params.topP.toFixed(2)}</Typography>
-              <Slider size="small" value={params.topP} min={0} max={1} step={0.01} disabled={readOnly} onChange={(_, v) => setParams(p => ({ ...p, topP: v as number }))}
-                sx={{ color: '#2196f3' }} />
-            </Box>
-            <Box sx={{ display: 'flex', flexDirection: 'column' }}>
-              <Typography sx={{ ...labelSx, minHeight: 28, display: 'flex', alignItems: 'center' }}>Штраф за частоту — {params.frequencyPenalty.toFixed(2)}</Typography>
-              <Slider size="small" value={params.frequencyPenalty} min={0} max={2} step={0.01} disabled={readOnly} onChange={(_, v) => setParams(p => ({ ...p, frequencyPenalty: v as number }))}
-                sx={{ color: '#2196f3' }} />
-            </Box>
-            <Box sx={{ display: 'flex', flexDirection: 'column' }}>
-              <Typography sx={{ ...labelSx, minHeight: 28, display: 'flex', alignItems: 'center' }}>Штраф за присутствие — {params.presencePenalty.toFixed(2)}</Typography>
-              <Slider size="small" value={params.presencePenalty} min={0} max={2} step={0.01} disabled={readOnly} onChange={(_, v) => setParams(p => ({ ...p, presencePenalty: v as number }))}
-                sx={{ color: '#2196f3' }} />
-            </Box>
-          </Box>
-            </>
-          )}
+          </Popover>
         </Box>
 
-      {/* Footer: Restore + Save */}
-      {!readOnly && (
+        <Box>
+          <FormControl variant="outlined" fullWidth size="small" required sx={outlinedSelectSx}>
+            <InputLabel htmlFor="model-params-model">Модель</InputLabel>
+            <OutlinedInput
+              id="model-params-model"
+              label="Модель"
+              value={params.model ? modelLabelOf(params.model) : ''}
+              readOnly
+              placeholder="Выберите модель"
+              onClick={(e) => {
+                if (readOnly) return;
+                setModelAnchor(e.currentTarget);
+              }}
+              endAdornment={
+                <InputAdornment position="end">
+                  <ExpandMoreIcon
+                    sx={{ ...dropdownChevronSx, transform: Boolean(modelAnchor) ? 'rotate(180deg)' : 'none' }}
+                  />
+                </InputAdornment>
+              }
+            />
+          </FormControl>
+          <Popover
+            open={!readOnly && Boolean(modelAnchor)}
+            anchorEl={modelAnchor}
+            onClose={() => setModelAnchor(null)}
+            anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
+            transformOrigin={{ vertical: 'top', horizontal: 'left' }}
+            slotProps={{ paper: { sx: getDropdownPopoverPaperSx(modelAnchor, darkFields) } }}
+          >
+            <Box sx={{ py: 0.5, maxHeight: 260, overflowY: 'auto' }}>
+              {providerFilteredModels.map((m) => (
+                <Box
+                  key={m}
+                  onClick={() => {
+                    setParams((p) => ({ ...p, model: m }));
+                    setModelAnchor(null);
+                  }}
+                  sx={{
+                    ...dropdownItemSx,
+                    ...getDropdownItemStateSx(darkFields, params.model === m),
+                  }}
+                >
+                  {modelLabelOf(m)}
+                </Box>
+              ))}
+              {providerFilteredModels.length === 0 && (
+                <Box sx={{ px: 1.5, py: 1, fontSize: '0.78rem', color: emptyMenuColor }}>Нет доступных моделей</Box>
+              )}
+            </Box>
+          </Popover>
+        </Box>
+
+        {hasModelSettings && (
+          <Box>
+            <ModelSettingsFields
+              value={modelSettings}
+              onChange={setModelSettings}
+              darkPanel={darkFields}
+              readOnly={readOnly}
+              compact
+            />
+          </Box>
+        )}
+
+        {/* Legacy token/temperature block — hidden when fine-tune settings present */}
+        {!hasModelSettings && (
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+            <Box>
+              <Typography sx={labelSx}>Контекст (токены)</Typography>
+              <OutlinedInput
+                fullWidth
+                size="small"
+                value={params.contextTokens}
+                onChange={(e) => setParams((p) => ({ ...p, contextTokens: e.target.value }))}
+                sx={formFieldInputSx}
+                disabled={readOnly}
+              />
+            </Box>
+            <Box>
+              <Typography sx={labelSx}>Выход (токены)</Typography>
+              <OutlinedInput
+                fullWidth
+                size="small"
+                value={params.outputTokens}
+                onChange={(e) => setParams((p) => ({ ...p, outputTokens: e.target.value }))}
+                sx={formFieldInputSx}
+                disabled={readOnly}
+              />
+            </Box>
+            <Box>
+              <Typography sx={{ ...labelSx, minHeight: 28, display: 'flex', alignItems: 'center' }}>
+                Температура — {params.temperature.toFixed(2)}
+              </Typography>
+              <Slider
+                size="small"
+                value={params.temperature}
+                min={0}
+                max={2}
+                step={0.01}
+                onChange={(_, v) => setParams((p) => ({ ...p, temperature: v as number }))}
+                sx={{ color: '#2196f3' }}
+                disabled={readOnly}
+              />
+            </Box>
+            <Box>
+              <Typography sx={{ ...labelSx, minHeight: 28, display: 'flex', alignItems: 'center' }}>
+                Top P — {params.topP.toFixed(2)}
+              </Typography>
+              <Slider
+                size="small"
+                value={params.topP}
+                min={0}
+                max={1}
+                step={0.01}
+                onChange={(_, v) => setParams((p) => ({ ...p, topP: v as number }))}
+                sx={{ color: '#2196f3' }}
+                disabled={readOnly}
+              />
+            </Box>
+            <Box>
+              <Typography sx={{ ...labelSx, minHeight: 28, display: 'flex', alignItems: 'center' }}>
+                Штраф за частоту — {params.frequencyPenalty.toFixed(2)}
+              </Typography>
+              <Slider
+                size="small"
+                value={params.frequencyPenalty}
+                min={0}
+                max={2}
+                step={0.01}
+                onChange={(_, v) => setParams((p) => ({ ...p, frequencyPenalty: v as number }))}
+                sx={{ color: '#2196f3' }}
+                disabled={readOnly}
+              />
+            </Box>
+            <Box>
+              <Typography sx={{ ...labelSx, minHeight: 28, display: 'flex', alignItems: 'center' }}>
+                Штраф за присутствие — {params.presencePenalty.toFixed(2)}
+              </Typography>
+              <Slider
+                size="small"
+                value={params.presencePenalty}
+                min={0}
+                max={2}
+                step={0.01}
+                onChange={(_, v) => setParams((p) => ({ ...p, presencePenalty: v as number }))}
+                sx={{ color: '#2196f3' }}
+                disabled={readOnly}
+              />
+            </Box>
+          </Box>
+        )}
+      </Box>
+
       <Box
         sx={{
-          borderTop: '1px solid rgba(255,255,255,0.08)',
+          borderTop: headerBorder,
           px: 2,
           py: 1.5,
           display: 'flex',
@@ -448,33 +475,48 @@ export default function ModelParametersModal({
           flexShrink: 0,
         }}
       >
-        <Button
-          variant="outlined"
-          fullWidth
-          startIcon={<RestoreIcon sx={AGENT_CONSTRUCTOR_SAVE_ICON_SX} />}
-          onClick={handleReset}
-          sx={AGENT_CONSTRUCTOR_RESTORE_BUTTON_SX}
-        >
-          Восстановить настройки
-        </Button>
-        <Button
-          variant="contained"
-          fullWidth
-          startIcon={<SaveIcon sx={AGENT_CONSTRUCTOR_SAVE_ICON_SX} />}
-          onClick={handleSave}
-          sx={AGENT_CONSTRUCTOR_SAVE_BUTTON_SX}
-        >
-          Сохранить настройки
-        </Button>
+        {readOnly ? (
+          <Typography variant="caption" sx={{ color: mutedCaption, textAlign: 'center', px: 1 }}>
+            Параметры модели задаёт владелец. Вам они видны только для просмотра.
+          </Typography>
+        ) : (
+          <>
+            <Button
+              variant="outlined"
+              fullWidth
+              startIcon={<RestoreIcon sx={AGENT_CONSTRUCTOR_SAVE_ICON_SX} />}
+              onClick={handleReset}
+              sx={restoreButtonSx}
+            >
+              Восстановить настройки
+            </Button>
+            <Button
+              variant="contained"
+              fullWidth
+              startIcon={<SaveIcon sx={AGENT_CONSTRUCTOR_SAVE_ICON_SX} />}
+              onClick={handleSave}
+              sx={saveButtonSx}
+            >
+              Сохранить настройки
+            </Button>
+          </>
+        )}
       </Box>
-      )}
     </>
   );
 
-  const panelBg = getSidebarPanelBackground();
   if (variant === 'panel') {
     return (
-      <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden', background: panelBg, color: 'white' }}>
+      <Box
+        sx={{
+          display: 'flex',
+          flexDirection: 'column',
+          height: '100%',
+          overflow: 'hidden',
+          background: panelBg,
+          color: panelChrome.fg,
+        }}
+      >
         {content}
       </Box>
     );
@@ -488,16 +530,14 @@ export default function ModelParametersModal({
       PaperProps={{
         sx: {
           background: panelBg,
-          color: 'white',
+          color: panelChrome.fg,
           borderRadius: 2,
-          border: '1px solid rgba(255,255,255,0.08)',
+          border: headerBorder,
           maxHeight: '90vh',
         },
       }}
     >
-      <DialogContent sx={{ p: 0, overflow: 'auto' }}>
-        {content}
-      </DialogContent>
+      <DialogContent sx={{ p: 0, overflow: 'auto' }}>{content}</DialogContent>
     </Dialog>
   );
 }

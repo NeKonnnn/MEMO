@@ -4,8 +4,7 @@ export const SIDEBAR_PANEL_COLOR_KEY = 'sidebar_panel_color';
 /** Градиент по умолчанию для левой и правой боковых панелей. */
 export const DEFAULT_SIDEBAR_GRADIENT = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
 
-const HEX_RE = /#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})\b/;
-const RGB_RE = /rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})/;
+const HEX_RE = /#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})\b/g;
 
 type Rgb = { r: number; g: number; b: number };
 
@@ -27,24 +26,36 @@ function expandHex(hex: string): Rgb | null {
   return null;
 }
 
-/** Достаёт «характерный» цвет фона: для градиента — первый hex/rgb. */
-export function extractSidebarSampleRgb(background: string): Rgb | null {
+/** Извлечь все #RGB / #RRGGBB и rgb(...) из строки фона (solid или gradient). */
+function extractSidebarSampleRgbs(background: string): Rgb[] {
   const value = (background || '').trim();
-  if (!value) return extractSidebarSampleRgb(DEFAULT_SIDEBAR_GRADIENT);
+  if (!value) return extractSidebarSampleRgbs(DEFAULT_SIDEBAR_GRADIENT);
 
-  const hexMatch = value.match(HEX_RE);
-  if (hexMatch) return expandHex(hexMatch[0]);
-
-  const rgbMatch = value.match(RGB_RE);
-  if (rgbMatch) {
-    return {
+  const out: Rgb[] = [];
+  const hexMatches = value.match(HEX_RE);
+  if (hexMatches) {
+    for (const hex of hexMatches) {
+      const rgb = expandHex(hex);
+      if (rgb) out.push(rgb);
+    }
+  }
+  // Без /g на том же regex повторно — сброс lastIndex
+  const rgbRe = /rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})/g;
+  let rgbMatch: RegExpExecArray | null;
+  while ((rgbMatch = rgbRe.exec(value)) !== null) {
+    out.push({
       r: Math.min(255, Number(rgbMatch[1])),
       g: Math.min(255, Number(rgbMatch[2])),
       b: Math.min(255, Number(rgbMatch[3])),
-    };
+    });
   }
+  return out;
+}
 
-  return null;
+/** Достаёт «характерный» цвет фона: для градиента — первый hex/rgb. */
+export function extractSidebarSampleRgb(background: string): Rgb | null {
+  const samples = extractSidebarSampleRgbs(background);
+  return samples[0] ?? null;
 }
 
 /** Относительная яркость по WCAG (0 = чёрный, 1 = белый). */
@@ -61,15 +72,34 @@ export function relativeLuminance(rgb: Rgb): number {
 
 /**
  * Светлая ли панель: на ней белые иконки/текст пропадают.
+ * Для градиента берётся средняя яркость стоп-цветов (как в ASTRA).
  * Порог ~0.62 — покрывает #EDF5E1 и белый/почти белый custom.
  */
-export function isSidebarPanelLight(background?: string): boolean {
+export function isSidebarPanelLight(background?: string | null): boolean {
   const bg = (background ?? getSidebarPanelBackground()).trim();
   if (!bg) return false;
-  const rgb = extractSidebarSampleRgb(bg);
-  if (!rgb) return false;
-  return relativeLuminance(rgb) >= 0.62;
+
+  const samples = extractSidebarSampleRgbs(bg);
+  if (samples.length > 0) {
+    const avg = samples.reduce((sum, rgb) => sum + relativeLuminance(rgb), 0) / samples.length;
+    return avg > 0.62;
+  }
+
+  const lower = bg.toLowerCase();
+  if (
+    lower === 'white' ||
+    lower === '#fff' ||
+    lower.includes('rgb(255') ||
+    lower.includes('rgba(255, 255, 255') ||
+    lower.includes('rgba(255,255,255')
+  ) {
+    return true;
+  }
+  return false;
 }
+
+/** Alias ASTRA API. */
+export const isLightSidebarPanelBackground = isSidebarPanelLight;
 
 export function getSidebarPanelBackground(): string {
   if (typeof window === 'undefined') return DEFAULT_SIDEBAR_GRADIENT;
@@ -98,29 +128,101 @@ export function getSidebarRailGlyphFilter(background?: string): string {
   return isSidebarPanelLight(background) ? 'invert(1) brightness(0)' : 'none';
 }
 
+/** Цвета хрома сайдбара под светлый/тёмный фон панели (ASTRA). */
+export type SidebarPanelChrome = {
+  isLight: boolean;
+  /** Основной цвет текста и иконок. */
+  fg: string;
+  /** Приглушённый текст. */
+  fgMuted: string;
+  /** Ещё более приглушённый (плейсхолдеры, подписи). */
+  fgSubtle: string;
+  /** Рамка панели. */
+  border: string;
+  /** Рамка вторичных outlined/dashed кнопок. */
+  buttonBorder: string;
+  /** Рамка вторичных кнопок при hover. */
+  buttonBorderHover: string;
+  /** Hover по строкам / кнопкам. */
+  hoverBg: string;
+  /** Активный/выделенный фон. */
+  activeBg: string;
+  /** Инвертировать PNG-глиф меню rail (глиф светлый — на светлой панели нужен тёмный). */
+  invertMenuGlyph: boolean;
+};
+
+export function getSidebarPanelChrome(background?: string | null): SidebarPanelChrome {
+  const isLight = isSidebarPanelLight(background);
+  if (isLight) {
+    return {
+      isLight: true,
+      fg: 'rgba(0,0,0,0.87)',
+      fgMuted: 'rgba(0,0,0,0.72)',
+      fgSubtle: 'rgba(0,0,0,0.55)',
+      border: '1px solid rgba(0,0,0,0.12)',
+      buttonBorder: '1px solid rgba(0,0,0,0.28)',
+      buttonBorderHover: 'rgba(0,0,0,0.45)',
+      hoverBg: 'rgba(0,0,0,0.08)',
+      activeBg: 'rgba(0,0,0,0.12)',
+      invertMenuGlyph: true,
+    };
+  }
+  return {
+    isLight: false,
+    fg: '#ffffff',
+    fgMuted: 'rgba(255,255,255,0.75)',
+    fgSubtle: 'rgba(255,255,255,0.55)',
+    border: '1px solid rgba(255,255,255,0.08)',
+    buttonBorder: '1px solid rgba(255,255,255,0.22)',
+    buttonBorderHover: 'rgba(255,255,255,0.4)',
+    hoverBg: 'rgba(255,255,255,0.1)',
+    activeBg: 'rgba(255,255,255,0.15)',
+    invertMenuGlyph: false,
+  };
+}
+
+/** Outlined/dashed кнопка на боковой панели («Добавить файлы», «Загрузить файл», «Настройки РАГ»…). */
+export function getSidebarSecondaryButtonSx(
+  chrome: SidebarPanelChrome,
+  opts?: { dashed?: boolean },
+): Record<string, unknown> {
+  const border = opts?.dashed
+    ? chrome.buttonBorder.replace('solid', 'dashed')
+    : chrome.buttonBorder;
+  return {
+    color: chrome.fgMuted,
+    border,
+    '&:hover': {
+      bgcolor: chrome.hoverBg,
+      borderColor: chrome.buttonBorderHover,
+      color: chrome.fg,
+    },
+    '&:disabled': {
+      color: chrome.fgSubtle,
+      borderColor: chrome.isLight ? 'rgba(0,0,0,0.14)' : 'rgba(255,255,255,0.12)',
+    },
+  };
+}
+
 /**
  * Общие стили хрома левой/правой панели: фон, CSS-переменные контраста, глиф меню.
  * Иконки rail должны брать `var(--sidebar-fg)` (см. SIDEBAR_LIST_ICON_SX).
  */
 export function getSidebarChromeSx(background?: string): Record<string, unknown> {
   const bg = background ?? getSidebarPanelBackground();
-  const fg = getSidebarPanelForeground(bg);
-  const muted = getSidebarPanelMutedForeground(bg);
-  const hover = getSidebarPanelHoverBackground(bg);
-  const border = getSidebarPanelBorderColor(bg);
-  const light = isSidebarPanelLight(bg);
+  const chrome = getSidebarPanelChrome(bg);
   return {
     background: bg,
-    color: fg,
-    borderColor: border,
-    '--sidebar-fg': fg,
-    '--sidebar-muted-fg': muted,
-    '--sidebar-hover-bg': hover,
-    '--sidebar-border-color': border,
-    '--sidebar-selected-bg': light ? 'rgba(0, 0, 0, 0.08)' : 'rgba(255, 255, 255, 0.15)',
+    color: chrome.fg,
+    borderColor: chrome.border.replace('1px solid ', ''),
+    '--sidebar-fg': chrome.fg,
+    '--sidebar-muted-fg': chrome.fgMuted,
+    '--sidebar-hover-bg': chrome.hoverBg,
+    '--sidebar-border-color': chrome.border.replace('1px solid ', ''),
+    '--sidebar-selected-bg': chrome.activeBg,
     transition: 'background 0.3s ease, color 0.3s ease',
     '& [data-memo-rail-menu-glyph]': {
-      filter: getSidebarRailGlyphFilter(bg),
+      filter: chrome.invertMenuGlyph ? 'invert(1) brightness(0)' : 'none',
     },
   };
 }
@@ -133,10 +235,11 @@ export function getSidebarChromeSx(background?: string): Record<string, unknown>
 export function getSidebarForcedContrastSx(background?: string): Record<string, unknown> {
   const bg = background ?? getSidebarPanelBackground();
   if (!isSidebarPanelLight(bg)) return {};
-  const fg = getSidebarPanelForeground(bg);
-  const muted = getSidebarPanelMutedForeground(bg);
-  const border = getSidebarPanelBorderColor(bg);
-  const hover = getSidebarPanelHoverBackground(bg);
+  const chrome = getSidebarPanelChrome(bg);
+  const fg = chrome.fg;
+  const muted = chrome.fgMuted;
+  const border = chrome.border.replace('1px solid ', '');
+  const hover = chrome.hoverBg;
   return {
     '& .MuiSvgIcon-root': { color: `${fg} !important` },
     '& .MuiTypography-root': { color: `${fg} !important` },

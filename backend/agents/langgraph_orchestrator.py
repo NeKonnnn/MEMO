@@ -12,6 +12,7 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt.tool_node import ToolNode
 from langgraph.checkpoint.memory import MemorySaver
 from backend.settings.logging import get_logger
+from backend.rag_query.prompts import answer_formatting_rules
 
 # Импортируем все инструменты из backend/tools
 try:
@@ -778,6 +779,8 @@ class LangGraphOrchestrator:
                     streaming=streaming,
                     stream_callback=stream_callback_sync if streaming else None,
                     model_path=context.get("selected_model"),
+                    # Правила оформления (запрет служебной разметки и вставки чанков)
+                    system_prompt=answer_formatting_rules(),
                     enable_thinking=context.get("enable_thinking"),
                 )
                 
@@ -888,6 +891,7 @@ class LangGraphOrchestrator:
                 streaming=streaming,
                 stream_callback=stream_callback_sync if streaming else None,
                 model_path=context.get("selected_model"),
+                system_prompt=answer_formatting_rules(),
                 enable_thinking=context.get("enable_thinking"),
             )
             

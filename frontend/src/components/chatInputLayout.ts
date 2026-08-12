@@ -5,14 +5,16 @@ export const CHAT_INPUT_TOOLBAR_PAD_COMPACT = 2;
 export const CHAT_INPUT_TOOLBAR_BTN_PX = 36;
 export const CHAT_INPUT_TOOLBAR_GAP = 0.25;
 
-/** Примерная ширина «пилюли» библиотека/агент/MCP между «+» и «Инструменты». */
+/** Примерная ширина «пилюли» библиотека/агент/skills/MCP между «+» и «Инструменты». */
 export function estimateLibraryClusterWidthPx(
   libraryActive: boolean,
   agentActive: boolean,
   mcpActive: boolean,
   mcpLabel = '',
+  skillsActive = false,
+  skillsLabel = '',
 ): number {
-  if (!libraryActive && !agentActive && !mcpActive) return 0;
+  if (!libraryActive && !agentActive && !mcpActive && !skillsActive) return 0;
 
   let width = 0;
   const addSegment = (segmentPx: number) => {
@@ -22,6 +24,10 @@ export function estimateLibraryClusterWidthPx(
 
   if (libraryActive) addSegment(36);
   if (agentActive) addSegment(36);
+  if (skillsActive) {
+    const labelExtra = Math.min(88, Math.max(0, skillsLabel.length) * 6.5);
+    addSegment(36 + labelExtra);
+  }
   if (mcpActive) {
     const labelExtra = Math.min(88, Math.max(0, mcpLabel.length) * 6.5);
     addSegment(36 + labelExtra);

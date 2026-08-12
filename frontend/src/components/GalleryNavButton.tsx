@@ -33,6 +33,8 @@ type GalleryNavVariant = 'collapsed' | 'expanded';
 interface GalleryNavButtonProps {
   variant: GalleryNavVariant;
   isDarkMode: boolean;
+  /** Светлый фон боковой панели — тёмные иконки/текст. */
+  panelIsLight?: boolean;
 }
 
 const GALLERY_ITEMS = [
@@ -53,7 +55,11 @@ const GALLERY_ITEMS = [
  * «Галерея промптов» или «Галерея агентов».
  * Выпадающий список — тот же дизайн, что меню «Перейти в проект».
  */
-export default function GalleryNavButton({ variant, isDarkMode }: GalleryNavButtonProps) {
+export default function GalleryNavButton({
+  variant,
+  isDarkMode,
+  panelIsLight = false,
+}: GalleryNavButtonProps) {
   const navigate = useNavigate();
   const [anchorEl, setAnchorEl] = useState<HTMLElement | null>(null);
   const open = Boolean(anchorEl);
@@ -62,6 +68,9 @@ export default function GalleryNavButton({ variant, isDarkMode }: GalleryNavButt
   const dropdownPanelSx = useMemo(() => getDropdownPanelSx(isDarkMode), [isDarkMode]);
   const dropdownItemSx = useMemo(() => getDropdownItemSx(isDarkMode), [isDarkMode]);
   const submenuIconColor = isDarkMode ? '#ffffff' : 'rgba(0,0,0,0.6)';
+  const rowHoverBg = panelIsLight ? 'rgba(0,0,0,0.06)' : 'rgba(255,255,255,0.08)';
+  const rowActiveBg = panelIsLight ? 'rgba(0,0,0,0.1)' : 'rgba(255,255,255,0.12)';
+  const chevronMuted = panelIsLight ? 'rgba(0,0,0,0.45)' : 'rgba(255,255,255,0.55)';
 
   const handleOpen = (e: React.MouseEvent<HTMLElement>) => {
     setAnchorEl(e.currentTarget);
@@ -137,7 +146,7 @@ export default function GalleryNavButton({ variant, isDarkMode }: GalleryNavButt
               <ListItemButton
                 onClick={handleOpen}
                 selected={open}
-                sx={getSidebarRailCollapsedListItemButtonSx(isDarkMode)}
+                sx={getSidebarRailCollapsedListItemButtonSx(panelIsLight)}
               >
                 <SidebarRailPromptsIcon sx={SIDEBAR_LIST_ICON_SX} />
               </ListItemButton>
@@ -157,16 +166,16 @@ export default function GalleryNavButton({ variant, isDarkMode }: GalleryNavButt
           selected={open}
           sx={{
             ...SIDEBAR_CHAT_ROW_LIST_ITEM_BUTTON_SX,
-            color: 'var(--sidebar-fg, #ffffff)',
-            backgroundColor: open ? 'var(--sidebar-selected-bg, rgba(255,255,255,0.12))' : 'transparent',
+            color: 'inherit',
+            backgroundColor: open ? rowActiveBg : 'transparent',
             '&:hover': {
-              backgroundColor: 'var(--sidebar-hover-bg, rgba(255,255,255,0.08))',
+              backgroundColor: rowHoverBg,
             },
           }}
         >
           <ListItemIcon
             sx={{
-              color: 'var(--sidebar-fg, #ffffff)',
+              color: 'inherit',
               minWidth: 40,
               mr: `${SIDEBAR_LIST_ICON_TO_TEXT_GAP_PX}px`,
               '& .MuiSvgIcon-root': { fontSize: '1.375rem' },
@@ -177,13 +186,13 @@ export default function GalleryNavButton({ variant, isDarkMode }: GalleryNavButt
           <ListItemText
             primary="Галерея"
             primaryTypographyProps={{
-              sx: { fontSize: '0.8rem', fontWeight: 400, color: 'var(--sidebar-fg, #ffffff)' },
+              sx: { fontSize: '0.8rem', fontWeight: 400, color: 'inherit' },
             }}
           />
           <ExpandMoreIcon
             sx={{
               fontSize: 18,
-              color: 'var(--sidebar-muted-fg, rgba(255,255,255,0.55))',
+              color: chevronMuted,
               transform: open ? 'rotate(180deg)' : 'rotate(-90deg)',
               transition: 'transform 0.15s ease',
             }}

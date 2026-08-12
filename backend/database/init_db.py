@@ -215,6 +215,7 @@ async def init_postgresql() -> bool:
             await vector_repo.create_tables()
             await prompt_repo.create_tables()
             await agent_repo.create_tables()
+            await _migrate_agent_model_settings(agent_repo)
             await skill_repo.create_tables()
             await user_settings_repo.create_tables()
             await project_repo.create_tables()
@@ -233,6 +234,23 @@ async def init_postgresql() -> bool:
     except Exception as e:
         logger.error(f"Ошибка при инициализации PostgreSQL: {e}")
         return False
+
+
+async def _migrate_agent_model_settings(repo) -> None:
+    """Разовая уборка копий дефолтов в config.model_settings у агентов.
+
+    Вынесена в отдельный модуль вместе со снимком того, что писал конструктор, —
+    чтобы удалить обе части одним куском, когда старые карточки перестанут
+    встречаться. Ошибка уборки не должна ронять старт.
+    """
+    try:
+        from backend.services.agent_model_settings_migration import (
+            cleanup_default_agent_model_settings,
+        )
+
+        await cleanup_default_agent_model_settings(repo)
+    except Exception:
+        logger.exception("[LLM-CFG-MIGRATE] уборка настроек агентов не выполнена")
 
 
 def init_minio() -> bool:

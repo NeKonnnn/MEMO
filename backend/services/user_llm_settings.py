@@ -13,6 +13,7 @@ from typing import Any, Dict, Optional
 
 from backend.context_prompts import ContextPromptManager
 from backend.settings.logging import get_logger
+from backend.utils.llm_defaults import llm_settings_defaults
 
 logger = get_logger(__name__)
 
@@ -72,25 +73,8 @@ def _default_model_settings() -> Dict[str, Any]:
             return model_settings.get_all()
     except Exception:
         logger.exception("default model settings: app_state unavailable")
-    return {
-        "context_size": 8192,
-        "output_tokens": 1024,
-        "batch_size": 512,
-        "n_threads": 12,
-        "use_mmap": True,
-        "use_mlock": False,
-        "verbose": True,
-        "temperature": 0.7,
-        "top_p": 0.95,
-        "repeat_penalty": 1.05,
-        "top_k": 40,
-        "min_p": 0.05,
-        "frequency_penalty": 0.0,
-        "presence_penalty": 0.0,
-        "use_gpu": True,
-        "streaming": True,
-        "legacy_api": False,
-    }
+    # Тот же seed-файл, что у ModelSettings - без второй копии хардкода
+    return llm_settings_defaults()
 
 
 def _default_context_prompts() -> Dict[str, Any]:
@@ -270,18 +254,39 @@ async def delete_user_custom_prompt(user_id: str, prompt_id: str) -> bool:
 async def enrich_agent_profile_with_user_settings(
     agent_profile: Optional[Dict[str, Any]], user_id: Optional[str]
 ) -> Dict[str, Any]:
-    """Подставляет temperature/max_tokens из персональных настроек, если агент их не задал."""
+    """Итог настроек генерации: персональные пользователя, поверх — настройки агента.
+
+    Было «или-или»: непустой ```model_settings``` в карточке агента отменял
+    персональные настройки ЦЕЛИКОМ, включая ключи, которых в карточке нет.
+    Конструктор пишет полный набор всегда, поэтому «Настройки → Модели» не
+    доезжали ни до одного агента. Теперь карточка перекрывает поключево, а
+    незаданное берётся из персональных настроек, за ними — дефолты кластера.
+
+    Итог кладём в ```effective_model_settings``` — его же вызывающий биндит на
+    время запроса, чтобы ```get_active_model_settings``` отдавал ровно то, по чему
+    считался ответ. ```model_settings``` остаётся сырой карточкой: по нему видно,
+    что задано у самой сущности, а что унаследовано.
+    """
     profile = dict(agent_profile or {})
-    user_ms = await get_user_model_settings(user_id)
+    effective = await get_user_model_settings(user_id)
+    ams = profile.get("model_settings")
+    if isinstance(ams, dict):
+        for key in _MODEL_SETTING_KEYS:
+            value = ams.get(key)
+            if value is not None:
+                effective[key] = value
+    profile["effective_model_settings"] = effective
     if profile.get("max_tokens") is None:
         try:
-            profile["max_tokens"] = int(user_ms.get("output_tokens") or 1024)
+            profile["max_tokens"] = int(effective.get("output_tokens") or 1024)
         except (TypeError, ValueError):
             profile["max_tokens"] = 1024
     if profile.get("temperature") is None:
         try:
             profile["temperature"] = float(
-                user_ms.get("temperature") if user_ms.get("temperature") is not None else 0.7
+                effective.get("temperature")
+                if effective.get("temperature") is not None
+                else 0.7
             )
         except (TypeError, ValueError):
             profile["temperature"] = 0.7

@@ -27,6 +27,7 @@ import {
 } from '@mui/icons-material';
 import { useAppActions } from '../../contexts/AppContext';
 import { getApiUrl } from '../../config/api';
+import ClampedNumberField from '../ClampedNumberField';
 import {
   MODEL_SETTINGS_LABEL_WRAPPER_SX,
   MODEL_SETTINGS_HELP_ICON_BUTTON_SX,
@@ -234,10 +235,9 @@ export default function GeneralSettings({ isDarkMode, onToggleTheme }: GeneralSe
                     }}
                   >
                     <Box sx={{ maxWidth: { xs: '100%', sm: 300 }, minWidth: { sm: 260 }, flex: { sm: '0 0 auto' } }}>
-                      <TextField
+                      <ClampedNumberField
                         fullWidth
                         size="small"
-                        type="number"
                         label={
                           <Box sx={MODEL_SETTINGS_LABEL_WRAPPER_SX} component="span">
                             Максимум сообщений в контексте
@@ -257,28 +257,12 @@ export default function GeneralSettings({ isDarkMode, onToggleTheme }: GeneralSe
                           </Box>
                         }
                         value={memorySettings.max_messages}
-                        onChange={(e) => {
-                          const raw = e.target.value;
-                          if (raw === '') return;
-                          const v = parseInt(raw, 10);
-                          if (Number.isNaN(v)) return;
-                          const clamped = Math.max(5, Math.min(100, v));
-                          if (clamped !== memorySettings.max_messages) {
-                            handleMemorySettingChange('max_messages', clamped);
-                          }
-                        }}
-                        onBlur={(e) => {
-                          const raw = e.target.value.trim();
-                          let v = parseInt(raw, 10);
-                          if (raw === '' || Number.isNaN(v)) {
-                            v = memorySettings.max_messages;
-                          }
-                          v = Math.max(5, Math.min(100, v));
-                          if (v !== memorySettings.max_messages) {
-                            handleMemorySettingChange('max_messages', v);
-                          }
-                        }}
-                        inputProps={{ min: 5, max: 100, step: 5 }}
+                        onValueChange={(v) => handleMemorySettingChange('max_messages', v)}
+                        min={5}
+                        max={100}
+                        step={5}
+                        defaultValue={memorySettings.max_messages}
+                        integer
                         InputLabelProps={{ shrink: true }}
                       />
                     </Box>

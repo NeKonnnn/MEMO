@@ -196,22 +196,26 @@ class ContextPromptManager:
     ) -> Optional[str]:
         """
         Собирает system prompt для чата.
-        Контекстные инструкции применяются, только если у агента нет своего промпта.
+
+        Промпт сущности важнее глобальной настройки модели: если у агента или у
+        проекта задан свой текст, контекстные инструкции (global_prompt /
+        model_prompts) не подставляются вовсе. Иначе два набора правил уезжали бы
+        в модель одновременно, и при их противоречии выигрывал бы глобальный —
+        он идёт первым (см. context_breakdown: active).
         """
         parts: List[str] = []
         agent_sp = (agent_system_prompt or "").strip()
-        if not agent_sp:
+        proj = (project_instructions or "").strip()
+        if not agent_sp and not proj:
             ctx = self.get_effective_prompt(model_path) if model_path else self.get_global_prompt()
             ctx = (ctx or "").strip()
             if ctx:
                 parts.append(ctx)
-        proj = (project_instructions or "").strip()
         if proj:
             parts.append(proj)
         if agent_sp:
             parts.append(agent_sp)
         return "\n\n".join(parts) if parts else None
-    
     def get_models_list(self) -> List[Dict[str, Any]]:
         """Получение списка всех моделей с их промптами"""
         try:

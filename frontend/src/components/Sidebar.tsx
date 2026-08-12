@@ -102,6 +102,7 @@ import {
   getSidebarChromeSx,
   getSidebarForcedContrastSx,
   getSidebarPanelHoverBackground,
+  isSidebarPanelLight,
 } from '../constants/sidebarPanelColor';
 import { ASTRA_REQUEST_DELETE_CURRENT_CHAT, ASTRA_OPEN_SETTINGS } from '../constants/hotkeys';
 import { useHotkeyBindings } from '../hooks/useHotkeyBindings';
@@ -1123,7 +1124,7 @@ export default function Sidebar({ open, onToggle, isDarkMode, onToggleTheme, onH
           <List disablePadding sx={{ px: 1, pt: 0, pb: 1, width: '100%', boxSizing: 'border-box' }}>
             <SidebarRailCollapsedAction
               variant="newChat"
-              isDarkMode={isDarkMode}
+              panelIsLight={isSidebarPanelLight(sidebarPanelBg)}
               enterIndex={0}
               onClick={handleCreateChat}
               icon={<SidebarRailAddIcon sx={SIDEBAR_LIST_ICON_SX} />}
@@ -1133,7 +1134,7 @@ export default function Sidebar({ open, onToggle, isDarkMode, onToggleTheme, onH
             />
             <SidebarRailCollapsedAction
               variant="search"
-              isDarkMode={isDarkMode}
+              panelIsLight={isSidebarPanelLight(sidebarPanelBg)}
               enterIndex={1}
               onClick={() => {
                 onToggle();
@@ -1148,7 +1149,7 @@ export default function Sidebar({ open, onToggle, isDarkMode, onToggleTheme, onH
             />
             <SidebarRailCollapsedAction
               variant="creations"
-              isDarkMode={isDarkMode}
+              panelIsLight={isSidebarPanelLight(sidebarPanelBg)}
               enterIndex={2}
               onClick={() => navigate('/creations')}
               icon={<CollectionsBookmarkOutlinedIcon sx={SIDEBAR_LIST_ICON_SX} />}

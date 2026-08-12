@@ -735,9 +735,13 @@ async def _run_background_rechunk_for_user(
                     chunk_size=cs,
                     chunk_overlap=co,
                     chunking_strategy=strat,
-                    owner_user_id=oid,
+                    # Пересобираем КОНКРЕТНОГО агента - значит только его документы
+                    # svc-rag складывает owner_user_id и document_ids ОБЪЕДИНЕНИЕМ,
+                    # поэтому вместе с owner сюда приезжали все документы этого
+                    # пользователя и перенарезались настройками текущего агента
+                    owner_user_id=None if agent_id is not None else oid,
                     # Ключ очереди в svc-rag: пересборка этого агента не должна
-                    # прерывать пересборку соседнего у того же владельца.
+                    # прерывать пересборку соседнего у того же владельца
                     agent_id=int(agent_id) if agent_id is not None else None,
                     document_ids=list(agent_doc_ids),
                     **emb,
@@ -1620,7 +1624,7 @@ async def list_rag_models(
             logger.exception("Каталог внешних RAG-моделей недоступен")
         sc = normalize_scope(scope)
         entity_id = _entity_id_from_params(sc, project_id, agent_id)
-        entity_rag = await get_entity_rag_settings(sc, entity_id) if entity_id else {}
+        entity_rag = await get_entity_rag_settings(sc, entity_id)
         return _overlay_user_model_current(data, entity_rag)
     except Exception as e:
         logger.exception("list_rag_models error")
@@ -1651,7 +1655,7 @@ async def get_rag_models_current(
             data = {}
         sc = normalize_scope(scope)
         entity_id = _entity_id_from_params(sc, project_id, agent_id)
-        entity_rag = await get_entity_rag_settings(sc, entity_id) if entity_id else {}
+        entity_rag = await get_entity_rag_settings(sc, entity_id)
         return _overlay_user_model_current(data, entity_rag)
     except Exception as e:
         logger.exception("get_rag_models_current error")

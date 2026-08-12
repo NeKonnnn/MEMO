@@ -117,6 +117,8 @@ import ModelSelector from '../components/ModelSelector';
 import AgentSelector from '../components/AgentSelector';
 import { usePendingAgentConstructorOpen } from '../hooks/usePendingAgentConstructorOpen';
 import { clearActiveAgent } from '../utils/clearActiveAgent';
+import { clearActiveSkills } from '../utils/skillSelectionStorage';
+import { useActiveSkillIndicators } from '../hooks/useActiveSkillIndicators';
 import {
   getProjectIconGlyphSx,
   getDropdownItemSx,
@@ -152,6 +154,7 @@ import {
   getSidebarPanelBackground,
   getSidebarChromeSx,
   getSidebarForcedContrastSx,
+  isSidebarPanelLight,
 } from '../constants/sidebarPanelColor';
 import { getWorkZoneBackgroundColor, getWorkZoneCustomImage, isWorkZoneAnimatedMode } from '../constants/workZoneBackground';
 import { useWorkZoneBgMode } from '../hooks/useWorkZoneBgMode';
@@ -405,6 +408,7 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
 
   const mcpScopeChatId = projectId ? projectMcpChatKey(projectId) : null;
   const activeMcpServers = useChatInputMcpIndicators(mcpScopeChatId);
+  const activeSkills = useActiveSkillIndicators();
   const { activeMcpTools } = useMcpStreamingTools();
   const isDarkMode = theme.palette.mode === 'dark';
 
@@ -424,6 +428,11 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
     showNotification('info', 'Агент снят');
   }, [showNotification]);
 
+  const handleClearSkills = useCallback(() => {
+    clearActiveSkills();
+    showNotification('info', 'Skills отключены');
+  }, [showNotification]);
+
   const libraryInputBadge = useMemo(
     () => (
       <ChatInputStatusCluster
@@ -433,6 +442,8 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
         standardAgentsActive={orchestratorAgentsAnyActive}
         myAgentName={myAgentSelection?.name ?? null}
         onAgentToggle={myAgentSelection?.name ? handleClearMyAgent : undefined}
+        activeSkills={activeSkills}
+        onSkillsToggle={activeSkills.length ? handleClearSkills : undefined}
         activeMcpServers={activeMcpServers}
         onMcpClick={handleOpenMcpGearPanel}
       />
@@ -444,6 +455,8 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
       orchestratorAgentsAnyActive,
       myAgentSelection?.name,
       handleClearMyAgent,
+      activeSkills,
+      handleClearSkills,
       activeMcpServers,
       handleOpenMcpGearPanel,
     ],
@@ -471,11 +484,19 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
         : activeMcpServers.length > 1
           ? `${activeMcpServers.length} MCP`
           : '';
+    const skillsLabel =
+      activeSkills.length === 1
+        ? (activeSkills[0].name || activeSkills[0].slug || 'Skill').trim()
+        : activeSkills.length > 1
+          ? `${activeSkills.length} Skills`
+          : '';
     const clusterWidth = estimateLibraryClusterWidthPx(
       useKbRag,
       orchestratorAgentsAnyActive || Boolean(myAgentSelection?.name),
       activeMcpServers.length > 0,
       mcpLabel,
+      activeSkills.length > 0,
+      skillsLabel,
     );
     return getToolsButtonInsetSp(chatInputStyle, clusterWidth);
   }, [
@@ -483,6 +504,7 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
     orchestratorAgentsAnyActive,
     myAgentSelection?.name,
     activeMcpServers,
+    activeSkills,
     chatInputStyle,
   ]);
 
@@ -1811,20 +1833,20 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
                           setRightSidebarOpen(true);
                           setTranscriptionMenuOpen(true);
                         }}
-                        sx={getSidebarRailCollapsedListItemButtonSx(isDarkMode)}
+                        sx={getSidebarRailCollapsedListItemButtonSx(isSidebarPanelLight(rightSidebarPanelBg))}
                       >
                         <SidebarRailTranscribeIcon sx={SIDEBAR_LIST_ICON_SX} />
                       </ListItemButton>
                     </Box>
                   </Tooltip>
                 </ListItem>
-                <GalleryNavButton variant="collapsed" isDarkMode={isDarkMode} />
+                <GalleryNavButton variant="collapsed" isDarkMode={isDarkMode} panelIsLight={isSidebarPanelLight(rightSidebarPanelBg)} />
                 <ListItem disablePadding sx={{ mb: 0.5, display: 'block' }}>
                   <Tooltip title="Skills" placement="left">
                     <Box component="span" sx={{ display: 'flex', width: '100%', justifyContent: 'center' }}>
                       <ListItemButton
                         onClick={() => navigate('/skills')}
-                        sx={getSidebarRailCollapsedListItemButtonSx(isDarkMode)}
+                        sx={getSidebarRailCollapsedListItemButtonSx(isSidebarPanelLight(rightSidebarPanelBg))}
                       >
                         <SkillsNavIcon sx={SIDEBAR_LIST_ICON_SX} />
                       </ListItemButton>
@@ -1839,7 +1861,7 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
                           setRightSidebarOpen(true);
                           setAgentConstructorOpen(true);
                         }}
-                        sx={getSidebarRailCollapsedListItemButtonSx(isDarkMode)}
+                        sx={getSidebarRailCollapsedListItemButtonSx(isSidebarPanelLight(rightSidebarPanelBg))}
                       >
                         <SidebarRailAgentIcon sx={SIDEBAR_LIST_ICON_SX} />
                       </ListItemButton>
@@ -2079,7 +2101,7 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
                   </Box>
                 )}
 
-                <GalleryNavButton variant="expanded" isDarkMode={isDarkMode} />
+                <GalleryNavButton variant="expanded" isDarkMode={isDarkMode} panelIsLight={isSidebarPanelLight(rightSidebarPanelBg)} />
 
                 <ListItem disablePadding sx={{ mb: 0.5 }}>
                   <ListItemButton

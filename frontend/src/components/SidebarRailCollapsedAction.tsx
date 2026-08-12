@@ -13,7 +13,8 @@ import {
 
 interface SidebarRailCollapsedActionProps {
   variant: SidebarRailCollapsedActionVariant;
-  isDarkMode: boolean;
+  /** Светлый фон боковой панели (контраст иконок/hover). */
+  panelIsLight: boolean;
   enterIndex: number;
   onClick: () => void;
   icon: React.ReactElement;
@@ -23,7 +24,7 @@ interface SidebarRailCollapsedActionProps {
 
 export default function SidebarRailCollapsedAction({
   variant,
-  isDarkMode,
+  panelIsLight,
   enterIndex,
   onClick,
   icon,
@@ -40,9 +41,9 @@ export default function SidebarRailCollapsedAction({
           <ListItemButton
             onClick={onClick}
             sx={[
-              getSidebarRailCollapsedListItemButtonSx(isDarkMode),
+              getSidebarRailCollapsedListItemButtonSx(panelIsLight),
               getSidebarRailCollapsedIconHoverSx(variant),
-              active ? { bgcolor: isDarkMode ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.08)' } : {},
+              active ? { bgcolor: panelIsLight ? 'rgba(0,0,0,0.08)' : 'rgba(255,255,255,0.15)' } : {},
             ] as SxProps<Theme>}
           >
             <Box

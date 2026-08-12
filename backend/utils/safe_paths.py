@@ -126,6 +126,56 @@ def resolve_context_prompts_file_path(raw_path: Optional[str]) -> Optional[Path]
     return None
 
 
+def default_llm_settings_dir() -> Path:
+    """Writable-каталог для llm_settings.json (Docker: /app/memory)."""
+    base = default_app_root()
+    preferred = Path("/app/memory") if Path("/app").is_dir() else base / "memory"
+    return _resolve_dir_from_env("LLM_SETTINGS_DIR", preferred, base)
+
+
+def resolve_llm_settings_file_path() -> Path:
+    """
+    Путь для записи llm_settings.json.
+    Порядок: LLM_SETTINGS_PATH -> LLM_SETTINGS_DIR/llm_settings.json -> /app/memory -> cwd/memory.
+    """
+    env_path = os.getenv("LLM_SETTINGS_PATH", "").strip()
+    if env_path:
+        resolved = resolve_path_under_base(env_path, default_app_root(), create_parent=True)
+        if resolved is not None:
+            return resolved
+    return default_llm_settings_dir() / "llm_settings.json"
+
+
+def llm_settings_seed_paths() -> list[Path]:
+    """Read-only шаблоны из образа (для первичной загрузки, если writable-файла ещё нет)."""
+    backend_dir = Path(__file__).resolve().parent.parent
+    seeds: list[Path] = [
+        backend_dir / "llm_settings.json",
+        default_app_root() / "llm_settings.json",
+        Path("/app/llm_settings.json"),
+    ]
+    unique: list[Path] = []
+    for p in seeds:
+        rp = p.resolve()
+        if rp not in unique:
+            unique.append(rp)
+    return unique
+
+
+def llm_settings_file_fallbacks(primary_path: Union[str, Path]) -> list[Path]:
+    primary = Path(primary_path).resolve()
+    fallbacks: list[Path] = [primary]
+    for p in (
+        default_llm_settings_dir() / "llm_settings.json",
+        Path(tempfile.gettempdir()) / "astrachat" / "llm_settings.json",
+        Path(os.getcwd()) / "memory" / "llm_settings.json",
+    ):
+        rp = p.resolve()
+        if rp not in fallbacks:
+            fallbacks.append(rp)
+    return fallbacks
+
+
 def resolve_config_file_path(raw_path: Optional[str]) -> Optional[Path]:
     if not raw_path:
         return None

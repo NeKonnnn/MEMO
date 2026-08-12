@@ -25,6 +25,12 @@ import {
 import { getSidebarPanelBackground } from '../../constants/sidebarPanelColor';
 import { useAppActions } from '../../contexts/AppContext';
 import { getApiUrl, getAuthFetchHeaders } from '../../config/api';
+import ClampedNumberField from '../ClampedNumberField';
+import {
+  fetchRagEntityDefaults,
+  resolveRagEmbeddingModelPath,
+  resolveRagRerankerModelPath,
+} from '../../constants/ragEntityDefaults';
 import {
   getDropdownPopoverPaperSx,
   getDropdownItemSx,
@@ -35,8 +41,8 @@ import {
   getDropdownChevronSx,
   AGENT_CONSTRUCTOR_FIELD_INPUT_PROPS,
   AGENT_CONSTRUCTOR_OUTLINED_INPUT_SX,
-  getAgentConstructorSaveButtonSx,
   getAgentConstructorRestoreButtonSx,
+  AGENT_CONSTRUCTOR_SAVE_BUTTON_SX,
   AGENT_CONSTRUCTOR_SAVE_ICON_SX,
   SIDEBAR_HIDE_SCROLLBAR_SX,
 } from '../../constants/menuStyles';
@@ -68,7 +74,7 @@ const SECTION_HEADER_SX_DARK = {
 } as const;
 
 const SECTION_HEADER_SX_LIGHT = {
-  color: 'text.secondary',
+  color: 'rgba(0,0,0,0.87)',
   fontWeight: 600,
   textTransform: 'uppercase',
   letterSpacing: '0.06em',
@@ -81,7 +87,7 @@ const SWITCH_LABEL_SX_DARK = {
 } as const;
 
 const SWITCH_LABEL_SX_LIGHT = {
-  color: 'text.secondary',
+  color: 'rgba(0,0,0,0.87)',
   fontSize: '0.78rem',
 } as const;
 
@@ -97,22 +103,22 @@ function ragStorageKey(base: string, userId?: string | null): string {
 }
 
 function normalizeStoredStrategy(raw: string | null): RAGStrategy {
-  const s = (raw || 'auto').trim().toLowerCase();
+  const s = (raw || 'hybrid').trim().toLowerCase();
   if (s === 'reranking') return 'hybrid';
   // Однократная миграция старого внутреннего имени; новые запросы его не используют.
   if (s === 'standard') return 'vector';
   if (s === 'auto' || s === 'hybrid' || s === 'vector' || s === 'graph' || s === 'lexical') {
     return s;
   }
-  return 'auto';
+  return 'hybrid';
 }
 
 function normalizeChunkingStrategy(raw: string | null): ChunkingStrategy {
-  const s = (raw || 'hierarchical').trim().toLowerCase();
+  const s = (raw || 'fixed').trim().toLowerCase();
   if (s === 'hierarchical' || s === 'fixed' || s === 'markdown' || s === 'separators' || s === 'semantic') {
     return s;
   }
-  return 'hierarchical';
+  return 'fixed';
 }
 
 interface RAGSettingsProps {
@@ -221,12 +227,12 @@ export default function RAGSettings({
   const sectionHeaderSx = isDarkMode ? SECTION_HEADER_SX_DARK : SECTION_HEADER_SX_LIGHT;
   const switchLabelSx = isDarkMode ? SWITCH_LABEL_SX_DARK : SWITCH_LABEL_SX_LIGHT;
   const dropdownChevronSx = useMemo(() => getDropdownChevronSx(isDarkMode), [isDarkMode]);
-  const saveButtonSx = useMemo(() => getAgentConstructorSaveButtonSx(isDarkMode), [isDarkMode]);
+  const saveButtonSx = AGENT_CONSTRUCTOR_SAVE_BUTTON_SX;
   const restoreButtonSx = useMemo(() => getAgentConstructorRestoreButtonSx(isDarkMode), [isDarkMode]);
-  const mutedCaptionColor = isDarkMode ? 'rgba(255,255,255,0.45)' : 'text.secondary';
-  const helpIconColor = isDarkMode ? 'rgba(255,255,255,0.25)' : 'action.active';
+  const mutedCaptionColor = isDarkMode ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.55)';
+  const helpIconColor = isDarkMode ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.45)';
   const triggerMinWidth = isPanel ? 0 : 280;
-  const [selectedStrategy, setSelectedStrategy] = useState<RAGStrategy>('auto');
+  const [selectedStrategy, setSelectedStrategy] = useState<RAGStrategy>('hybrid');
   const [isLoading, setIsLoading] = useState(false);
   const [strategyPopoverAnchor, setStrategyPopoverAnchor] = useState<HTMLElement | null>(null);
   const [chunkingPopoverAnchor, setChunkingPopoverAnchor] = useState<HTMLElement | null>(null);
@@ -236,13 +242,13 @@ export default function RAGSettings({
   const [ragQueryFixTypos, setRagQueryFixTypos] = useState(false);
   const [ragMultiQueryEnabled, setRagMultiQueryEnabled] = useState(false);
   const [ragHydeEnabled, setRagHydeEnabled] = useState(false);
-  const [ragChatTopK, setRagChatTopK] = useState(5);
-  const [ragChunkingStrategy, setRagChunkingStrategy] = useState<ChunkingStrategy>('hierarchical');
-  const [ragChunkOverlap, setRagChunkOverlap] = useState(200);
-  const [ragChunkSize, setRagChunkSize] = useState(1000);
+  const [ragChatTopK, setRagChatTopK] = useState(12);
+  const [ragChunkingStrategy, setRagChunkingStrategy] = useState<ChunkingStrategy>('fixed');
+  const [ragChunkOverlap, setRagChunkOverlap] = useState(100);
+  const [ragChunkSize, setRagChunkSize] = useState(4000);
   const [ragSimilarityThreshold, setRagSimilarityThreshold] = useState(0);
-  const [ragRerankingEnabled, setRagRerankingEnabled] = useState(false);
-  const [ragRerankTopN, setRagRerankTopN] = useState(5);
+  const [ragRerankingEnabled, setRagRerankingEnabled] = useState(true);
+  const [ragRerankTopN, setRagRerankTopN] = useState(12);
   const [ragSystemPrompt, setRagSystemPrompt] = useState(DEFAULT_RAG_SYSTEM_PROMPT);
   /** Черновики моделей: применяются только по «Сохранить настройки». */
   const [draftEmbeddingPath, setDraftEmbeddingPath] = useState<string | null>(null);
@@ -279,6 +285,12 @@ export default function RAGSettings({
     }
   }, [lockedScope]);
 
+  // Дефолты моделей из ConfigMap backend — кэшируем для resolve/collectDraft.
+  useEffect(() => {
+    if (!isPanel) return;
+    void fetchRagEntityDefaults(projectsAgentsScope);
+  }, [isPanel, projectsAgentsScope]);
+
   // Перечитываем при смене пользователя / скоупа (только в panel — страница Settings
   // показывает лишь библиотеку памяти).
   useEffect(() => {
@@ -287,7 +299,7 @@ export default function RAGSettings({
     setDraftEmbeddingPath(null);
     setDraftRerankerPath(null);
     void loadRAGSettings();
-  }, [ragUserId, projectsAgentsScope, isPanel, entityId, readOnly]);
+  }, [ragUserId, projectsAgentsScope, isPanel, entityId, readOnly, draft]);
 
   // Если родитель переключил роль на «Зритель» при уже открытой панели.
   useEffect(() => {
@@ -352,8 +364,12 @@ export default function RAGSettings({
     rag_similarity_threshold: ragSimilarityThreshold,
     rag_reranking_enabled: ragRerankingEnabled,
     rag_rerank_top_n: ragRerankTopN,
-    rag_embedding_model_path: draftEmbeddingPath,
-    rag_reranker_model_path: draftRerankerPath,
+    rag_embedding_model_path: draft
+      ? resolveRagEmbeddingModelPath(draftEmbeddingPath)
+      : draftEmbeddingPath,
+    rag_reranker_model_path: draft
+      ? resolveRagRerankerModelPath(draftRerankerPath)
+      : draftRerankerPath,
   });
 
   const applyDraftToForm = (value: EntityRagDraft) => {
@@ -369,8 +385,8 @@ export default function RAGSettings({
     setRagSimilarityThreshold(value.rag_similarity_threshold);
     setRagRerankingEnabled(value.rag_reranking_enabled);
     setRagRerankTopN(value.rag_rerank_top_n);
-    setDraftEmbeddingPath(value.rag_embedding_model_path);
-    setDraftRerankerPath(value.rag_reranker_model_path);
+    setDraftEmbeddingPath(resolveRagEmbeddingModelPath(value.rag_embedding_model_path));
+    setDraftRerankerPath(resolveRagRerankerModelPath(value.rag_reranker_model_path));
   };
 
   const loadRAGSettings = async () => {
@@ -407,8 +423,8 @@ export default function RAGSettings({
                 ? data.can_edit
                 : true,
         );
-        let nextStrategy: RAGStrategy = 'auto';
-        let nextChunking: ChunkingStrategy = 'hierarchical';
+        let nextStrategy: RAGStrategy = 'hybrid';
+        let nextChunking: ChunkingStrategy = 'fixed';
         if (data.strategy) {
           // Источник истины — Postgres пользователя, не общий localStorage браузера.
           nextStrategy = normalizeStoredStrategy(String(data.strategy));
@@ -455,8 +471,16 @@ export default function RAGSettings({
         }
         // Кэш для SocketContext / upload — только применённые (серверные) значения.
         syncLocalStorageCache(nextStrategy, nextChunking);
-        setDraftEmbeddingPath(null);
-        setDraftRerankerPath(null);
+        if (draft) {
+          const emb = String(data.rag_embedding_model_path || '').trim();
+          const rer = String(data.rag_reranker_model_path || '').trim();
+          const envDefaults = await fetchRagEntityDefaults(projectsAgentsScope);
+          setDraftEmbeddingPath(emb || envDefaults.embeddingPath);
+          setDraftRerankerPath(rer || envDefaults.rerankerPath);
+        } else {
+          setDraftEmbeddingPath(null);
+          setDraftRerankerPath(null);
+        }
         if (resolvedEntityId != null && resolvedEntityId !== '') {
           console.debug(`[RAG] Настройки применены для ${entityLogLabel}`);
         }
@@ -599,21 +623,22 @@ export default function RAGSettings({
         });
         if (!response.ok) throw new Error(`defaults ${response.status}`);
         const data = await response.json();
+        const envDefaults = await fetchRagEntityDefaults(projectsAgentsScope);
         applyDraftToForm({
-          strategy: String(data.strategy || 'auto'),
+          strategy: String(data.strategy || 'hybrid'),
           agentic_rag_enabled: Boolean(data.agentic_rag_enabled),
           rag_query_fix_typos: Boolean(data.rag_query_fix_typos),
           rag_multi_query_enabled: Boolean(data.rag_multi_query_enabled),
           rag_hyde_enabled: Boolean(data.rag_hyde_enabled),
           rag_chat_top_k: Number(data.rag_chat_top_k) || 12,
-          rag_chunking_strategy: String(data.rag_chunking_strategy || 'hierarchical'),
-          rag_chunk_size: Number(data.rag_chunk_size) || 1000,
-          rag_chunk_overlap: Number(data.rag_chunk_overlap) || 200,
+          rag_chunking_strategy: String(data.rag_chunking_strategy || 'fixed'),
+          rag_chunk_size: Number(data.rag_chunk_size) || 4000,
+          rag_chunk_overlap: Number(data.rag_chunk_overlap) || 100,
           rag_similarity_threshold: Number(data.rag_similarity_threshold) || 0,
           rag_reranking_enabled: Boolean(data.rag_reranking_enabled),
           rag_rerank_top_n: Number(data.rag_rerank_top_n) || 12,
-          rag_embedding_model_path: '',
-          rag_reranker_model_path: '',
+          rag_embedding_model_path: envDefaults.embeddingPath,
+          rag_reranker_model_path: envDefaults.rerankerPath,
         });
         showNotification('success', 'Настройки РАГ возвращены к значениям по умолчанию');
       } catch (error) {
@@ -809,9 +834,9 @@ export default function RAGSettings({
         display: 'flex',
         flexDirection: 'column',
         gap: 1.5,
-        color: isDarkMode ? 'rgba(255,255,255,0.9)' : 'text.primary',
+        color: isDarkMode ? 'rgba(255,255,255,0.9)' : 'rgba(0,0,0,0.87)',
         '& .MuiFormHelperText-root': {
-          color: isDarkMode ? 'rgba(255,255,255,0.45) !important' : undefined,
+          color: isDarkMode ? 'rgba(255,255,255,0.45) !important' : 'rgba(0,0,0,0.55) !important',
         },
       }}
     >
@@ -1038,11 +1063,10 @@ export default function RAGSettings({
         <Box sx={{ mt: 1, display: 'flex', flexDirection: 'column', gap: 1.5 }}>
       <Box sx={RAG_NUM_FIELDS_ROW_SX}>
         <Box sx={{ width: '100%', flex: { sm: '1 1 140px' }, minWidth: { sm: 140 } }}>
-          <TextField
+          <ClampedNumberField
             fullWidth
             size="small"
             disabled={isLoading || isSaving || !canEdit}
-            type="number"
             label={
               <Box sx={MODEL_SETTINGS_LABEL_WRAPPER_SX} component="span">
                 Количество чанков (K)
@@ -1066,33 +1090,21 @@ export default function RAGSettings({
               </Box>
             }
             value={ragChatTopK}
-            onChange={(e) => {
-              const raw = e.target.value;
-              if (raw === '') return;
-              const v = parseInt(raw, 10);
-              if (!Number.isNaN(v)) setRagChatTopK(Math.max(1, Math.min(64, v)));
-            }}
-            onBlur={(e) => {
-              const raw = e.target.value.trim();
-              if (raw === '') {
-                setRagChatTopK(5);
-                return;
-              }
-              const n = parseInt(raw, 10);
-              if (Number.isNaN(n)) setRagChatTopK(5);
-              else setRagChatTopK(Math.max(1, Math.min(64, n)));
-            }}
-            inputProps={{ min: 1, max: 64, step: 1 }}
+            onValueChange={setRagChatTopK}
+            min={1}
+            max={64}
+            step={1}
+            defaultValue={5}
+            integer
             InputLabelProps={{ shrink: true }}
             sx={ragTextFieldSx}
           />
         </Box>
         <Box sx={{ width: '100%', flex: { sm: '1 1 140px' }, minWidth: { sm: 140 } }}>
-          <TextField
+          <ClampedNumberField
             fullWidth
             size="small"
             disabled={isLoading || isSaving || !canEdit}
-            type="number"
             label={
               <Box sx={MODEL_SETTINGS_LABEL_WRAPPER_SX} component="span">
                 Размер чанка
@@ -1112,33 +1124,21 @@ export default function RAGSettings({
               </Box>
             }
             value={ragChunkSize}
-            onChange={(e) => {
-              const raw = e.target.value;
-              if (raw === '') return;
-              const v = parseInt(raw, 10);
-              if (!Number.isNaN(v)) setRagChunkSize(Math.max(200, Math.min(8000, v)));
-            }}
-            onBlur={(e) => {
-              const raw = e.target.value.trim();
-              if (raw === '') {
-                setRagChunkSize(1000);
-                return;
-              }
-              const n = parseInt(raw, 10);
-              if (Number.isNaN(n)) setRagChunkSize(1000);
-              else setRagChunkSize(Math.max(200, Math.min(8000, n)));
-            }}
-            inputProps={{ min: 200, max: 8000, step: 50 }}
+            onValueChange={setRagChunkSize}
+            min={200}
+            max={8000}
+            step={50}
+            defaultValue={1000}
+            integer
             InputLabelProps={{ shrink: true }}
             sx={ragTextFieldSx}
           />
         </Box>
         <Box sx={{ width: '100%', flex: { sm: '1 1 140px' }, minWidth: { sm: 140 } }}>
-          <TextField
+          <ClampedNumberField
             fullWidth
             size="small"
             disabled={isLoading || isSaving || !canEdit}
-            type="number"
             label={
               <Box sx={MODEL_SETTINGS_LABEL_WRAPPER_SX} component="span">
                 Размер перекрытия
@@ -1158,33 +1158,21 @@ export default function RAGSettings({
               </Box>
             }
             value={ragChunkOverlap}
-            onChange={(e) => {
-              const raw = e.target.value;
-              if (raw === '') return;
-              const v = parseInt(raw, 10);
-              if (!Number.isNaN(v)) setRagChunkOverlap(Math.max(0, Math.min(2000, v)));
-            }}
-            onBlur={(e) => {
-              const raw = e.target.value.trim();
-              if (raw === '') {
-                setRagChunkOverlap(200);
-                return;
-              }
-              const n = parseInt(raw, 10);
-              if (Number.isNaN(n)) setRagChunkOverlap(200);
-              else setRagChunkOverlap(Math.max(0, Math.min(2000, n)));
-            }}
-            inputProps={{ min: 0, max: 2000, step: 10 }}
+            onValueChange={setRagChunkOverlap}
+            min={0}
+            max={2000}
+            step={10}
+            defaultValue={200}
+            integer
             InputLabelProps={{ shrink: true }}
             sx={ragTextFieldSx}
           />
         </Box>
         <Box sx={{ width: '100%', flex: { sm: '1 1 140px' }, minWidth: { sm: 140 } }}>
-          <TextField
+          <ClampedNumberField
             fullWidth
             size="small"
             disabled={isLoading || isSaving || !canEdit}
-            type="number"
             label={
               <Box sx={MODEL_SETTINGS_LABEL_WRAPPER_SX} component="span">
                 Порог схожести
@@ -1204,25 +1192,13 @@ export default function RAGSettings({
               </Box>
             }
             value={ragSimilarityThreshold}
-            onChange={(e) => {
-              const raw = e.target.value;
-              if (raw === '') return;
-              const v = Number(raw);
-              if (!Number.isNaN(v)) {
-                setRagSimilarityThreshold(Math.max(0, Math.min(1, Number(v.toFixed(4)))));
-              }
-            }}
-            onBlur={(e) => {
-              const raw = e.target.value.trim();
-              if (raw === '') {
-                setRagSimilarityThreshold(0);
-                return;
-              }
-              const n = Number(raw);
-              if (Number.isNaN(n)) setRagSimilarityThreshold(0);
-              else setRagSimilarityThreshold(Math.max(0, Math.min(1, Number(n.toFixed(4)))));
-            }}
-            inputProps={{ min: 0, max: 1, step: 0.01 }}
+            onValueChange={setRagSimilarityThreshold}
+            min={0}
+            max={1}
+            step={0.01}
+            defaultValue={0}
+            integer={false}
+            decimals={4}
             InputLabelProps={{ shrink: true }}
             sx={ragTextFieldSx}
           />
@@ -1253,11 +1229,10 @@ export default function RAGSettings({
         )}
       </Box>
 
-      <TextField
+      <ClampedNumberField
         fullWidth
         size="small"
         disabled={isLoading || isSaving || !canEdit || !ragRerankingEnabled}
-        type="number"
         label={
           <Box sx={MODEL_SETTINGS_LABEL_WRAPPER_SX} component="span">
             Количество чанков после реранкинга (Top-N)
@@ -1277,23 +1252,12 @@ export default function RAGSettings({
           </Box>
         }
         value={ragRerankTopN}
-        onChange={(e) => {
-          const raw = e.target.value;
-          if (raw === '') return;
-          const v = parseInt(raw, 10);
-          if (!Number.isNaN(v)) setRagRerankTopN(Math.max(1, Math.min(64, v)));
-        }}
-        onBlur={(e) => {
-          const raw = e.target.value.trim();
-          if (raw === '') {
-            setRagRerankTopN(5);
-            return;
-          }
-          const n = parseInt(raw, 10);
-          if (Number.isNaN(n)) setRagRerankTopN(5);
-          else setRagRerankTopN(Math.max(1, Math.min(64, n)));
-        }}
-        inputProps={{ min: 1, max: 64, step: 1 }}
+        onValueChange={setRagRerankTopN}
+        min={1}
+        max={64}
+        step={1}
+        defaultValue={5}
+        integer
         InputLabelProps={{ shrink: true }}
         sx={ragTextFieldSx}
       />
@@ -1379,9 +1343,9 @@ export default function RAGSettings({
       (lockedScope === 'project' ? 'Настройки РАГ для проектов' : 'Настройки РАГ для агента');
     const panelBg = isDarkMode ? getSidebarPanelBackground() : undefined;
     const headerBorder = isDarkMode ? '1px solid rgba(255,255,255,0.08)' : '1px solid rgba(0,0,0,0.08)';
-    const headerColor = isDarkMode ? 'white' : 'text.primary';
-    const backBtnColor = isDarkMode ? 'rgba(255,255,255,0.7)' : 'text.secondary';
-    const backBtnHover = isDarkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.04)';
+    const headerColor = isDarkMode ? 'white' : 'rgba(0,0,0,0.87)';
+    const backBtnColor = isDarkMode ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.65)';
+    const backBtnHover = isDarkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)';
 
     return (
       <Box
@@ -1391,7 +1355,7 @@ export default function RAGSettings({
           height: '100%',
           overflow: 'hidden',
           background: panelBg,
-          color: isDarkMode ? 'white' : 'text.primary',
+          color: isDarkMode ? 'white' : 'rgba(0,0,0,0.87)',
         }}
       >
         <Box

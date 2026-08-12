@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "dependencies": {
+    "@codesandbox/sandpack-react": "^2.20.0",
     "@emotion/react": "^11.14.0",
     "@emotion/styled": "^11.14.1",
     "@monaco-editor/react": "^4.7.0",
@@ -22,6 +23,7 @@
     "concurrently": "^9.2.0",
     "dom-to-pptx": "^2.1.1",
     "js-yaml": "^4.1.1",
+    "mermaid": "^11.16.1",
     "monaco-editor": "^0.55.1",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
@@ -39,9 +41,10 @@
     "xlsx": "^0.18.5"
   },
   "scripts": {
-    "prestart": "node scripts/copy-monaco-assets.js",
+    "copy-presentation-assets": "node scripts/copy-presentation-assets.js",
+    "prestart": "node scripts/copy-monaco-assets.js && node scripts/copy-presentation-assets.js",
     "start": "react-scripts start",
-    "prebuild": "node scripts/copy-monaco-assets.js",
+    "prebuild": "node scripts/copy-monaco-assets.js && node scripts/copy-presentation-assets.js",
     "build": "react-scripts build",
     "test": "react-scripts test",
     "eject": "react-scripts eject"

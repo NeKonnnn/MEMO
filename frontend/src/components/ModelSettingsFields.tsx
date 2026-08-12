@@ -2,7 +2,6 @@ import React from 'react';
 import {
   Box,
   Typography,
-  TextField,
   Switch,
   IconButton,
   Tooltip,
@@ -23,9 +22,12 @@ import {
   AGENT_CONSTRUCTOR_FIELD_LINE_HEIGHT,
   MODEL_SETTINGS_DEFAULT,
   MODEL_SETTINGS_MAX_DEFAULT,
+  modelSettingsSwitchSx,
   type ModelSettingsState,
   type ModelSettingsMaxValues,
 } from '../constants/modelSettingsStyles';
+import { getFormFieldInputSx } from '../constants/menuStyles';
+import ClampedNumberField from './ClampedNumberField';
 
 const TOOLTIPS: Record<string, string> = {
   context_size: 'Максимальное количество токенов, которые модель может использовать для понимания контекста. Больше значение = больше контекста, но больше потребление памяти.',
@@ -45,13 +47,19 @@ interface ModelSettingsFieldsProps {
   value: ModelSettingsState;
   onChange: (next: ModelSettingsState) => void;
   maxValues?: Partial<ModelSettingsMaxValues>;
+  /** Заводские значения для подскзок "по умолчанию". Приходят с сервера из llm_settings.json. */
+  defaults?: Partial<ModelSettingsState>;
   /** Показывать аккордеон «Тонкая настройка» (иначе только поля) */
   accordion?: boolean;
   /** Класс/стиль для тёмной панели (конструктор агентов) — тогда лейблы белые */
   darkPanel?: boolean;
   /** Компактная сетка: уже колонки, несколько полей в строке (в модалке выбора модели в конструкторе) */
   compact?: boolean;
+  /** Только просмотр: аккордеон открывается, поля и переключатели заблокированы. */
+  readOnly?: boolean;
 }
+
+const INTEGER_KEYS = new Set<keyof ModelSettingsState>(['context_size', 'output_tokens', 'top_k']);
 
 function numField(
   key: keyof ModelSettingsState,
@@ -63,45 +71,36 @@ function numField(
   step: number,
   defaultVal: number,
   tooltip: string,
-  darkPanel: boolean
+  darkPanel: boolean,
+  readOnly: boolean,
 ) {
   return (
     <Box key={key}>
-      <TextField
+      <ClampedNumberField
         label={
           <Box sx={MODEL_SETTINGS_LABEL_WRAPPER_SX} component="span">
             {label}
             <Tooltip title={tooltip} arrow>
               <IconButton size="small" sx={MODEL_SETTINGS_HELP_ICON_BUTTON_SX} onClick={(e: React.MouseEvent) => e.stopPropagation()}>
-                <HelpOutlineIcon fontSize="small" color="action" />
+                <HelpOutlineIcon
+                  fontSize="small"
+                  sx={{ color: darkPanel ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.45)' }}
+                />
               </IconButton>
             </Tooltip>
           </Box>
         }
-        type="number"
         value={value}
-        onChange={(e) => {
-          const v = e.target.value;
-          if (v === '') {
-            onChange(0);
-            return;
-          }
-          const n = key === 'context_size' || key === 'output_tokens' || key === 'top_k' ? parseInt(v, 10) : parseFloat(v);
-          if (!Number.isNaN(n)) onChange(n);
-        }}
-        onBlur={(e) => {
-          const v = e.target.value.trim();
-          if (v === '') {
-            onChange(defaultVal);
-            return;
-          }
-          const n = key === 'context_size' || key === 'output_tokens' || key === 'top_k' ? parseInt(v, 10) : parseFloat(v);
-          if (Number.isNaN(n) || n < min) onChange(defaultVal);
-        }}
-        inputProps={{ min, max, step }}
+        onValueChange={onChange}
+        min={min}
+        max={max}
+        step={step}
+        defaultValue={defaultVal}
+        integer={INTEGER_KEYS.has(key)}
+        disabled={readOnly}
         fullWidth
         size="small"
-        sx={darkPanel ? { ...MODEL_SETTINGS_INPUT_SX } : undefined}
+        sx={darkPanel ? { ...MODEL_SETTINGS_INPUT_SX } : getFormFieldInputSx(false)}
       />
     </Box>
   );
@@ -111,12 +110,18 @@ export default function ModelSettingsFields({
   value,
   onChange,
   maxValues: maxValuesProp,
+  defaults: defaultsProp,
   accordion = true,
   darkPanel = false,
   compact = false,
+  readOnly = false,
 }: ModelSettingsFieldsProps) {
   const maxValues = { ...MODEL_SETTINGS_MAX_DEFAULT, ...maxValuesProp };
-  const set = (patch: Partial<ModelSettingsState>) => onChange({ ...value, ...patch });
+  const defaults = { ...MODEL_SETTINGS_DEFAULT, ...defaultsProp };
+  const set = (patch: Partial<ModelSettingsState>) => {
+    if (readOnly) return;
+    onChange({ ...value, ...patch });
+  };
 
   const gridContent = (
     <Box sx={compact ? MODEL_SETTINGS_GRID_COMPACT_SX : MODEL_SETTINGS_GRID_SX}>
@@ -128,9 +133,10 @@ export default function ModelSettingsFields({
         512,
         maxValues.context_size,
         512,
-        MODEL_SETTINGS_DEFAULT.context_size,
+        defaults.context_size,
         TOOLTIPS.context_size,
-        darkPanel
+        darkPanel,
+        readOnly,
       )}
       {numField(
         'output_tokens',
@@ -140,9 +146,10 @@ export default function ModelSettingsFields({
         64,
         maxValues.output_tokens,
         64,
-        MODEL_SETTINGS_DEFAULT.output_tokens,
+        defaults.output_tokens,
         TOOLTIPS.output_tokens,
-        darkPanel
+        darkPanel,
+        readOnly,
       )}
       {numField(
         'temperature',
@@ -152,9 +159,10 @@ export default function ModelSettingsFields({
         0.1,
         maxValues.temperature,
         0.1,
-        MODEL_SETTINGS_DEFAULT.temperature,
+        defaults.temperature,
         TOOLTIPS.temperature,
-        darkPanel
+        darkPanel,
+        readOnly,
       )}
       {numField(
         'top_p',
@@ -164,9 +172,10 @@ export default function ModelSettingsFields({
         0.1,
         maxValues.top_p,
         0.05,
-        MODEL_SETTINGS_DEFAULT.top_p,
+        defaults.top_p,
         TOOLTIPS.top_p,
-        darkPanel
+        darkPanel,
+        readOnly,
       )}
       {numField(
         'repeat_penalty',
@@ -176,9 +185,10 @@ export default function ModelSettingsFields({
         1.0,
         maxValues.repeat_penalty,
         0.05,
-        MODEL_SETTINGS_DEFAULT.repeat_penalty,
+        defaults.repeat_penalty,
         TOOLTIPS.repeat_penalty,
-        darkPanel
+        darkPanel,
+        readOnly,
       )}
       {numField(
         'top_k',
@@ -188,9 +198,10 @@ export default function ModelSettingsFields({
         1,
         maxValues.top_k,
         1,
-        MODEL_SETTINGS_DEFAULT.top_k,
+        defaults.top_k,
         TOOLTIPS.top_k,
-        darkPanel
+        darkPanel,
+        readOnly,
       )}
       {numField(
         'min_p',
@@ -200,9 +211,10 @@ export default function ModelSettingsFields({
         0,
         maxValues.min_p,
         0.01,
-        MODEL_SETTINGS_DEFAULT.min_p,
+        defaults.min_p,
         TOOLTIPS.min_p,
-        darkPanel
+        darkPanel,
+        readOnly,
       )}
       {numField(
         'frequency_penalty',
@@ -212,9 +224,10 @@ export default function ModelSettingsFields({
         0,
         maxValues.frequency_penalty,
         0.1,
-        MODEL_SETTINGS_DEFAULT.frequency_penalty,
+        defaults.frequency_penalty,
         TOOLTIPS.frequency_penalty,
-        darkPanel
+        darkPanel,
+        readOnly,
       )}
       {numField(
         'presence_penalty',
@@ -224,9 +237,10 @@ export default function ModelSettingsFields({
         0,
         maxValues.presence_penalty,
         0.1,
-        MODEL_SETTINGS_DEFAULT.presence_penalty,
+        defaults.presence_penalty,
         TOOLTIPS.presence_penalty,
-        darkPanel
+        darkPanel,
+        readOnly,
       )}
     </Box>
   );
@@ -237,7 +251,7 @@ export default function ModelSettingsFields({
         <Typography
           variant="caption"
           sx={{
-            color: darkPanel ? 'rgba(255,255,255,0.7)' : 'text.secondary',
+            color: darkPanel ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.87)',
             fontSize: '0.78rem',
             lineHeight: 1.3,
           }}
@@ -248,7 +262,7 @@ export default function ModelSettingsFields({
           <HelpOutlineIcon
             sx={{
               fontSize: 12,
-              color: darkPanel ? 'rgba(255,255,255,0.25)' : 'action.active',
+              color: darkPanel ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.45)',
               cursor: 'help',
               flexShrink: 0,
             }}
@@ -257,7 +271,12 @@ export default function ModelSettingsFields({
       </Box>
       <Switch
         checked={checked}
-        onChange={(e) => onToggle(e.target.checked)}
+        disabled={readOnly}
+        sx={modelSettingsSwitchSx(darkPanel)}
+        onChange={(e) => {
+          if (readOnly) return;
+          onToggle(e.target.checked);
+        }}
       />
     </Box>
   );
@@ -282,13 +301,25 @@ export default function ModelSettingsFields({
                   '& .MuiAccordionSummary-root': { color: 'rgba(255,255,255,0.9)' },
                   '& .MuiAccordionDetails-root': { color: 'rgba(255,255,255,0.9)' },
                 }
-              : {}),
+              : {
+                  bgcolor: 'transparent',
+                  color: 'rgba(0,0,0,0.87)',
+                  '& .MuiAccordionSummary-root': { color: 'rgba(0,0,0,0.87)' },
+                  '& .MuiAccordionDetails-root': { color: 'rgba(0,0,0,0.87)' },
+                }),
           }}
         >
-          <AccordionSummary expandIcon={<ExpandMoreIcon sx={darkPanel ? { color: 'rgba(255,255,255,0.7)' } : undefined} />}>
+          <AccordionSummary expandIcon={<ExpandMoreIcon sx={{ color: darkPanel ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.55)' }} />}>
             <Box sx={MODEL_SETTINGS_LABEL_WRAPPER_SX}>
-              <SettingsIcon />
-              <Typography sx={{ fontSize: AGENT_CONSTRUCTOR_FIELD_FONT_SIZE, lineHeight: AGENT_CONSTRUCTOR_FIELD_LINE_HEIGHT, fontWeight: 500 }}>
+              <SettingsIcon sx={{ color: darkPanel ? 'rgba(255,255,255,0.85)' : 'rgba(0,0,0,0.65)' }} />
+              <Typography
+                sx={{
+                  fontSize: AGENT_CONSTRUCTOR_FIELD_FONT_SIZE,
+                  lineHeight: AGENT_CONSTRUCTOR_FIELD_LINE_HEIGHT,
+                  fontWeight: 500,
+                  color: darkPanel ? 'rgba(255,255,255,0.9)' : 'rgba(0,0,0,0.87)',
+                }}
+              >
                 Тонкая настройка
               </Typography>
             </Box>
