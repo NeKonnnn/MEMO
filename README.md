@@ -316,7 +316,7 @@ docker-compose ps
 
 ## Star History
 
-![Star History Chart](https://githubusercontent.com)
+[![Star History Chart](https://api.star-history.com/svg?repos=NeKonnnn/Astra-Studio&type=date&legend=bottom-right)](https://www.star-history.com/?repos=NeKonnnn%2FAstra-Studio&type=date&legend=bottom-right)
 
 ---
 
