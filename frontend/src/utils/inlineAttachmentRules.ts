@@ -1,15 +1,19 @@
-import { formatFileSize } from './inlineImage';
-
 export const INLINE_ATTACH_ALLOWED_TYPES_LABEL =
   'PDF (.pdf), Word (.docx, .docm), Excel (.xlsx, .xls, .xlsm), текст (.txt, .md, .log, .rtf), изображения (.jpg, .jpeg, .png, .webp, .gif, .bmp)';
 
-/** Значение атрибута accept для input type=file (inline-вложения). */
+/** Значение accept для <input type="file"> кнопки «+» — тот же список, что в подписи. */
 export const INLINE_ATTACH_ACCEPT =
   '.pdf,.docx,.docm,.xlsx,.xls,.xlsm,.txt,.md,.log,.rtf,.jpg,.jpeg,.png,.webp,.gif,.bmp';
 
 /** Лимит для inline-вложений через «+» (фронт и POST /api/documents/attach). */
-export const INLINE_ATTACHMENT_MAX_BYTES = 50 * 1024 * 1024;
-export const INLINE_ATTACHMENT_MAX_SIZE_MB = 50;
+export const INLINE_ATTACHMENT_MAX_BYTES = 20 * 1024 * 1024;
+export const INLINE_ATTACHMENT_MAX_SIZE_MB = 20;
+
+export const INLINE_ATTACH_WAIT_BEFORE_SEND_MESSAGE =
+  'Пожалуйста, подождите, пока загруженный или обрабатываемый в данный момент файл не завершит обработку, прежде чем отправлять сообщение.';
+
+export const INLINE_ATTACH_OVERSIZED_MESSAGE =
+  'Файл не должен превышать 20 МБ! Рекомендуем поместить его в агентный или проектный РАГ';
 
 const IMAGE_MIME_TYPES = [
   'image/jpeg',
@@ -62,7 +66,6 @@ export function buildUnsupportedInlineAttachMessage(filename: string): string {
   return `Данный тип файлов ${extLabel} не поддерживается. Допускаются следующие файлы: ${INLINE_ATTACH_ALLOWED_TYPES_LABEL}.`;
 }
 
-export function buildOversizedInlineAttachMessage(filename: string, fileSize?: number): string {
-  const sizePart = typeof fileSize === 'number' && fileSize > 0 ? ` (${formatFileSize(fileSize)})` : '';
-  return `Размер файла «${filename}»${sizePart} превышает допустимый лимит. Допустимый размер файла — до ${INLINE_ATTACHMENT_MAX_SIZE_MB} МБ.`;
+export function buildOversizedInlineAttachMessage(_filename?: string, _fileSize?: number): string {
+  return INLINE_ATTACH_OVERSIZED_MESSAGE;
 }

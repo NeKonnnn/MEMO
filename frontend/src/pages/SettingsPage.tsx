@@ -40,7 +40,6 @@ import {
   HelpOutline as HelpOutlineIcon,
 } from '@mui/icons-material';
 import { useAppActions } from '../contexts/AppContext';
-import AgentArchitectureSettings from '../components/AgentArchitectureSettings';
 import MemoryRagLibraryModal from '../components/MemoryRagLibraryModal';
 
 // Backend URL
@@ -1298,24 +1297,6 @@ export default function SettingsPage() {
                  Сбросить к умолчаниям
                </Button>
              </Box>
-           </CardContent>
-         </Card>
-
-         {/* Настройки агентной архитектуры */}
-         <Card sx={{ mb: 3 }}>
-           <CardContent>
-             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
-               <ComputerIcon color="primary" />
-               <Typography variant="h6" gutterBottom sx={{ mb: 0 }}>
-                 Агентная архитектура
-               </Typography>
-             </Box>
-             
-             <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-               Выберите режим работы ассистента: прямой режим (общение с моделью напрямую) или агентный режим (использование специализированных агентов)
-             </Typography>
-             
-             <AgentArchitectureSettings />
            </CardContent>
          </Card>
 

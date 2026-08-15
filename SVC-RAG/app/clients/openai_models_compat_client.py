@@ -1,6 +1,9 @@
 # Клиент моделей RAG к OpenAI-совместимому провайдеру (Phoenix / LiteLLM, свой vLLM).
 # Контракт совпадает с RagModelsClient: embed, embed_single, rerank, health.
 import asyncio
+import contextlib
+import contextvars
+import hashlib
 import json
 import logging
 import os
@@ -68,11 +71,14 @@ _ISOLATE_MAX_BATCH = max(
 #        нужно не всем);
 #  -1  — писать фрагмент целиком. Нужно, когда текст отдают владельцам политики:
 #        им важно видеть ровно то, на что сработало правило;
-#   N  — обрезать до N символов (по умолчанию 200).
+#   N  — обрезать до N символов.
+# По умолчанию -1: заблокированный чанк нужно видеть целиком, иначе согласовать
+# текст с владельцами политики невозможно — обрезка обычно и съедает то место,
+# на которое сработало правило. Ставьте 0, если содержимое ВНД в логах нежелательно.
 try:
-    _BLOCKED_PREVIEW_CHARS = int(os.getenv("RAG_EMBED_BLOCKED_PREVIEW_CHARS", "200"))
+    _BLOCKED_PREVIEW_CHARS = int(os.getenv("RAG_EMBED_BLOCKED_PREVIEW_CHARS", "-1"))
 except ValueError:
-    _BLOCKED_PREVIEW_CHARS = 1500
+    _BLOCKED_PREVIEW_CHARS = -1
 
 def _preview(text: str) -> str:
     if _BLOCKED_PREVIEW_CHARS == 0:
@@ -85,6 +91,123 @@ def _preview(text: str) -> str:
         return json.dumps(s, ensure_ascii=False)
     s = " ".join(s.split())
     return s if len(s) <= _BLOCKED_PREVIEW_CHARS else f"{s[:_BLOCKED_PREVIEW_CHARS]}…"
+
+
+# ---- 1в: максимально подробный разбор отказа ----
+#
+# Логи — единственная диагностика: curl'а в контуре нет, тело ответа шлюза
+# больше нигде не оседает, а батч к моменту разбора уже потерян. Поэтому пишем
+# всё, что вообще доступно: код, маркер, разобранные поля ответа, заголовки
+# трассировки, тело целиком и сам отклонённый текст.
+
+# Заголовки, по которым владельцы шлюза находят запрос у себя.
+_DIAG_HEADERS = (
+    "x-request-id",
+    "x-correlation-id",
+    "x-trace-id",
+    "x-litellm-call-id",
+    "x-litellm-model-id",
+    "x-litellm-version",
+    "retry-after",
+    "date",
+    "server",
+)
+
+# Ключи, в которых шлюзы прячут причину. Обходим рекурсивно: у Phoenix причина
+# лежит в error.message, у части сборок litellm — во вложенном объекте гардрейла.
+_REASON_KEYS = frozenset(
+    (
+        "message", "code", "type", "param", "reason", "detail", "details",
+        "guardrail", "guardrail_name", "guardrails", "policy", "policy_name",
+        "rule", "rule_name", "violation", "violations", "category", "categories",
+        "flagged", "matched", "entities", "score", "scores", "blocked_by",
+        "status", "error_code", "failure_reason",
+    )
+)
+
+def _walk_reason_fields(
+    node: Any,
+    prefix: str = "",
+    out: Optional[Dict[str, Any]] = None,
+    depth: int = 0,
+) -> Dict[str, Any]:
+    """Все скалярные поля ответа, похожие на причину блокировки, с их путями."""
+    if out is None:
+        out = {}
+    if depth > 6 or len(out) > 60:
+        return out
+    if isinstance(node, dict):
+        for k, v in node.items():
+            path = f"{prefix}.{k}" if prefix else str(k)
+            if str(k).lower() in _REASON_KEYS and (
+                not isinstance(v, (dict, list))
+                # Списки скаляров тоже нужны: в них лежат сработавшие категории
+                # и найденные сущности («entities»: [«PERSON», «ORG»]).
+                or (
+                    isinstance(v, list)
+                    and v
+                    and not any(isinstance(x, (dict, list)) for x in v)
+                )
+            ):
+                out[path] = v
+            _walk_reason_fields(v, path, out, depth + 1)
+    elif isinstance(node, list):
+        for i, v in enumerate(node[:20]):
+            _walk_reason_fields(v, f"{prefix}[{i}]", out, depth + 1)
+    return out
+
+def _guardrail_report(resp: httpx.Response) -> str:
+    """Код, сработавший маркер, разобранные поля, заголовки и тело целиком."""
+    lines = [f"HTTP {resp.status_code} {resp.reason_phrase or ''}".strip()]
+    body = resp.text or ""
+    low = body.lower()
+    matched = [m for m in _NON_RETRIABLE_BODY_MARKERS if m in low]
+    lines.append(f"сработавший маркер: {matched if matched else '— (маркеров нет)'}")
+    parsed: Any = None
+    with contextlib.suppress(Exception):
+        parsed = json.loads(body)
+    if parsed is not None:
+        fields = _walk_reason_fields(parsed)
+        if fields:
+            lines.append("разобранные поля ответа:")
+            for k, v in fields.items():
+                lines.append(f"      {k} = {json.dumps(v, ensure_ascii=False)}")
+        else:
+            lines.append("разобранные поля ответа: — (знакомых ключей нет)")
+    else:
+        lines.append("тело не JSON — ниже как есть")
+    hdrs = {k: v for k, v in resp.headers.items() if k.lower() in _DIAG_HEADERS}
+    if hdrs:
+        lines.append(f"заголовки: {json.dumps(hdrs, ensure_ascii=False)}")
+    lines.append(f"тело ответа целиком: {json.dumps(body, ensure_ascii=False)}")
+    return "\n    ".join(lines)
+
+def _text_report(text: str) -> str:
+    """Сам отклонённый текст плюс всё, чем его можно опознать в базе."""
+    s = str(text or "")
+    digest = hashlib.sha1(s.encode("utf-8", "replace")).hexdigest()
+    return (
+        f"длина={len(s)} символов, строк={s.count(chr(10)) + 1}, sha1={digest}\n"
+        f"    текст: {_preview(s)}"
+    )
+
+# Кто индексируется прямо сейчас. Клиент про документы ничего не знает — он
+# видит только список строк, — поэтому идентификацию передаёт вызывающий.
+# Без неё в логе виден отклонённый чанк, но не видно, из какого он файла.
+_embed_ctx: contextvars.ContextVar = contextvars.ContextVar("embed_log_ctx", default=None)
+
+def set_embed_log_context(**fields: Any) -> None:
+    """Пометить текущую операцию (стор, документ, файл) для логов гардрейла.
+
+    Сбрасывать не нужно: пометка живёт в контексте задачи, а задача — это один
+    HTTP-запрос. Внутри перечанковки всего стора каждый следующий документ
+    переписывает пометку своей, так что она всегда про текущий.
+    """
+    _embed_ctx.set({k: v for k, v in fields.items() if v is not None})
+
+def _ctx_line() -> str:
+    ctx = _embed_ctx.get()
+    return json.dumps(ctx, ensure_ascii=False) if ctx else "— (не задан вызывающим)"
 
 
 class OpenAICompatModelsClient:
@@ -507,6 +630,23 @@ class OpenAICompatModelsClient:
                     if isinstance(e, httpx.HTTPStatusError) and _is_permanent_refusal(
                         e.response
                     ):
+                        logger.error(
+                            "[%s] GUARDRAIL: батч %s–%s отклонён политикой шлюза\n"
+                            "  что индексировалось: %s\n"
+                            "  запрос: POST %s (модель=%s, kind=%s, фрагментов=%s, "
+                            "символов в батче=%s)\n"
+                            "  ответ шлюза:\n    %s",
+                            self.provider_id,
+                            start + 1,
+                            start + len(batch),
+                            _ctx_line(),
+                            url,
+                            use_model,
+                            kind,
+                            len(batch),
+                            sum(len(t or "") for t in batch),
+                            _guardrail_report(e.response),
+                        )
                         await self._report_blocked_texts(
                             client, url, batch, use_model, kind, start
                         )
@@ -552,9 +692,23 @@ class OpenAICompatModelsClient:
         равно не проиндексировались. Исключений не поднимает: это диагностика,
         она не должна подменять исходную ошибку
         """
-        if not _ISOLATE_BLOCKED or len(batch) > _ISOLATE_MAX_BATCH:
-            return
         first, last = offset + 1, offset + len(batch)
+        if not _ISOLATE_BLOCKED or len(batch) > _ISOLATE_MAX_BATCH:
+            # Молча не уходим: иначе в логе останется отказ по батчу без единого
+            # слова о том, почему не видно конкретных фрагментов.
+            logger.warning(
+                "[%s] GUARDRAIL: разбор батча %s–%s по фрагментам ПРОПУЩЕН "
+                "(RAG_EMBED_GUARDRAIL_ISOLATE=%s, размер батча %s при лимите "
+                "RAG_EMBED_GUARDRAIL_ISOLATE_MAX_BATCH=%s). Какой именно текст "
+                "отклонён — не установлено",
+                self.provider_id,
+                first,
+                last,
+                "1" if _ISOLATE_BLOCKED else "0",
+                len(batch),
+                _ISOLATE_MAX_BATCH,
+            )
+            return
         blocked: List[int] = []
         for i, text in enumerate(batch):
             try:
@@ -569,26 +723,39 @@ class OpenAICompatModelsClient:
                     continue
                 blocked.append(offset + i + 1)
                 logger.error(
-                    "[%s] guardrail отклонил фрагмент #%s (%s симв.): %s",
+                    "[%s] GUARDRAIL: отклонён фрагмент #%s (%s-й в батче %s–%s)\n"
+                    "  что индексировалось: %s\n"
+                    "  запрос: POST %s (модель=%s, kind=%s)\n"
+                    "  фрагмент: %s\n"
+                    "  ответ шлюза:\n    %s",
                     self.provider_id,
                     offset + i + 1,
-                    len(text or ""),
-                    _preview(text),
+                    i + 1,
+                    first,
+                    last,
+                    _ctx_line(),
+                    url,
+                    model,
+                    kind,
+                    _text_report(text),
+                    _guardrail_report(e.response),
                 )
             except Exception:
                 # Сетевая осечка на разборе - не наш случай, молча пропускаем.
                 continue
         if blocked:
             logger.error(
-                "[%s] guardrail: в батче %s–%s отклонено фрагментов %s из %s "
-                "(номера: %s). Остальные прошли - политика сработала на "
-                "конкретном тексте",
+                "[%s] GUARDRAIL ИТОГ: в батче %s–%s отклонено %s из %s "
+                "(номера: %s), прошло %s. Политика сработала на конкретных "
+                "текстах — они выведены выше целиком. Что индексировалось: %s",
                 self.provider_id,
                 first,
                 last,
                 len(blocked),
                 len(batch),
                 blocked,
+                len(batch) - len(blocked),
+                _ctx_line(),
             )
         else:
             logger.warning(

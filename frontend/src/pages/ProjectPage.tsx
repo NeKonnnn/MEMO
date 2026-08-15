@@ -116,6 +116,7 @@ import GalleryNavButton from '../components/GalleryNavButton';
 import ModelSelector from '../components/ModelSelector';
 import AgentSelector from '../components/AgentSelector';
 import { usePendingAgentConstructorOpen } from '../hooks/usePendingAgentConstructorOpen';
+import { useRightSidebarInsetCssVar } from '../hooks/useRightSidebarInsetCssVar';
 import { clearActiveAgent } from '../utils/clearActiveAgent';
 import { clearActiveSkills } from '../utils/skillSelectionStorage';
 import { useActiveSkillIndicators } from '../hooks/useActiveSkillIndicators';
@@ -158,7 +159,7 @@ import {
 } from '../constants/sidebarPanelColor';
 import { getWorkZoneBackgroundColor, getWorkZoneCustomImage, isWorkZoneAnimatedMode } from '../constants/workZoneBackground';
 import { useWorkZoneBgMode } from '../hooks/useWorkZoneBgMode';
-import { useMyAgentSelection, useOrchestratorAgentsAnyActive } from '../hooks/useChatInputAgentIndicators';
+import { useMyAgentSelection } from '../hooks/useChatInputAgentIndicators';
 import { useRagReindexStatus } from '../hooks/useRagReindexStatus';
 import {
   MEMORY_RAG_DISABLED_HINT,
@@ -180,13 +181,6 @@ import {
   MODEL_THINKING_MODE_STORAGE_KEY,
   ModelThinkingMode,
 } from '../utils/modelThinking';
-
-interface ProjectPageAgentStatus {
-  is_initialized: boolean;
-  mode: string;
-  available_agents: number;
-  orchestrator_active: boolean;
-}
 
 const projectIconMap: Record<string, React.ComponentType<any>> = {
   folder: FolderIcon,
@@ -293,8 +287,6 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
   /** Ширина меню «Инструменты» = ширина пилюли ввода. */
   const [gearToolsMenuWidthPx, setGearToolsMenuWidthPx] = useState<number | null>(null);
   const [gearToolsPaperHeightPx, setGearToolsPaperHeightPx] = useState<number | null>(null);
-  const [agentStatus, setAgentStatus] = useState<ProjectPageAgentStatus | null>(null);
-  const orchestratorAgentsAnyActive = useOrchestratorAgentsAnyActive(Boolean(agentStatus?.is_initialized));
   const [transcriptionModalOpen, setTranscriptionModalOpen] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [transcriptionResult, setTranscriptionResult] = useState('');
@@ -333,37 +325,6 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
   useEffect(() => {
     localStorage.setItem(MODEL_THINKING_MODE_STORAGE_KEY, modelThinkingMode);
   }, [modelThinkingMode]);
-
-  const loadAgentStatus = useCallback(async () => {
-    try {
-      const response = await fetch(getApiUrl('/api/agent/status'));
-      if (response.ok) {
-        const data = await response.json();
-        setAgentStatus((prev) => {
-          if (JSON.stringify(prev) !== JSON.stringify(data)) return data;
-          return prev;
-        });
-      }
-    } catch {
-      /* ignore */
-    }
-  }, []);
-
-  useEffect(() => {
-    void loadAgentStatus();
-    const onAgentChange = () => void loadAgentStatus();
-    window.addEventListener('astrachatAgentStatusChanged', onAgentChange);
-    const onVis = () => {
-      if (document.visibilityState === 'visible') void loadAgentStatus();
-    };
-    document.addEventListener('visibilitychange', onVis);
-    const interval = setInterval(() => void loadAgentStatus(), 10000);
-    return () => {
-      window.removeEventListener('astrachatAgentStatusChanged', onAgentChange);
-      document.removeEventListener('visibilitychange', onVis);
-      clearInterval(interval);
-    };
-  }, [loadAgentStatus]);
 
   useLayoutEffect(() => {
     if (!anchorEl) return;
@@ -439,7 +400,6 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
         isDarkMode={isDarkMode}
         libraryActive={useKbRag}
         onLibraryToggle={toggleKbRag}
-        standardAgentsActive={orchestratorAgentsAnyActive}
         myAgentName={myAgentSelection?.name ?? null}
         onAgentToggle={myAgentSelection?.name ? handleClearMyAgent : undefined}
         activeSkills={activeSkills}
@@ -452,7 +412,6 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
       isDarkMode,
       useKbRag,
       toggleKbRag,
-      orchestratorAgentsAnyActive,
       myAgentSelection?.name,
       handleClearMyAgent,
       activeSkills,
@@ -492,7 +451,7 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
           : '';
     const clusterWidth = estimateLibraryClusterWidthPx(
       useKbRag,
-      orchestratorAgentsAnyActive || Boolean(myAgentSelection?.name),
+      Boolean(myAgentSelection?.name),
       activeMcpServers.length > 0,
       mcpLabel,
       activeSkills.length > 0,
@@ -501,7 +460,6 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
     return getToolsButtonInsetSp(chatInputStyle, clusterWidth);
   }, [
     useKbRag,
-    orchestratorAgentsAnyActive,
     myAgentSelection?.name,
     activeMcpServers,
     activeSkills,
@@ -586,6 +544,8 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
   useEffect(() => {
     localStorage.setItem('rightSidebarHidden', String(rightSidebarHidden));
   }, [rightSidebarHidden]);
+
+  useRightSidebarInsetCssVar(rightSidebarOpen, rightSidebarHidden);
   
   // Получаем чаты проекта и сортируем: запиненные сначала
   const projectChats = React.useMemo(() => {
@@ -1641,11 +1601,7 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
                 }}
               >
                 {gearToolsPanel === 'agents' ? (
-                  <ChatGearAgentsPanel
-                    isDarkMode={isDarkMode}
-                    canUseAgents={Boolean(agentStatus?.is_initialized)}
-                    onAgentsInitialized={loadAgentStatus}
-                  />
+                  <ChatGearAgentsPanel isDarkMode={isDarkMode} />
                 ) : gearToolsPanel === 'skills' ? (
                 <ChatGearSkillsPanel isDarkMode={isDarkMode} />
               ) : gearToolsPanel === 'mcp' ? (
@@ -1772,6 +1728,7 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
           variant="persistent"
           anchor="right"
           open={true}
+          slotProps={{ paper: { className: 'astra-right-rail' } }}
           sx={{
             width: rightSidebarOpen ? 240 : 64,
             flexShrink: 0,

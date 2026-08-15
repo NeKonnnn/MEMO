@@ -72,6 +72,7 @@ import { SIDEBAR_HIDE_SCROLLBAR_SX } from '../constants/menuStyles';
 import SidebarRailMenuGlyph from '../components/SidebarRailMenuGlyph';
 import { useTheme } from '@mui/material/styles';
 import { useNavigate } from 'react-router-dom';
+import { useRightSidebarInsetCssVar } from '../hooks/useRightSidebarInsetCssVar';
 
 interface Tag {
   id: number;
@@ -167,6 +168,7 @@ export default function PromptGalleryPage() {
   const [rightSidebarOpen, setRightSidebarOpen] = useState(false);
   const [rightSidebarHidden, setRightSidebarHidden] = useState(false);
   const [rightSidebarPanelBg, setRightSidebarPanelBg] = useState(() => getSidebarPanelBackground());
+  useRightSidebarInsetCssVar(rightSidebarOpen, rightSidebarHidden);
 
   useEffect(() => {
     const onColorChanged = () => setRightSidebarPanelBg(getSidebarPanelBackground());
@@ -1174,6 +1176,7 @@ export default function PromptGalleryPage() {
         variant="persistent"
         anchor="right"
         open={true}
+        slotProps={{ paper: { className: 'astra-right-rail' } }}
         sx={{
           width: rightSidebarOpen ? 240 : 64,
           flexShrink: 0,

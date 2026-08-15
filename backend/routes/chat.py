@@ -14,7 +14,6 @@ from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSo
 import backend.app_state as state
 from backend.app_state import (
     ask_agent,
-    get_agent_orchestrator,
     get_conversation_repository,
     get_current_model_path,
     get_model_comparison_models,
@@ -130,76 +129,50 @@ async def chat_with_ai(
             current_user.get("user_id"),
             conversation_id=message.conversation_id,
         )
-        orchestrator = get_agent_orchestrator()
-        use_agent_mode = orchestrator and orchestrator.get_mode() == "agent"
-        if use_agent_mode:
-            agent_message = message.message
-            if feedback_block:
-                agent_message = f"{feedback_block}\n\n{message.message}"
+        logger.info("ПРЯМОЙ РЕЖИМ: Переключение на прямое общение с LLM")
+        logger.info(
+            f"Запрос пользователя: '{message.message[:100]}{('...' if len(message.message) > 100 else '')}'"
+        )
+        response = None
+        tool_ids = resolve_chat_tool_ids(message.tool_ids or message.mcp_tool_ids)
+        current_model_path = message.model or get_current_model_path()
+        rest_system_prompt = merge_feedback_into_system_prompt(None, feedback_block)
+        if tool_ids:
+            try:
+                from backend.mcp.chat_integration import run_mcp_for_chat
+
+                mcp_result = await run_mcp_for_chat(
+                    tool_ids=tool_ids,
+                    user_message=message.message,
+                    history=history,
+                    system_prompt=rest_system_prompt,
+                    model_path=current_model_path,
+                    user=current_user,
+                    chat_id=message.conversation_id,
+                    message_id=message.message_id,
+                )
+                if mcp_result is not None:
+                    response = mcp_result.content
+                    logger.info(
+                        "REST MCP agent loop: mode=%s tools=%s", mcp_result.mode, mcp_result.tool_calls_executed
+                    )
+            except Exception:
+                logger.exception("REST MCP agent loop error")
+        # Global documents store отключён: REST /api/chat без явных store-флагов
+        # идёт напрямую в LLM (KB/memory/project — через Socket.IO чат).
+        if not response:
+            logger.info("ПРЯМОЙ РЕЖИМ: Используем обычный AI agent без контекста документов")
+            current_model_path = message.model or get_current_model_path()
             _terminal_chat_inference_banner(
                 sid="HTTP-POST-/api/chat",
                 conversation_id=None,
                 user_preview=message.message,
-                mode_label="REST /api/chat — оркестратор агентов",
+                mode_label="REST /api/chat — прямой LLM (без RAG)",
+                model_path_for_call=current_model_path,
             )
-            response = await orchestrator.process_message(
-                agent_message,
-                context={
-                    "history": history,
-                    "user_message": message.message,
-                    "selected_model": message.model or get_current_model_path(),
-                    "tool_ids": resolve_chat_tool_ids(message.tool_ids or message.mcp_tool_ids),
-                    "current_user": current_user,
-                    "conversation_id": message.conversation_id,
-                    "message_id": message.message_id,
-                    "user_feedback_block": feedback_block,
-                },
-            )
+            response = ask_agent(message.message, history=history, streaming=False, model_path=current_model_path)
         else:
-            logger.info("ПРЯМОЙ РЕЖИМ: Переключение на прямое общение с LLM")
-            logger.info(
-                f"Запрос пользователя: '{message.message[:100]}{('...' if len(message.message) > 100 else '')}'"
-            )
-            response = None
-            tool_ids = resolve_chat_tool_ids(message.tool_ids or message.mcp_tool_ids)
-            current_model_path = message.model or get_current_model_path()
-            rest_system_prompt = merge_feedback_into_system_prompt(None, feedback_block)
-            if tool_ids:
-                try:
-                    from backend.mcp.chat_integration import run_mcp_for_chat
-
-                    mcp_result = await run_mcp_for_chat(
-                        tool_ids=tool_ids,
-                        user_message=message.message,
-                        history=history,
-                        system_prompt=rest_system_prompt,
-                        model_path=current_model_path,
-                        user=current_user,
-                        chat_id=message.conversation_id,
-                        message_id=message.message_id,
-                    )
-                    if mcp_result is not None:
-                        response = mcp_result.content
-                        logger.info(
-                            "REST MCP agent loop: mode=%s tools=%s", mcp_result.mode, mcp_result.tool_calls_executed
-                        )
-                except Exception:
-                    logger.exception("REST MCP agent loop error")
-            # Global documents store отключён: REST /api/chat без явных store-флагов
-            # идёт напрямую в LLM (KB/memory/project — через Socket.IO чат).
-            if not response:
-                logger.info("ПРЯМОЙ РЕЖИМ: Используем обычный AI agent без контекста документов")
-                current_model_path = message.model or get_current_model_path()
-                _terminal_chat_inference_banner(
-                    sid="HTTP-POST-/api/chat",
-                    conversation_id=None,
-                    user_preview=message.message,
-                    mode_label="REST /api/chat — прямой LLM (без RAG)",
-                    model_path_for_call=current_model_path,
-                )
-                response = ask_agent(message.message, history=history, streaming=False, model_path=current_model_path)
-            else:
-                logger.info(f"ПРЯМОЙ РЕЖИМ: ответ готов, длина: {len(response)} символов")
+            logger.info(f"ПРЯМОЙ РЕЖИМ: ответ готов, длина: {len(response)} символов")
         await save_dialog_entry("user", message.message, user_id=current_user["user_id"])
         await save_dialog_entry("assistant", response, user_id=current_user["user_id"])
         return {"response": response, "timestamp": datetime.now().isoformat(), "success": True}
@@ -655,9 +628,7 @@ async def websocket_chat(websocket: WebSocket):
                 else []
             )
             await save_dialog_entry("user", user_message)
-            orchestrator = get_agent_orchestrator()
             use_multi_llm = bool(data.get("model_comparison_enabled", False))
-            use_agent = orchestrator and orchestrator.get_mode() == "agent"
 
             def stream_cb(chunk, acc):
                 try:
@@ -775,11 +746,14 @@ async def websocket_chat(websocket: WebSocket):
                             )
                     logger.info("WebSocket: Все ответы от моделей сгенерированы")
                     continue
-                if use_agent:
-                    response = ask_agent(
-                        user_message, history=history, streaming=False, model_path=get_current_model_path()
-                    )
-                    logger.info(f"WebSocket: получен ответ от AI agent, длина: {len(response)} символов")
+                response = ask_agent(
+                    user_message,
+                    history=history,
+                    streaming=streaming,
+                    stream_callback=stream_cb if streaming else None,
+                    model_path=get_current_model_path(),
+                )
+                logger.info(f"WebSocket: получен ответ от AI agent, длина: {len(response)} символов")
                 await save_dialog_entry("assistant", response)
                 await websocket.send_text(
                     json.dumps({"type": "complete", "response": response, "timestamp": datetime.now().isoformat()})

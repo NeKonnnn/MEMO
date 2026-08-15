@@ -36,11 +36,29 @@ _TOKENS_LO = 1000
 _TOKENS_HI = 2_000_000
 
 # store -> переменные окружения в порядке приоритета.
+# Сначала имена memo, затем алиасы GPB (ConfigMap из ASTRA).
 _STORE_ENV: Dict[str, Tuple[str, ...]] = {
-    "project": ("RAG_CONTEXT_MAX_TOKENS_PROJECT",),
-    "kb": ("RAG_CONTEXT_MAX_TOKENS_KB", "RAG_CONTEXT_MAX_TOKENS_AGENT"),
-    "agent": ("RAG_CONTEXT_MAX_TOKENS_AGENT", "RAG_CONTEXT_MAX_TOKENS_KB"),
-    "memory": ("RAG_CONTEXT_MAX_TOKENS_MEMORY",),
+    "project": (
+        "RAG_CONTEXT_MAX_TOKENS_PROJECT",
+        "RAG_CONTEXT_PROJECT_MAX_TOKENS",
+    ),
+    "kb": (
+        "RAG_CONTEXT_MAX_TOKENS_KB",
+        "RAG_CONTEXT_MAX_TOKENS_AGENT",
+        "RAG_CONTEXT_KNOWLEDGE_BASE_MAX_TOKENS",
+        "RAG_CONTEXT_AGENT_MAX_TOKENS",
+    ),
+    "agent": (
+        "RAG_CONTEXT_MAX_TOKENS_AGENT",
+        "RAG_CONTEXT_MAX_TOKENS_KB",
+        "RAG_CONTEXT_AGENT_MAX_TOKENS",
+        "RAG_CONTEXT_KNOWLEDGE_BASE_MAX_TOKENS",
+        "RAG_CONTEXT_KB_MAX_TOKENS",
+    ),
+    "memory": (
+        "RAG_CONTEXT_MAX_TOKENS_MEMORY",
+        "RAG_CONTEXT_MEMORY_MAX_TOKENS",
+    ),
 }
 
 def _env_int(name: str, default: int, *, lo: int, hi: int) -> int:

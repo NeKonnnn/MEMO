@@ -120,6 +120,8 @@ interface SocketContextType {
   ) => void;
   stopGeneration: () => void;
   reconnect: () => void;
+  /** ID assistant-сообщения при перегенерации — для inline-индикатора «думает». */
+  regeneratingAssistantId: string | null;
   onMultiLLMEvent?: (event: string, handler: (data: any) => void) => void;
   offMultiLLMEvent?: (event: string, handler: (data: any) => void) => void;
 }
@@ -153,7 +155,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
   const [isConnecting, setIsConnecting] = useState(false);
 
   const { state: appState } = useAppContext();
-  const { addMessage, updateMessage, setChatLoading, showNotification, getCurrentChat, getChatById, getProjectById } = useAppActions();
+  const { addMessage, updateMessage, patchMessageFields, setChatLoading, showNotification, getCurrentChat, getChatById, getProjectById } = useAppActions();
   /** Настройка «Потоковая генерация» из model_settings; явный аргумент перекрывает. */
   const resolveStreaming = (streaming?: boolean): boolean =>
     streaming !== undefined ? Boolean(streaming) : appState.modelSettings.streaming !== false;
@@ -252,9 +254,19 @@ export function SocketProvider({ children }: { children: ReactNode }) {
   // Ref для отслеживания режима перегенерации
   const regenerationStateRef = useRef<{
     isRegenerating: boolean;
+    assistantMessageId: string;
     alternativeResponses: string[];
     currentIndex: number;
   } | null>(null);
+  const [regeneratingAssistantId, setRegeneratingAssistantId] = useState<string | null>(null);
+
+  const resolveRegenAssistantMessageId = (): string | null =>
+    currentMessageRef.current || regenerationStateRef.current?.assistantMessageId || null;
+
+  const clearRegenerationUi = () => {
+    regenerationStateRef.current = null;
+    setRegeneratingAssistantId(null);
+  };
 
   const resetStreamingRefs = () => {
     if (currentChatIdRef.current) {
@@ -262,7 +274,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
     }
     isStoppedRef.current = true;
     expectMultiLlmResponseRef.current = false;
-    regenerationStateRef.current = null;
+    clearRegenerationUi();
     thinkingTraceRef.current = '';
     responseAccumulatedRef.current = '';
 
@@ -522,7 +534,19 @@ export function SocketProvider({ children }: { children: ReactNode }) {
 
   // Реф для хранения multi-llm сообщения
   const multiLLMMessageRef = useRef<string | null>(null);
-  const multiLLMResponsesRef = useRef<Map<string, { model: string; content: string; isStreaming: boolean; error?: boolean }>>(new Map());
+  const multiLLMResponsesRef = useRef<
+    Map<
+      string,
+      {
+        model: string;
+        content: string;
+        isStreaming: boolean;
+        error?: boolean;
+        generationStartedAtMs?: number;
+        generationDurationSec?: number;
+      }
+    >
+  >(new Map());
   const expectedModelsCountRef = useRef<number>(0); // Количество моделей, от которых ожидаем ответы
   /** Активен запрос multi-LLM с чата — блокирует обработку chat_chunk/chat_complete от старого tool-context и т.п. */
   const expectMultiLlmResponseRef = useRef<boolean>(false);
@@ -540,13 +564,29 @@ export function SocketProvider({ children }: { children: ReactNode }) {
   const mergeMultiLlmSocketPayload = (
     chatId: string,
     messageId: string,
-    incoming: Array<{ model: string; content: string; isStreaming: boolean; error?: boolean }>,
+    incoming: Array<{
+      model: string;
+      content: string;
+      isStreaming: boolean;
+      error?: boolean;
+      generationStartedAtMs?: number;
+      generationDurationSec?: number;
+    }>,
   ): MultiLLMResponseSlot[] => {
     const chat = getChatById(chatId) as Chat | undefined;
     const msg = chat?.messages.find((m) => m.id === messageId);
     const prev = msg?.multiLLMResponses ?? [];
+    const now = Date.now();
     if (prev.length === 0) {
-      return incoming.map((r) => ({ ...r }));
+      return incoming.map((r) => ({
+        ...r,
+        generationStartedAtMs: r.generationStartedAtMs || (r.isStreaming ? now : undefined),
+        generationDurationSec:
+          r.generationDurationSec ??
+          (!r.isStreaming && r.generationStartedAtMs
+            ? Math.max(1, Math.round((now - r.generationStartedAtMs) / 1000))
+            : undefined),
+      }));
     }
     const incomingByModel = new Map(incoming.map((r) => [r.model, r]));
     const order = prev.map((p) => p.model);
@@ -558,7 +598,21 @@ export function SocketProvider({ children }: { children: ReactNode }) {
       const p = prev.find((x) => x.model === model);
       if (!inc && p) return p;
       if (!inc) return p!;
-      if (!p) return { ...inc };
+      const startedAt =
+        p?.generationStartedAtMs ||
+        inc.generationStartedAtMs ||
+        (inc.isStreaming || p?.isStreaming ? now : undefined);
+      const finished =
+        p?.isStreaming && !inc.isStreaming
+          ? Math.max(1, Math.round((now - (startedAt || now)) / 1000))
+          : inc.generationDurationSec ?? p?.generationDurationSec;
+      if (!p) {
+        return {
+          ...inc,
+          generationStartedAtMs: startedAt,
+          generationDurationSec: finished,
+        };
+      }
       const hasAlts =
         Array.isArray(p.alternativeResponses) &&
         p.alternativeResponses.length > 0 &&
@@ -574,6 +628,8 @@ export function SocketProvider({ children }: { children: ReactNode }) {
           alternativeResponses: alts,
           content: inc.content,
           currentResponseIndex: p.currentResponseIndex,
+          generationStartedAtMs: startedAt,
+          generationDurationSec: finished,
         };
       }
       return {
@@ -581,6 +637,8 @@ export function SocketProvider({ children }: { children: ReactNode }) {
         ...inc,
         alternativeResponses: p.alternativeResponses,
         currentResponseIndex: p.currentResponseIndex,
+        generationStartedAtMs: startedAt,
+        generationDurationSec: finished,
       };
     });
   };
@@ -623,6 +681,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
                 timestamp: new Date().toISOString(),
                 isStreaming: true,
                 isImageGenerating: true,
+                generationStartedAtMs: Date.now(),
               });
               currentMessageRef.current = messageId;
             }
@@ -671,15 +730,65 @@ export function SocketProvider({ children }: { children: ReactNode }) {
             } else {
               updateMessage(currentChatIdRef.current, currentMessageRef.current, thinkingCombined, true);
             }
+          } else if (regenerationStateRef.current?.isRegenerating && currentChatIdRef.current) {
+            const chat = getChatById(currentChatIdRef.current);
+            const streamingAssistant = chat?.messages.find(
+              (m: Message) => m.role === 'assistant' && m.isStreaming,
+            );
+            if (streamingAssistant) {
+              currentMessageRef.current = streamingAssistant.id;
+              const regen = regenerationStateRef.current;
+              const updatedAlternatives = [...regen.alternativeResponses];
+              const currentIndex = regen.currentIndex;
+              if (currentIndex < updatedAlternatives.length) {
+                updatedAlternatives[currentIndex] = thinkingCombined;
+              } else {
+                updatedAlternatives.push(thinkingCombined);
+              }
+              regenerationStateRef.current.alternativeResponses = updatedAlternatives;
+              updateMessage(
+                currentChatIdRef.current,
+                streamingAssistant.id,
+                thinkingCombined,
+                true,
+                undefined,
+                updatedAlternatives,
+                currentIndex,
+              );
+            }
           } else {
-            // Создаём сообщение заранее, чтобы thinking был виден до первого chunk
-            const messageId = addMessage(currentChatIdRef.current, {
-              role: 'assistant',
-              content: thinkingCombined,
-              timestamp: new Date().toISOString(),
-              isStreaming: true,
-            });
-            currentMessageRef.current = messageId;
+            const regenAssistantId = resolveRegenAssistantMessageId();
+            if (regenerationStateRef.current?.isRegenerating && regenAssistantId && currentChatIdRef.current) {
+              currentMessageRef.current = regenAssistantId;
+              const regen = regenerationStateRef.current;
+              const updatedAlternatives = [...regen.alternativeResponses];
+              const currentIndex = regen.currentIndex;
+              if (currentIndex < updatedAlternatives.length) {
+                updatedAlternatives[currentIndex] = thinkingCombined;
+              } else {
+                updatedAlternatives.push(thinkingCombined);
+              }
+              regenerationStateRef.current.alternativeResponses = updatedAlternatives;
+              updateMessage(
+                currentChatIdRef.current,
+                regenAssistantId,
+                thinkingCombined,
+                true,
+                undefined,
+                updatedAlternatives,
+                currentIndex,
+              );
+            } else if (!regenerationStateRef.current?.isRegenerating) {
+              // Создаём сообщение заранее, чтобы thinking был виден до первого chunk
+              const messageId = addMessage(currentChatIdRef.current, {
+                role: 'assistant',
+                content: thinkingCombined,
+                timestamp: new Date().toISOString(),
+                isStreaming: true,
+                generationStartedAtMs: Date.now(),
+              });
+              currentMessageRef.current = messageId;
+            }
           }
         }
         break;
@@ -700,6 +809,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
             timestamp: new Date().toISOString(),
             isStreaming: true,
             multiLLMResponses: [],
+            generationStartedAtMs: Date.now(),
           });
           multiLLMMessageRef.current = messageId;
           multiLLMResponsesRef.current.clear();
@@ -723,6 +833,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
             timestamp: new Date().toISOString(),
             isStreaming: true,
             multiLLMResponses: [],
+            generationStartedAtMs: Date.now(),
           });
           multiLLMMessageRef.current = messageId;
           multiLLMResponsesRef.current.clear();
@@ -738,6 +849,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
             model: modelName,
             content: data.accumulated || data.chunk,
             isStreaming: true,
+            generationStartedAtMs: Date.now(),
           });
         }
         
@@ -769,6 +881,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
             timestamp: new Date().toISOString(),
             isStreaming: true,
             multiLLMResponses: [],
+            generationStartedAtMs: Date.now(),
           });
           multiLLMMessageRef.current = messageId;
         }
@@ -784,11 +897,15 @@ export function SocketProvider({ children }: { children: ReactNode }) {
             finalContent = `${thinkMatch[0]}\n\n${completedContent}`.trim();
           }
         }
+        const prevSlot = multiLLMResponsesRef.current.get(completedModel);
+        const slotStarted = prevSlot?.generationStartedAtMs || Date.now();
         multiLLMResponsesRef.current.set(completedModel, {
           model: completedModel,
           content: finalContent,
           isStreaming: false,
           error: hasError,
+          generationStartedAtMs: slotStarted,
+          generationDurationSec: Math.max(1, Math.round((Date.now() - slotStarted) / 1000)),
         });
         
         // Обновляем сообщение с актуальными данными
@@ -886,12 +1003,44 @@ export function SocketProvider({ children }: { children: ReactNode }) {
             updateMessage(currentChatIdRef.current, currentMessageRef.current, chunkCombined, true);
           }
         } else if (!isStoppedRef.current) {
+          if (regenerationStateRef.current?.isRegenerating && currentChatIdRef.current) {
+            const chat = getChatById(currentChatIdRef.current);
+            const streamingAssistant = chat?.messages.find(
+              (m: Message) => m.role === 'assistant' && m.isStreaming,
+            );
+            if (streamingAssistant) {
+              currentMessageRef.current = streamingAssistant.id;
+              const regen = regenerationStateRef.current;
+              const updatedAlternatives = [...regen.alternativeResponses];
+              const currentIndex = regen.currentIndex;
+              if (currentIndex < updatedAlternatives.length) {
+                updatedAlternatives[currentIndex] = chunkCombined;
+              } else {
+                updatedAlternatives.push(chunkCombined);
+              }
+              regenerationStateRef.current.alternativeResponses = updatedAlternatives;
+              updateMessage(
+                currentChatIdRef.current,
+                streamingAssistant.id,
+                chunkCombined,
+                true,
+                undefined,
+                updatedAlternatives,
+                currentIndex,
+              );
+              break;
+            }
+          }
           // Создаем новое сообщение для стриминга (только если генерация не была остановлена)
+          if (regenerationStateRef.current?.isRegenerating) {
+            break;
+          }
           const messageId = addMessage(currentChatIdRef.current, {
             role: 'assistant',
             content: chunkCombined,
             timestamp: new Date().toISOString(),
             isStreaming: true,
+            generationStartedAtMs: Date.now(),
           });
           currentMessageRef.current = messageId;
         }
@@ -985,12 +1134,18 @@ export function SocketProvider({ children }: { children: ReactNode }) {
             ? `<think>${thinkingTraceRef.current.trim()}</think>\n\n${response}`
             : response;
         const wasStreaming = Boolean(data.was_streaming);
+        const serverDurationSec =
+          typeof data.generation_duration_sec === 'number' && data.generation_duration_sec > 0
+            ? Math.round(data.generation_duration_sec)
+            : undefined;
         const genInlineAttachments = mapServerInlineAttachments(data.inline_attachments);
 
+        let completedMessageId: string | null = null;
         if (currentMessageRef.current) {
           // Путь 1: сообщение отслеживалось через ref (потоковый режим)
           const trackedId = currentMessageRef.current;
           currentMessageRef.current = null;
+          completedMessageId = trackedId;
 
           if (regenerationStateRef.current?.isRegenerating) {
             const regen = regenerationStateRef.current;
@@ -1032,7 +1187,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
               false,
               variants.length ? variants : undefined,
             );
-            regenerationStateRef.current = null;
+            clearRegenerationUi();
           } else {
             const attachmentVariants = genInlineAttachments?.length ? [genInlineAttachments] : undefined;
             updateMessage(
@@ -1060,6 +1215,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
 
           if (streamingMsgs.length > 0) {
             const last = streamingMsgs[streamingMsgs.length - 1];
+            completedMessageId = last.id;
             updateMessage(chatId, last.id, responseWithReasoning, false, undefined, undefined, undefined, docSearch, undefined, undefined, genInlineAttachments, false);
           } else if (!isStoppedRef.current && response) {
             // Непотоковый режим: создаём сообщение только если его ещё нет
@@ -1073,11 +1229,20 @@ export function SocketProvider({ children }: { children: ReactNode }) {
                 timestamp: data.timestamp || new Date().toISOString(),
                 isStreaming: false,
                 isImageGenerating: false,
+                generationStartedAtMs: Date.now(),
+                generationDurationSec: serverDurationSec ?? 1,
                 ...(docSearch ? { documentSearch: docSearch } : {}),
                 ...(genInlineAttachments ? { inlineAttachments: genInlineAttachments } : {}),
               });
             }
           }
+        }
+
+        // Серверная длительность — источник правды после F5 (пишется в metadata).
+        if (completedMessageId && serverDurationSec) {
+          patchMessageFields(chatId, completedMessageId, {
+            generationDurationSec: serverDurationSec,
+          });
         }
 
         if (data.image_generation === true || genInlineAttachments?.length) {
@@ -1113,6 +1278,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
           setChatLoading(currentChatIdRef.current, false);
         }
         expectMultiLlmResponseRef.current = false;
+        clearRegenerationUi();
         
         // Убираем флаг стриминга у текущего сообщения при ошибке
         if (currentChatIdRef.current && currentMessageRef.current) {
@@ -1135,7 +1301,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
         }
         isStoppedRef.current = true;
         expectMultiLlmResponseRef.current = false;
-        regenerationStateRef.current = null;
+        clearRegenerationUi();
         
         // Убираем флаг стриминга у текущего сообщения
         if (currentChatIdRef.current && currentMessageRef.current) {
@@ -1253,6 +1419,10 @@ export function SocketProvider({ children }: { children: ReactNode }) {
   ) => {
     const useStreaming = resolveStreaming(streaming);
 
+    if (regenerationStateRef.current?.isRegenerating) {
+      return;
+    }
+
     if (isRagSendBlocked(chatId, overrideProjectId)) {
       return;
     }
@@ -1308,15 +1478,39 @@ export function SocketProvider({ children }: { children: ReactNode }) {
     setChatLoading(chatId, true);
     currentMessageRef.current = null;
 
-    if (!expectMultiLlm && !isCodingModeEnabled(chatId) && isLikelyImageGenerationPrompt(message)) {
-      const placeholderId = addMessage(chatId, {
-        role: 'assistant',
-        content: '',
-        timestamp: new Date().toISOString(),
-        isStreaming: true,
-        isImageGenerating: true,
-      });
-      currentMessageRef.current = placeholderId;
+    if (useStreaming) {
+      if (expectMultiLlm) {
+        const assistantMessageId = addMessage(chatId, {
+          role: 'assistant',
+          content: '',
+          timestamp: new Date().toISOString(),
+          isStreaming: true,
+          multiLLMResponses: [],
+          generationStartedAtMs: Date.now(),
+        });
+        multiLLMMessageRef.current = assistantMessageId;
+        currentMessageRef.current = null;
+      } else if (!isCodingModeEnabled(chatId) && isLikelyImageGenerationPrompt(message)) {
+        const placeholderId = addMessage(chatId, {
+          role: 'assistant',
+          content: '',
+          timestamp: new Date().toISOString(),
+          isStreaming: true,
+          isImageGenerating: true,
+          generationStartedAtMs: Date.now(),
+        });
+        currentMessageRef.current = placeholderId;
+      } else {
+        // isStreaming: false — иначе скрывается «AstraChat думает...» (chatAwaitingTokens).
+        const assistantMessageId = addMessage(chatId, {
+          role: 'assistant',
+          content: '',
+          timestamp: new Date().toISOString(),
+          isStreaming: false,
+          generationStartedAtMs: Date.now(),
+        });
+        currentMessageRef.current = assistantMessageId;
+      }
     }
 
     // Читаем флаг "Base знаний" из localStorage (устанавливается в UnifiedChatPage)
@@ -1406,7 +1600,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
 
     currentChatIdRef.current = chatId;
     currentMessageRef.current = null;
-    regenerationStateRef.current = null;
+    clearRegenerationUi();
 
     isStoppedRef.current = false;
     pendingSendRef.current = null;
@@ -1431,8 +1625,27 @@ export function SocketProvider({ children }: { children: ReactNode }) {
           content: multiSlotDisplayText(r),
           isStreaming: r.model === slotModel,
           error: r.error,
+          generationStartedAtMs: r.model === slotModel ? Date.now() : r.generationStartedAtMs,
+          generationDurationSec: r.model === slotModel ? undefined : r.generationDurationSec,
         });
       }
+      const now = Date.now();
+      updateMessage(
+        chatId,
+        assistantMessageId,
+        undefined,
+        true,
+        msg.multiLLMResponses.map((r) =>
+          r.model === slotModel
+            ? {
+                ...r,
+                isStreaming: true,
+                generationStartedAtMs: now,
+                generationDurationSec: undefined,
+              }
+            : r,
+        ),
+      );
     }
 
     setChatLoading(chatId, true);
@@ -1519,9 +1732,15 @@ export function SocketProvider({ children }: { children: ReactNode }) {
     // Сохраняем состояние перегенерации в ref
     regenerationStateRef.current = {
       isRegenerating: true,
+      assistantMessageId,
       alternativeResponses: [...alternativeResponses], // Копируем массив
       currentIndex
     };
+    setRegeneratingAssistantId(assistantMessageId);
+    patchMessageFields(chatId, assistantMessageId, {
+      generationStartedAtMs: Date.now(),
+      generationDurationSec: undefined,
+    });
     
     // Сбрасываем состояние для multi-llm режима
     multiLLMMessageRef.current = null;
@@ -1600,7 +1819,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
       setChatLoading(currentChatIdRef.current, false);
     }
     expectMultiLlmResponseRef.current = false;
-    regenerationStateRef.current = null;
+    clearRegenerationUi();
     clearMcpToolActivity();
     
     // Очищаем текущее сообщение и убираем флаг стриминга у всех сообщений
@@ -1720,6 +1939,10 @@ export function SocketProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!isConnected || !socket || !pendingSendRef.current) return;
+    if (regenerationStateRef.current?.isRegenerating) {
+      pendingSendRef.current = null;
+      return;
+    }
     const pending = pendingSendRef.current;
     pendingSendRef.current = null;
     sendMessage(pending.message, pending.chatId, pending.streaming, pending.overrideProjectId, pending.expectMultiLlm, pending.inlineData);
@@ -1746,6 +1969,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
     regenerateMultiLlmSlot,
     stopGeneration,
     reconnect,
+    regeneratingAssistantId,
     onMultiLLMEvent,
     offMultiLLMEvent,
   };

@@ -25,6 +25,7 @@ from app.services.retrieval_pipeline import RetrievalTrace, run_retrieval_pipeli
 from app.services.stage_timer import StageTimer
 from app.text_sanitize import strip_null_bytes
 from app.services.hierarchical_indexing import index_document_hierarchically
+from app.clients.openai_models_compat_client import set_embed_log_context
 
 logger = get_logger(__name__)
 
@@ -226,6 +227,15 @@ class MemoryRagService:
                 "document_id": None,
             }
 
+        # Пометка для логов гардрейла: клиент видит только список строк, имя
+        # файла и id документа до него не доезжают. Ставим до ветвления, чтобы
+        # покрыть и иерархическую индексацию, и обычную.
+        set_embed_log_context(
+            store="memory",
+            operation="upload",
+            document_id=doc_id,
+            filename=filename,
+        )
         if (chunking_strategy or "").strip().lower() == "hierarchical":
             try:
                 with timer.stage("hierarchical_embed_insert"):
@@ -378,6 +388,15 @@ class MemoryRagService:
         if not text.strip():
             return 0
         await self.vector_repo.delete_vectors_by_document(document_id)
+        # Пометка для логов гардрейла: клиент видит только список строк, имя
+        # файла и id документа до него не доезжают. Ставим до ветвления, чтобы
+        # покрыть и иерархическую индексацию, и обычную.
+        set_embed_log_context(
+            store="memory",
+            operation="reindex",
+            document_id=document_id,
+            filename=getattr(doc, "filename", None),
+        )
         strategy = (chunking_strategy or "universal").strip().lower()
         if strategy == "hierarchical":
             count = await index_document_hierarchically(

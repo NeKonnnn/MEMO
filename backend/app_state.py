@@ -104,60 +104,6 @@ except Exception:
     logger.exception("Ошибка инициализации UniversalTranscriber")
     UniversalTranscriber = None
     transcriber = None
-_orchestrator_load_attempted_ok = None
-_impl_initialize_agent_orchestrator = None
-_impl_get_agent_orchestrator = None
-
-
-async def initialize_agent_orchestrator():
-    """Прокси на backend.orchestrator — импорт откладывается до первого вызова (без circular import)."""
-    if not _ensure_orchestrator_loaded():
-        return False
-    if _impl_initialize_agent_orchestrator is None:
-        return False
-    return await _impl_initialize_agent_orchestrator()
-
-
-def get_agent_orchestrator():
-    """Прокси на backend.orchestrator — импорт откладывается до первого вызова (без circular import)."""
-    if not _ensure_orchestrator_loaded():
-        return None
-    if _impl_get_agent_orchestrator is None:
-        return None
-    return _impl_get_agent_orchestrator()
-
-
-def _ensure_orchestrator_loaded() -> bool:
-    """Один успешный импорт модулей оркестратора; при ошибке — не повторять каждый раз."""
-    global _orchestrator_load_attempted_ok, _impl_initialize_agent_orchestrator, _impl_get_agent_orchestrator
-    if _orchestrator_load_attempted_ok is True:
-        return True
-    if _orchestrator_load_attempted_ok is False:
-        return False
-    try:
-        import importlib
-
-        _mod = importlib.import_module("backend.orchestrator")
-        _init = getattr(_mod, "initialize_agent_orchestrator", None)
-        _get = getattr(_mod, "get_agent_orchestrator", None)
-        if _init is None or _get is None:
-            msg = (
-                f"backend.orchestrator не содержит нужных символов: "
-                f"initialize_agent_orchestrator={_init!r}, get_agent_orchestrator={_get!r}"
-            )
-            raise ImportError(msg)
-        _impl_initialize_agent_orchestrator = _init
-        _impl_get_agent_orchestrator = _get
-        _orchestrator_load_attempted_ok = True
-        logger.info("Агентная архитектура импортирована")
-        return True
-    except Exception:
-        logger.exception("Ошибка импорта агентной архитектуры")
-        _orchestrator_load_attempted_ok = False
-        _impl_initialize_agent_orchestrator = None
-        _impl_get_agent_orchestrator = None
-        return False
-
 
 try:
     from backend.database.init_db import (
@@ -274,15 +220,18 @@ def get_rag_chunk_index_params() -> dict:
     }
 
 
-def get_rag_chat_top_k() -> int:
+def get_rag_chat_top_k(scope: str = None) -> int:
     """Сколько чанков запрашивать у SVC-RAG (чат, агент, API с документами).
 
-    При активном user-контексте чата берёт персональный rag_chat_top_k из БД.
+    ```scope``` — стор, по которому идёт поиск: "agent" или "project". У каждого
+    агента и проекта свой rag_chat_top_k, поэтому без скоупа значение возьмётся
+    не от той сущности: снимки привязаны к запросу раздельно.
+    Без скоупа — дефолт кластера.
     """
     try:
         from backend.services.user_rag_settings import runtime_rag_top_k
 
-        return runtime_rag_top_k()
+        return runtime_rag_top_k(scope)
     except Exception:
         pass
     try:

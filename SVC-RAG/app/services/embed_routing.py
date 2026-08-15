@@ -483,6 +483,14 @@ async def vector_repo_for(root_repo: Any, dim: int) -> Any:
         )
         return repo
 
+def _store_label(repo: Any) -> str:
+    """project / kb / memory - по классу репозитория, без правки вызывающих"""
+    name = type(repo).__name__.lower()
+    for key in ("project", "kb", "memory"):
+        if key in name:
+            return key
+    return name or "store"
+
 async def resolve_for(
     default_client: Any,
     root_repo: Any,
@@ -492,6 +500,16 @@ async def resolve_for(
     """Одной строкой: профиль эмбеддинга + репозиторий нужной таблицы."""
     profile = await resolve_profile(default_client, provider, model)
     repo = await vector_repo_for(root_repo, profile.dim)
+    logger.debug(
+        "[EMBED-ROUTE] %s: запрошено provider=%s model=%s -> выбрано provider=%s model=%s dim=%s таблица=%s",
+        _store_label(root_repo),
+        provider or "-",
+        model or "-",
+        profile.provider or "cluster",
+        profile.model or "default",
+        profile.dim,
+        type(repo).__name__,
+    )
     return profile, repo
 
 # Клиенты реранка. Отдельный кэш от эмбеддинга: у провайдера это разные модели,
@@ -512,6 +530,12 @@ def rerank_client_for(
     Без provider — кластерный клиент, как было до фазы E.
     """
     p, m = _norm(provider, model)
+    logger.debug(
+        "[RERANK-ROUTE] запрошено provider=%s model=%s -> %s",
+        provider or "-",
+        model or "-",
+        "кластерный клиент" if not p else f"{p}/{m or 'default'}",
+    )
     if not p:
         return default_client
     if p.lower() == NATIVE:

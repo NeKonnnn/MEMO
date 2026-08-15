@@ -7,6 +7,10 @@ export function stripReasoningMarkers(raw: string): string {
   let visible = raw;
   visible = visible.replace(/<think>[\s\S]*?<\/redacted_thinking>/gi, '');
   visible = visible.replace(/<think>[\s\S]*?<\/think>/gi, '');
+  // Qwen3.5: orphan </think> без открывающего тега в completion
+  if (!/<think>/i.test(visible) && /<\/think>/i.test(visible)) {
+    visible = visible.replace(/^[\s\S]*?<\/think>\s*/i, '');
+  }
   visible = visible.replace(/<think>[\s\S]*$/i, '');
   visible = visible.replace(/<think>\s*$/gi, '');
   return visible.trim();
@@ -104,6 +108,15 @@ export function extractReasoningBlock(
 
   strip(/<think>([\s\S]*?)<\/redacted_thinking>/gi);
   strip(/<think>([\s\S]*?)<\/think>/gi);
+
+  // Qwen3.5: открывающий <think> часто только в chat-template промпта —
+  // в completion приходит reasoning...</think>\n\nответ без открывающего тега.
+  const orphanClose = visible.match(/^([\s\S]*?)<\/think>\s*/i);
+  if (orphanClose && !(visible.match(/<think>/i))) {
+    const thinkContent = (orphanClose[1] || '').trim();
+    if (thinkContent) reasoningParts.push(thinkContent);
+    visible = visible.slice(orphanClose[0].length).trim();
+  }
 
   const unclosedMatch = visible.match(/<think>([\s\S]*)$/i);
   if (unclosedMatch) {

@@ -14,8 +14,6 @@ export interface ChatInputStatusClusterProps {
   isDarkMode: boolean;
   libraryActive: boolean;
   onLibraryToggle?: () => void;
-  /** Хотя один тумблер стандартного агента в «Инструменты → Агенты» включён */
-  standardAgentsActive: boolean;
   /** Выбран пользовательский агент (Мои агенты) */
   myAgentName: string | null;
   /** Снять выбранного пользовательского агента (клик по иконке робота) */
@@ -37,7 +35,6 @@ export default function ChatInputStatusCluster({
   isDarkMode,
   libraryActive,
   onLibraryToggle,
-  standardAgentsActive,
   myAgentName,
   onAgentToggle,
   activeMcpServers = [],
@@ -46,7 +43,7 @@ export default function ChatInputStatusCluster({
   onSkillsToggle,
 }: ChatInputStatusClusterProps) {
   const theme = useTheme();
-  const agentActive = standardAgentsActive || Boolean(myAgentName);
+  const agentActive = Boolean(myAgentName);
   const mcpActive = activeMcpServers.length > 0;
   const skillsActive = activeSkills.length > 0;
 
@@ -71,11 +68,7 @@ export default function ChatInputStatusCluster({
         'Общий RAG в ответах включён. Нажмите на книгу, чтобы отключить. Документы проекта и агента подключаются отдельно.',
       );
     }
-    if (standardAgentsActive && myAgentName) {
-      parts.push(`Стандартные агенты активны; выбран агент «${myAgentName}» (Мои агенты).`);
-    } else if (standardAgentsActive) {
-      parts.push('Включены стандартные агенты (Инструменты → Агенты).');
-    } else if (myAgentName) {
+    if (myAgentName) {
       parts.push(
         onAgentToggle
           ? `Активен агент «${myAgentName}». Нажмите на робота, чтобы отключить.`
@@ -98,7 +91,6 @@ export default function ChatInputStatusCluster({
     return parts.join(' ');
   }, [
     libraryActive,
-    standardAgentsActive,
     myAgentName,
     skillsActive,
     activeSkills,

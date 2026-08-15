@@ -65,7 +65,7 @@ import {
   HistoryEdu as SkillsNavIcon,
 } from '@mui/icons-material';
 import type { SxProps, Theme } from '@mui/material/styles';
-import { useTheme, alpha } from '@mui/material/styles';
+import { useTheme } from '@mui/material/styles';
 import { useAppContext, useAppActions, Message, MultiLLMResponseSlot } from '../contexts/AppContext';
 import { useSocket } from '../contexts/SocketContext';
 import { getApiUrl, getWsUrl, API_ENDPOINTS, getAuthFetchHeaders } from '../config/api';
@@ -81,8 +81,10 @@ import { prepareInlineImageFile, formatFileSize, dataUrlToFile, getClipboardImag
 import {
   buildOversizedInlineAttachMessage,
   buildUnsupportedInlineAttachMessage,
+  isInlineAttachFileTooLarge,
   isInlineAttachSizeErrorMessage,
   INLINE_ATTACH_ACCEPT,
+  INLINE_ATTACH_WAIT_BEFORE_SEND_MESSAGE,
 } from '../utils/inlineAttachmentRules';
 import TopErrorBanner from '../components/TopErrorBanner';
 import { logChatAttach, logChatAttachError } from '../utils/chatAttachDebug';
@@ -106,7 +108,7 @@ import MessageMoreActionsMenu from '../components/MessageMoreActionsMenu';
 import { exportMessageContent } from '../utils/exportMessageContent';
 import type { MessageExportFormat } from '../utils/exportMessageContent';
 import type { MessageFeedback } from '../constants/messageFeedback';
-import { useMyAgentSelection, useOrchestratorAgentsAnyActive } from '../hooks/useChatInputAgentIndicators';
+import { useMyAgentSelection } from '../hooks/useChatInputAgentIndicators';
 import { useRagReindexStatus } from '../hooks/useRagReindexStatus';
 import { usePendingAgentConstructorOpen } from '../hooks/usePendingAgentConstructorOpen';
 import {
@@ -127,6 +129,9 @@ import MessageFollowUpSuggestions from '../components/MessageFollowUpSuggestions
 import { getChatInputSuggestions } from '../chat/getChatInputSuggestions';
 import { loadFollowUpSettings } from '../chat/followUpSettings';
 import { useFollowUpSuggestions } from '../hooks/useFollowUpSuggestions';
+import { formatGenerationDuration, useElapsedSeconds } from '../hooks/useElapsedSeconds';
+import { useRightSidebarInsetCssVar } from '../hooks/useRightSidebarInsetCssVar';
+import { extractReasoningBlock as extractReasoningBlockShared } from '../utils/reasoningSplit';
 import {
   estimateLibraryClusterWidthPx,
   getToolsButtonInsetSp,
@@ -146,6 +151,7 @@ import {
   setKnowledgeRagEnabled,
   KNOWLEDGE_RAG_STORAGE_EVENT,
 } from '../utils/knowledgeRagStorage';
+import { estimateTokens } from '../utils/contextTokens';
 import {
   ASTRA_TRIGGER_ATTACH,
   ASTRA_OPEN_AGENT_CONSTRUCTOR,
@@ -280,40 +286,8 @@ function extractReasoningBlock(
   rawText: string,
   isStreaming?: boolean,
 ): { visibleContent: string; reasoningContent: string | null; isThinkingStreaming: boolean } {
-  if (!rawText) return { visibleContent: rawText, reasoningContent: null, isThinkingStreaming: false };
-  const reasoningParts: string[] = [];
-  let visible = rawText;
-  let isThinkingStreaming = false;
-
-  const strip = (re: RegExp) => {
-    visible = visible.replace(re, (_, inner: string) => {
-      const normalized = (inner || '').trim();
-      if (normalized) reasoningParts.push(normalized);
-      return '';
-    });
-  };
-
-  // Полные закрытые блоки reasoning
-  strip(/<think>([\s\S]*?)<\/redacted_thinking>/gi);
-  strip(/<think>([\s\S]*?)<\/think>/gi);
-
-  // Незакрытый <think> (модель ещё думает — стриминг в процессе)
-  const unclosedMatch = visible.match(/<think>([\s\S]*)$/i);
-  if (unclosedMatch) {
-    const thinkContent = (unclosedMatch[1] || '').trim();
-    if (thinkContent) reasoningParts.push(thinkContent);
-    visible = visible.slice(0, unclosedMatch.index ?? visible.length).trim();
-    if (isStreaming) isThinkingStreaming = true;
-  }
-
-  // Одиночный открывающий тег без содержимого (только тег в конце)
-  visible = visible.replace(/<think>\s*$/gi, '').trim();
-
-  return {
-    visibleContent: visible || (reasoningParts.length > 0 ? '' : rawText),
-    reasoningContent: reasoningParts.length > 0 ? reasoningParts.join('\n\n') : null,
-    isThinkingStreaming,
-  };
+  // Единый парсер (теги + plaintext «Thinking Process» + orphan </think> у Qwen3.5).
+  return extractReasoningBlockShared(rawText, isStreaming);
 }
 
 function getStreamingAssistantVisibleContent(message: Message): string {
@@ -331,11 +305,158 @@ function getStreamingAssistantVisibleContent(message: Message): string {
   return message.content || '';
 }
 
-interface AgentStatus {
-  is_initialized: boolean;
-  mode: string;
-  available_agents: number;
-  orchestrator_active: boolean;
+function ChatThinkingIndicator({
+  isDarkMode,
+  leftAlignMessages,
+  widescreenMode,
+  startedAtMs,
+}: {
+  isDarkMode: boolean;
+  leftAlignMessages: boolean;
+  widescreenMode: boolean;
+  startedAtMs?: number | null;
+}) {
+  const elapsedSec = useElapsedSeconds(startedAtMs, true);
+  const timerLabel =
+    elapsedSec !== null && elapsedSec > 0 ? formatGenerationDuration(elapsedSec) : null;
+
+  return (
+    <Box
+      sx={{
+        width: '100%',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: leftAlignMessages ? 'flex-start' : 'flex-start',
+        mb: 1.5,
+      }}
+    >
+      <Box
+        sx={{
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'flex-start',
+          maxWidth: widescreenMode ? '100%' : '75%',
+          minWidth: '180px',
+        }}
+      >
+        <Card
+          sx={{
+            backgroundColor: isDarkMode ? 'background.paper' : '#f8f9fa',
+            color: isDarkMode ? 'text.primary' : '#333',
+            boxShadow: isDarkMode
+              ? '0 2px 8px rgba(0, 0, 0, 0.15)'
+              : '0 2px 8px rgba(0, 0, 0, 0.1)',
+            width: '100%',
+          }}
+        >
+          <CardContent sx={{ p: 1.2, pb: 0.8 }}>
+            <Box sx={{ display: 'flex', alignItems: 'center', mb: 0.3 }}>
+              <Avatar
+                src="/astra.png"
+                sx={{
+                  width: 24,
+                  height: 24,
+                  mr: 1,
+                  bgcolor: 'transparent',
+                  position: 'relative',
+                  '&::before': {
+                    content: '""',
+                    position: 'absolute',
+                    top: '-2px',
+                    left: '-2px',
+                    right: '-2px',
+                    bottom: '-2px',
+                    borderRadius: '50%',
+                    background: 'radial-gradient(circle, rgba(33, 150, 243, 0.3) 0%, transparent 70%)',
+                    animation: 'thinking-glow 2s ease-in-out infinite',
+                    '@keyframes thinking-glow': {
+                      '0%, 100%': { opacity: 0.3, transform: 'scale(1)' },
+                      '50%': { opacity: 0.8, transform: 'scale(1.3)' },
+                    },
+                  },
+                  animation: 'thinking 2s ease-in-out infinite',
+                }}
+              />
+              <Typography variant="caption" sx={{ opacity: 0.8, fontSize: '0.75rem', fontWeight: 500 }}>
+                AstraChat
+              </Typography>
+              <Typography variant="caption" sx={{ ml: 'auto', opacity: 0.6, fontSize: '0.7rem' }}>
+                {new Date().toLocaleTimeString('ru-RU', {
+                  hour: '2-digit',
+                  minute: '2-digit',
+                })}
+              </Typography>
+            </Box>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, minHeight: '24px' }}>
+              <Box sx={{ display: 'flex', gap: 0.5 }}>
+                <Box
+                  sx={{
+                    width: 6,
+                    height: 6,
+                    borderRadius: '50%',
+                    bgcolor: '#2196f3',
+                    animation: 'dot1 1.4s ease-in-out infinite both',
+                    '@keyframes dot1': {
+                      '0%, 80%, 100%': { transform: 'scale(0)' },
+                      '40%': { transform: 'scale(1)' },
+                    },
+                  }}
+                />
+                <Box
+                  sx={{
+                    width: 6,
+                    height: 6,
+                    borderRadius: '50%',
+                    bgcolor: '#2196f3',
+                    animation: 'dot2 1.4s ease-in-out infinite both',
+                    animationDelay: '0.2s',
+                    '@keyframes dot2': {
+                      '0%, 80%, 100%': { transform: 'scale(0)' },
+                      '40%': { transform: 'scale(1)' },
+                    },
+                  }}
+                />
+                <Box
+                  sx={{
+                    width: 6,
+                    height: 6,
+                    borderRadius: '50%',
+                    bgcolor: '#2196f3',
+                    animation: 'dot3 1.4s ease-in-out infinite both',
+                    animationDelay: '0.4s',
+                    '@keyframes dot3': {
+                      '0%, 80%, 100%': { transform: 'scale(0)' },
+                      '40%': { transform: 'scale(1)' },
+                    },
+                  }}
+                />
+              </Box>
+              <Typography
+                variant="body2"
+                sx={{
+                  color: isDarkMode ? 'rgba(255, 255, 255, 0.8)' : 'rgba(0, 0, 0, 0.8)',
+                  fontSize: '0.875rem',
+                }}
+              >
+                думает...
+                {timerLabel ? `\u00A0${timerLabel}` : ''}
+              </Typography>
+            </Box>
+          </CardContent>
+        </Card>
+      </Box>
+    </Box>
+  );
+}
+
+/** Живой таймер в чипе multi-LLM «Генерируется…». */
+function MultiLlmGeneratingChip({ startedAtMs }: { startedAtMs?: number }) {
+  const elapsed = useElapsedSeconds(startedAtMs, true);
+  const label =
+    elapsed !== null && elapsed > 0
+      ? `Генерируется… ${formatGenerationDuration(elapsed)}`
+      : 'Генерируется...';
+  return <Chip label={label} size="small" color="info" />;
 }
 
 /** Drag файлов из ОС; выделенный текст даёт text/plain без Files — не показываем зону загрузки */
@@ -451,16 +572,18 @@ const ReasoningBlock = React.memo(({
   liveThinkingSec,
   isDarkMode,
 }: ReasoningBlockProps) => {
-  const theme = useTheme();
   const pauseAutoScrollForInteraction = () => {
     window.dispatchEvent(new CustomEvent('astra_pause_chat_autoscroll'));
   };
-  const accentColor = theme.palette.mode === 'dark' ? '#a78bfa' : '#7c3aed';
-  const accentAlpha = theme.palette.mode === 'dark'
-    ? alpha('#a78bfa', 0.12)
-    : alpha('#7c3aed', 0.06);
-  const isDark = theme.palette.mode === 'dark';
+  const isDark = isDarkMode;
   const titleColor = isDark ? 'rgba(255,255,255,0.9)' : 'rgba(0,0,0,0.85)';
+  // Серый акцент для «Думает…» (анимация волны без фиолетового).
+  const thinkDim = isDark ? 'rgba(255,255,255,0.42)' : 'rgba(0,0,0,0.38)';
+  const thinkBright = isDark ? 'rgba(255,255,255,0.88)' : 'rgba(0,0,0,0.72)';
+  const thinkGlow = isDark
+    ? '0 0 10px rgba(255,255,255,0.18)'
+    : '0 0 8px rgba(0,0,0,0.12)';
+  const contentColor = isDark ? 'rgba(255,255,255,0.82)' : 'rgba(0,0,0,0.78)';
 
   const headerLabel =
     isThinkingStreaming
@@ -495,28 +618,26 @@ const ReasoningBlock = React.memo(({
         '@keyframes reasoningLetterWave': {
           '0%, 100%': {
             opacity: 0.42,
-            color: isDark ? 'rgba(255,255,255,0.48)' : 'rgba(0,0,0,0.42)',
+            color: thinkDim,
             textShadow: 'none',
             transform: 'translateY(0)',
           },
           '22%': {
             opacity: 1,
-            color: isDark ? '#f3ecff' : '#6d28d9',
-            textShadow: isDark
-              ? '0 0 16px rgba(196,181,253,0.55), 0 0 2px rgba(167,139,250,0.35)'
-              : '0 0 12px rgba(124,58,237,0.35), 0 0 1px rgba(91,33,182,0.25)',
+            color: thinkBright,
+            textShadow: thinkGlow,
             transform: 'translateY(-0.4px)',
           },
           '44%': {
             opacity: 0.42,
-            color: isDark ? 'rgba(255,255,255,0.48)' : 'rgba(0,0,0,0.42)',
+            color: thinkDim,
             textShadow: 'none',
             transform: 'translateY(0)',
           },
         },
       }}
     >
-      {/* Заголовок — строка как у RAG («Исходные документы») */}
+      {/* Заголовок — как у «Выполнен поиск по документам» */}
       <Box
         onMouseDown={pauseAutoScrollForInteraction}
         onTouchStart={pauseAutoScrollForInteraction}
@@ -575,42 +696,43 @@ const ReasoningBlock = React.memo(({
         />
       </Box>
 
-      {/* Контент рассуждений */}
+      {/* Контент — карточка как у «Выполнен поиск по документам» */}
       <Collapse in={isExpanded} timeout={220}>
         <Box
           sx={{
             mt: 1,
-            borderLeft: `3px solid ${accentColor}`,
-            borderRadius: '0 6px 6px 0',
-            bgcolor: accentAlpha,
-            px: 1.5,
-            py: 1,
+            p: 2,
+            borderRadius: 1,
+            border: '1px solid',
+            borderColor: 'divider',
+            bgcolor: 'action.hover',
             position: 'relative',
             overflow: 'hidden',
-            '&::before': isThinkingStreaming ? {
-              content: '""',
-              position: 'absolute',
-              top: 0,
-              left: 0,
-              right: 0,
-              height: '2px',
-              background: `linear-gradient(90deg, transparent, ${accentColor}, transparent)`,
-              '@keyframes scan': {
-                '0%': { transform: 'translateX(-100%)' },
-                '100%': { transform: 'translateX(100%)' },
-              },
-              animation: 'scan 1.8s linear infinite',
-            } : {},
+            '&::before': isThinkingStreaming
+              ? {
+                  content: '""',
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  height: '2px',
+                  background: `linear-gradient(90deg, transparent, ${
+                    isDark ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.28)'
+                  }, transparent)`,
+                  '@keyframes reasoningScan': {
+                    '0%': { transform: 'translateX(-100%)' },
+                    '100%': { transform: 'translateX(100%)' },
+                  },
+                  animation: 'reasoningScan 1.8s linear infinite',
+                }
+              : {},
           }}
         >
           <Box
             sx={{
               fontSize: '0.82rem',
               lineHeight: 1.65,
-              color: isDarkMode
-                ? alpha('#e2d9f3', 0.75)
-                : alpha('#3b1e6e', 0.68),
-              // Немного уменьшаем шрифт для контента рассуждений
+              color: contentColor,
               '& p, & li, & span': { fontSize: 'inherit', lineHeight: 'inherit' },
               '& p:first-of-type': { mt: 0 },
               '& p:last-of-type': { mb: 0 },
@@ -841,6 +963,19 @@ const MessageCardComponent = ({
     ? !interfaceSettings.userNoBorder
     : !interfaceSettings.assistantNoBorder;
 
+  const liveGenerationSec = useElapsedSeconds(
+    message.generationStartedAtMs,
+    Boolean(!isUser && message.isStreaming && !message.generationDurationSec),
+  );
+  const generationLabelSec =
+    !isUser && !message.isStreaming && message.generationDurationSec
+      ? message.generationDurationSec
+      : liveGenerationSec;
+  const generationLabel =
+    generationLabelSec !== null && generationLabelSec > 0
+      ? formatGenerationDuration(generationLabelSec)
+      : null;
+
   const messageContent = (
     <>
       <Box sx={{ display: 'flex', alignItems: 'center', mb: 0.3 }}>
@@ -853,6 +988,21 @@ const MessageCardComponent = ({
         <Typography variant="caption" sx={{ opacity: 0.8, fontSize: '0.75rem', fontWeight: 500 }}>
           {isUser ? (interfaceSettings.showUserName && username ? username : 'Вы') : 'AstraChat'}
         </Typography>
+        {!isUser && generationLabel ? (
+          <Typography
+            variant="caption"
+            sx={{
+              ml: 1,
+              opacity: 0.65,
+              fontSize: '0.7rem',
+              fontWeight: 500,
+              color: 'text.secondary',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {message.isStreaming ? `думает ${generationLabel}` : `думал ${generationLabel}`}
+          </Typography>
+        ) : null}
         <Typography variant="caption" sx={{ ml: 'auto', opacity: 0.6, fontSize: '0.7rem' }}>
           {dataRef.current.formatTimestamp(message.timestamp)}
         </Typography>
@@ -935,11 +1085,21 @@ const MessageCardComponent = ({
                   }}
                 >
                   <CardContent sx={{ flex: 1, display: 'flex', flexDirection: 'column', pb: 1 }}>
-                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1, flexWrap: 'wrap' }}>
                       <Typography variant="caption" fontWeight="bold" color={response.error ? 'error' : 'primary'}>
                         {response.model}
                       </Typography>
-                      {response.isStreaming && <Chip label="Генерируется..." size="small" color="info" />}
+                      {response.isStreaming && (
+                        <MultiLlmGeneratingChip startedAtMs={response.generationStartedAtMs} />
+                      )}
+                      {!response.isStreaming &&
+                        !response.error &&
+                        response.generationDurationSec != null &&
+                        response.generationDurationSec > 0 && (
+                          <Typography variant="caption" sx={{ opacity: 0.65, fontSize: '0.7rem' }}>
+                            думал {formatGenerationDuration(response.generationDurationSec)}
+                          </Typography>
+                        )}
                       {response.error && <Chip label="Ошибка" size="small" color="error" />}
                     </Box>
                     {response.error ? (
@@ -1518,6 +1678,8 @@ export default function UnifiedChatPage({
   useEffect(() => {
     localStorage.setItem('rightSidebarHidden', String(rightSidebarHidden));
   }, [rightSidebarHidden]);
+
+  useRightSidebarInsetCssVar(rightSidebarOpen, rightSidebarHidden);
   
   // Состояние для модального окна транскрибации
   const [transcriptionModalOpen, setTranscriptionModalOpen] = useState(false);
@@ -1886,8 +2048,6 @@ export default function UnifiedChatPage({
   }, []); // ← Пустой массив! Функция НЕ пересоздается!
   
   // Состояние для режима multi-llm
-  const [agentStatus, setAgentStatus] = useState<AgentStatus | null>(null);
-  const orchestratorAgentsAnyActive = useOrchestratorAgentsAnyActive(Boolean(agentStatus?.is_initialized));
   const activeMcpServers = useChatInputMcpIndicators(currentChat?.id);
   const activeSkills = useActiveSkillIndicators();
   const { activeMcpTools } = useMcpStreamingTools();
@@ -1981,6 +2141,20 @@ export default function UnifiedChatPage({
     return true;
   }, [currentChatLoading, hasRunningMcpTools, lastStreamingAssistant]);
 
+  const chatAwaitingStartedAtMs = useMemo(() => {
+    if (!chatAwaitingTokens) return null;
+    if (lastStreamingAssistant?.generationStartedAtMs) {
+      return lastStreamingAssistant.generationStartedAtMs;
+    }
+    // Плейсхолдер ассистента с isStreaming:false (ждём первый токен).
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      const m = messages[i];
+      if (m.role === 'assistant' && m.generationStartedAtMs) return m.generationStartedAtMs;
+      if (m.role === 'user') break;
+    }
+    return null;
+  }, [chatAwaitingTokens, lastStreamingAssistant, messages]);
+
   const suggestionsDisabled =
     currentChatLoading || hasActiveChatStreaming || multiLlmInputBlocked || chatAwaitingTokens;
 
@@ -2028,26 +2202,15 @@ export default function UnifiedChatPage({
     lastStreamingAssistant?.isImageGenerating,
   ]);
   const socketBlocksChatInput = !isConnected && !isConnecting && !token;
+  const chatSendDisabled =
+    (!inputMessage.trim() && inlineAttachments.length === 0 && !isUploading)
+    || socketBlocksChatInput
+    || multiLlmInputBlocked
+    || chatAwaitingTokens
+    || ragSendBlocked;
   const prevAgentModeRef = useRef<string | undefined>(undefined);
   const skipNextMultiLlmChatResetRef = useRef(false);
   const lastMultiLlmPostedKeyRef = useRef<string>('');
-
-  const loadAgentStatus = useCallback(async () => {
-    try {
-      const response = await fetch(`${getApiUrl('/api/agent/status')}`);
-      if (response.ok) {
-        const data = await response.json();
-        setAgentStatus((prev) => {
-          if (JSON.stringify(prev) !== JSON.stringify(data)) {
-            return data;
-          }
-          return prev;
-        });
-      }
-    } catch {
-      /* ignore */
-    }
-  }, []);
 
   const handleOpenMcpGearPanel = useCallback(() => {
     const shell = chatInputToolsAnchorRef.current;
@@ -2076,7 +2239,6 @@ export default function UnifiedChatPage({
         isDarkMode={isDarkMode}
         libraryActive={useKbRag}
         onLibraryToggle={toggleKbRag}
-        standardAgentsActive={orchestratorAgentsAnyActive}
         myAgentName={myAgentSelection?.name ?? null}
         onAgentToggle={myAgentSelection?.name ? handleClearMyAgent : undefined}
         activeSkills={activeSkills}
@@ -2089,7 +2251,6 @@ export default function UnifiedChatPage({
       isDarkMode,
       useKbRag,
       toggleKbRag,
-      orchestratorAgentsAnyActive,
       myAgentSelection?.name,
       handleClearMyAgent,
       activeSkills,
@@ -2230,7 +2391,7 @@ export default function UnifiedChatPage({
           : '';
     const clusterWidth = estimateLibraryClusterWidthPx(
       useKbRag,
-      orchestratorAgentsAnyActive || Boolean(myAgentSelection?.name),
+      Boolean(myAgentSelection?.name),
       activeMcpServers.length > 0,
       mcpLabel,
       activeSkills.length > 0,
@@ -2239,7 +2400,6 @@ export default function UnifiedChatPage({
     return getToolsButtonInsetSp(interfaceSettings.chatInputStyle, clusterWidth);
   }, [
     useKbRag,
-    orchestratorAgentsAnyActive,
     myAgentSelection?.name,
     activeMcpServers,
     activeSkills,
@@ -2464,46 +2624,8 @@ export default function UnifiedChatPage({
       }
     };
 
-    loadAgentStatus();
-    loadAvailableModelsOnce();
-
-    const onAgentChange = () => {
-      loadAgentStatus();
-    };
-    window.addEventListener('astrachatAgentStatusChanged', onAgentChange);
-    const onVis = () => {
-      if (document.visibilityState === 'visible') {
-        loadAgentStatus();
-      }
-    };
-    document.addEventListener('visibilitychange', onVis);
-    const interval = setInterval(() => {
-      loadAgentStatus();
-    }, 10000);
-
-    return () => {
-      window.removeEventListener('astrachatAgentStatusChanged', onAgentChange);
-      document.removeEventListener('visibilitychange', onVis);
-      clearInterval(interval);
-    };
-  }, [loadAgentStatus]);
-
-  // Список GGUF для multi-llm и после выхода из multi-llm
-  useEffect(() => {
-    if (!agentStatus?.mode) return;
-    const loadAvailableModels = async () => {
-      try {
-        const response = await fetch(`${getApiUrl('/api/models/available')}`);
-        if (response.ok) {
-          const data = await response.json();
-          setAvailableModels(data.models || []);
-        }
-      } catch {
-        /* ignore */
-      }
-    };
-    loadAvailableModels();
-  }, [agentStatus?.mode]);
+    void loadAvailableModelsOnce();
+  }, []);
 
   useEffect(() => {
     if (skipNextMultiLlmChatResetRef.current) {
@@ -2577,6 +2699,11 @@ export default function UnifiedChatPage({
   }, [modelWindows]);
 
   const handleSendMessageMultiLLM = async (): Promise<void> => {
+    if (isUploading) {
+      setAttachErrorBanner(INLINE_ATTACH_WAIT_BEFORE_SEND_MESSAGE);
+      return;
+    }
+
     if (!inputMessage.trim() || (!isConnected && !isConnecting && !token)) {
       return;
     }
@@ -2627,6 +2754,7 @@ export default function UnifiedChatPage({
               minio_object: f.minioObject,
               minio_bucket: f.minioBucket,
               ...(typeof f.size === 'number' && f.size > 0 ? { size: f.size } : {}),
+              ...(typeof f.tokenEstimate === 'number' && f.tokenEstimate > 0 ? { tokenEstimate: f.tokenEstimate } : {}),
             })),
           }
         : undefined;
@@ -2645,6 +2773,11 @@ export default function UnifiedChatPage({
   };
 
   const handleSendMessage = (): void => {
+    if (isUploading) {
+      setAttachErrorBanner(INLINE_ATTACH_WAIT_BEFORE_SEND_MESSAGE);
+      return;
+    }
+
     // Если режим multi-llm, используем специальную функцию
     if (isMultiLlmMode) {
       handleSendMessageMultiLLM();
@@ -2682,6 +2815,7 @@ export default function UnifiedChatPage({
               minio_object: f.minioObject,
               minio_bucket: f.minioBucket,
               ...(typeof f.size === 'number' && f.size > 0 ? { size: f.size } : {}),
+              ...(typeof f.tokenEstimate === 'number' && f.tokenEstimate > 0 ? { tokenEstimate: f.tokenEstimate } : {}),
             })),
           }
         : undefined;
@@ -2705,6 +2839,7 @@ export default function UnifiedChatPage({
             minio_object: f.minioObject,
             minio_bucket: f.minioBucket,
             ...(typeof f.size === 'number' && f.size > 0 ? { size: f.size } : {}),
+            ...(typeof f.tokenEstimate === 'number' && f.tokenEstimate > 0 ? { tokenEstimate: f.tokenEstimate } : {}),
           })),
         }
       : undefined;
@@ -3271,6 +3406,20 @@ export default function UnifiedChatPage({
       lastModified: file.lastModified,
     });
 
+    if (isInlineAttachFileTooLarge(file)) {
+      logChatAttach('attach-rejected-size', {
+        name: file.name,
+        size: file.size,
+        sizeHuman: formatFileSize(file.size),
+      });
+      setAttachErrorBanner(buildOversizedInlineAttachMessage(file.name, file.size));
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      return;
+    }
+
+    setUploadingFile({ name: file.name, size: file.size });
+    setIsUploading(true);
+
     const isImage = /\.(jpe?g|png|webp|gif)$/i.test(file.name)
       || ['image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'image/gif'].includes(file.type);
 
@@ -3279,9 +3428,8 @@ export default function UnifiedChatPage({
     let previewUrl: string | undefined;
     if (isImage) {
       previewUrl = URL.createObjectURL(file);
+      setUploadingFile({ name: file.name, size: file.size, previewUrl });
     }
-    setUploadingFile({ name: file.name, size: file.size, previewUrl });
-    setIsUploading(true);
     let compressedNotice: string | null = null;
     const uploadUrl = getApiUrl(API_ENDPOINTS.DOCUMENTS_ATTACH);
     try {
@@ -3374,6 +3522,10 @@ export default function UnifiedChatPage({
             contentType: result.type,
             content: result.content,
             size: file.size,
+            tokenEstimate:
+              result.type === 'image'
+                ? 512
+                : estimateTokens(result.content || ''),
             ...(result.minio_object ? { minioObject: result.minio_object } : {}),
             ...(result.minio_bucket ? { minioBucket: result.minio_bucket } : {}),
           },
@@ -4376,137 +4528,12 @@ export default function UnifiedChatPage({
               
               {/* Индикатор размышления - показывается только до начала потоковой генерации, сразу после сообщений */}
               {chatAwaitingTokens && (
-                <Box sx={{ 
-                  width: '100%', 
-                  display: 'flex',
-                  flexDirection: 'column',
-                  alignItems: interfaceSettings.leftAlignMessages ? 'flex-start' : 'flex-start',
-                  mb: 1.5,
-                }}>
-                  <Box
-                    sx={{
-                      display: 'flex',
-                      flexDirection: 'column',
-                      alignItems: 'flex-start',
-                      maxWidth: interfaceSettings.widescreenMode ? '100%' : '75%',
-                      minWidth: '180px',
-                    }}
-                  >
-                    <Card
-                      sx={{
-                        backgroundColor: isDarkMode ? 'background.paper' : '#f8f9fa',
-                        color: isDarkMode ? 'text.primary' : '#333',
-                        boxShadow: isDarkMode
-                          ? '0 2px 8px rgba(0, 0, 0, 0.15)'
-                          : '0 2px 8px rgba(0, 0, 0, 0.1)',
-                        width: '100%',
-                      }}
-                    >
-                      <CardContent sx={{ p: 1.2, pb: 0.8 }}>
-                        <Box sx={{ display: 'flex', alignItems: 'center', mb: 0.3 }}>
-                          <Avatar
-                            src="/astra.png"
-                            sx={{
-                              width: 24,
-                              height: 24,
-                              mr: 1,
-                              bgcolor: 'transparent',
-                              position: 'relative',
-                              '&::before': {
-                                content: '""',
-                                position: 'absolute',
-                                top: '-2px',
-                                left: '-2px',
-                                right: '-2px',
-                                bottom: '-2px',
-                                borderRadius: '50%',
-                                background: 'radial-gradient(circle, rgba(33, 150, 243, 0.3) 0%, transparent 70%)',
-                                animation: 'thinking-glow 2s ease-in-out infinite',
-                                '@keyframes thinking-glow': {
-                                  '0%, 100%': { 
-                                    opacity: 0.3,
-                                    transform: 'scale(1)',
-                                  },
-                                  '50%': { 
-                                    opacity: 0.8,
-                                    transform: 'scale(1.3)',
-                                  },
-                                },
-                              },
-                              animation: 'thinking 2s ease-in-out infinite',
-                            }}
-                          />
-                          <Typography variant="caption" sx={{ opacity: 0.8, fontSize: '0.75rem', fontWeight: 500 }}>
-                            AstraChat
-                          </Typography>
-                          <Typography variant="caption" sx={{ ml: 'auto', opacity: 0.6, fontSize: '0.7rem' }}>
-                            {new Date().toLocaleTimeString('ru-RU', {
-                              hour: '2-digit',
-                              minute: '2-digit',
-                            })}
-                          </Typography>
-                        </Box>
-                        
-                        <Box sx={{ 
-                          display: 'flex', 
-                          alignItems: 'center', 
-                          gap: 1,
-                          minHeight: '24px',
-                        }}>
-                          <Box sx={{ display: 'flex', gap: 0.5 }}>
-                            <Box
-                              sx={{
-                                width: 6,
-                                height: 6,
-                                borderRadius: '50%',
-                                bgcolor: '#2196f3',
-                                animation: 'dot1 1.4s ease-in-out infinite both',
-                                '@keyframes dot1': {
-                                  '0%, 80%, 100%': { transform: 'scale(0)' },
-                                  '40%': { transform: 'scale(1)' },
-                                },
-                              }}
-                            />
-                            <Box
-                              sx={{
-                                width: 6,
-                                height: 6,
-                                borderRadius: '50%',
-                                bgcolor: '#2196f3',
-                                animation: 'dot2 1.4s ease-in-out infinite both',
-                                animationDelay: '0.2s',
-                                '@keyframes dot2': {
-                                  '0%, 80%, 100%': { transform: 'scale(0)' },
-                                  '40%': { transform: 'scale(1)' },
-                                },
-                              }}
-                            />
-                            <Box
-                              sx={{
-                                width: 6,
-                                height: 6,
-                                borderRadius: '50%',
-                                bgcolor: '#2196f3',
-                                animation: 'dot3 1.4s ease-in-out infinite both',
-                                animationDelay: '0.4s',
-                                '@keyframes dot3': {
-                                  '0%, 80%, 100%': { transform: 'scale(0)' },
-                                  '40%': { transform: 'scale(1)' },
-                                },
-                              }}
-                            />
-                          </Box>
-                          <Typography variant="body2" sx={{ 
-                            color: isDarkMode ? 'rgba(255, 255, 255, 0.8)' : 'rgba(0, 0, 0, 0.8)',
-                            fontSize: '0.875rem',
-                          }}>
-                            думает...
-                          </Typography>
-                        </Box>
-                      </CardContent>
-                    </Card>
-                  </Box>
-                </Box>
+                <ChatThinkingIndicator
+                  isDarkMode={isDarkMode}
+                  leftAlignMessages={interfaceSettings.leftAlignMessages}
+                  widescreenMode={interfaceSettings.widescreenMode}
+                  startedAtMs={chatAwaitingStartedAtMs}
+                />
               )}
             </Box>
           )}
@@ -4633,7 +4660,7 @@ export default function UnifiedChatPage({
                               showStopButton={currentChatLoading || hasActiveChatStreaming}
                               onStopClick={handleStopGeneration}
                               onSendClick={handleSendMessage}
-                             sendDisabled={(!inputMessage.trim() && inlineAttachments.length === 0) || socketBlocksChatInput || multiLlmInputBlocked || chatAwaitingTokens || ragSendBlocked}
+                             sendDisabled={chatSendDisabled}
                               onVoiceClick={() => setShowVoiceDialog(true)}
                              voiceDisabled={multiLlmInputBlocked || chatAwaitingTokens}
                            voiceTooltip="Голосовой ввод"
@@ -4686,7 +4713,7 @@ export default function UnifiedChatPage({
                               showStopButton={currentChatLoading || hasActiveChatStreaming}
                               onStopClick={handleStopGeneration}
                               onSendClick={handleSendMessage}
-                             sendDisabled={(!inputMessage.trim() && inlineAttachments.length === 0) || socketBlocksChatInput || multiLlmInputBlocked || chatAwaitingTokens || ragSendBlocked}
+                             sendDisabled={chatSendDisabled}
                               onVoiceClick={() => setShowVoiceDialog(true)}
                              voiceDisabled={multiLlmInputBlocked || chatAwaitingTokens}
                voiceTooltip="Голосовой ввод"
@@ -4987,11 +5014,7 @@ export default function UnifiedChatPage({
                }}
              >
               {gearToolsPanel === 'agents' ? (
-                <ChatGearAgentsPanel
-                  isDarkMode={isDarkMode}
-                  canUseAgents={Boolean(agentStatus?.is_initialized)}
-                  onAgentsInitialized={loadAgentStatus}
-                />
+                <ChatGearAgentsPanel isDarkMode={isDarkMode} />
               ) : gearToolsPanel === 'skills' ? (
                 <ChatGearSkillsPanel isDarkMode={isDarkMode} />
               ) : gearToolsPanel === 'mcp' ? (
@@ -5118,6 +5141,7 @@ export default function UnifiedChatPage({
         variant="persistent"
         anchor="right"
         open={true}
+        slotProps={{ paper: { className: 'astra-right-rail' } }}
         sx={{
           width: rightSidebarOpen ? 240 : 64,
           flexShrink: 0,

@@ -22,6 +22,7 @@ import {
   isValidSelectedModelPath,
   LAST_SELECTED_MODEL_PATH_STORAGE_KEY,
 } from '../utils/modelThinking';
+import { MODEL_PATH_CHANGED_EVENT } from '../utils/contextTokens';
 import {
   getDropdownItemSx,
   DROPDOWN_CHEVRON_SX,
@@ -406,6 +407,28 @@ export default function AgentSelector({
     return () => window.removeEventListener('agentSelected', onAgentSelected);
   }, []);
 
+  useEffect(() => {
+    const syncFromStorage = () => {
+      const path = localStorage.getItem(LAST_SELECTED_MODEL_PATH_STORAGE_KEY) || '';
+      setSelectedModelPath((prev) => (prev === path ? prev : path));
+    };
+    const onModelChanged = (e: Event) => {
+      const detail = (e as CustomEvent<{ path?: string }>).detail;
+      const path = typeof detail?.path === 'string' ? detail.path.trim() : '';
+      if (isValidSelectedModelPath(path)) {
+        setSelectedModelPath(path);
+      } else {
+        syncFromStorage();
+      }
+    };
+    window.addEventListener('storage', syncFromStorage);
+    window.addEventListener(MODEL_PATH_CHANGED_EVENT, onModelChanged);
+    return () => {
+      window.removeEventListener('storage', syncFromStorage);
+      window.removeEventListener(MODEL_PATH_CHANGED_EVENT, onModelChanged);
+    };
+  }, []);
+
   // ─── Open / close ─────────────────────────────────────────────────────────────
 
   const handleOpen = (e: React.MouseEvent<HTMLElement>) => {
@@ -449,6 +472,9 @@ export default function AgentSelector({
 
       setSelectedModelPath(modelPath);
       localStorage.setItem(LAST_SELECTED_MODEL_PATH_STORAGE_KEY, modelPath);
+      window.dispatchEvent(
+        new CustomEvent(MODEL_PATH_CHANGED_EVENT, { detail: { path: modelPath } }),
+      );
       onModelSelect?.(modelPath);
       showNotification('success', 'Модель успешно загружена');
       void loadModels(false);

@@ -156,6 +156,11 @@ export function mapServerConversationToChat(conversation: any): Chat {
                 ? { currentResponseIndex: currentResponseIndexRaw }
                 : {}),
               ...(slotFeedback ? { feedback: slotFeedback } : {}),
+              ...(typeof slot.generation_duration_sec === 'number' && slot.generation_duration_sec > 0
+                ? { generationDurationSec: Math.round(slot.generation_duration_sec) }
+                : typeof slot.generationDurationSec === 'number' && slot.generationDurationSec > 0
+                  ? { generationDurationSec: Math.round(slot.generationDurationSec as number) }
+                  : {}),
             };
           });
 
@@ -163,6 +168,21 @@ export function mapServerConversationToChat(conversation: any): Chat {
         const documentSearch = mapDocumentSearchFromMeta(
           metadata?.document_search ?? metadata?.documentSearch,
         );
+        const generationDurationRaw =
+          metadata?.generation_duration_sec ?? metadata?.generationDurationSec;
+        const generationDurationSec =
+          typeof generationDurationRaw === 'number' && generationDurationRaw > 0
+            ? Math.round(generationDurationRaw)
+            : undefined;
+        // Если у слотов нет своей длительности — берём с сообщения (старые записи / общий таймер).
+        const multiLLMResponsesWithDuration =
+          multiLLMResponses.length && generationDurationSec
+            ? multiLLMResponses.map((slot) =>
+                slot.generationDurationSec && slot.generationDurationSec > 0
+                  ? slot
+                  : { ...slot, generationDurationSec },
+              )
+            : multiLLMResponses;
 
         return {
           id: String(msg?.message_id || `msg_${Math.random().toString(36).slice(2, 14)}`),
@@ -182,9 +202,12 @@ export function mapServerConversationToChat(conversation: any): Chat {
                 ? { currentResponseIndex: rawAltResponses.length - 1 }
                 : {}),
           ...(mcpToolCalls.length ? { mcpToolCalls } : {}),
-          ...(multiLLMResponses.length ? { multiLLMResponses } : {}),
+          ...(multiLLMResponsesWithDuration.length
+            ? { multiLLMResponses: multiLLMResponsesWithDuration }
+            : {}),
           ...(messageFeedback ? { feedback: messageFeedback } : {}),
           ...(documentSearch ? { documentSearch } : {}),
+          ...(generationDurationSec ? { generationDurationSec } : {}),
         } as Message;
       })
     : [];

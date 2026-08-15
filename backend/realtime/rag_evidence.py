@@ -627,13 +627,26 @@ async def maybe_rag_no_evidence_message(
     use_memory_library_rag: bool,
     use_agent_scoped_kb: bool,
     agent_kb_doc_ids: Optional[List[Any]],
+    has_history: bool = False,
 ) -> Optional[str]:
     """
     Если включён блок и в промпт не попал ни один фрагмент, но при этом был непустой
     корпус в задействованных хранилищах (project / kb / memory) — возвращает готовый текст
     ответа без LLM. Global store больше не учитывается.
+
+    'has_history' - в диалоге уже есть предыдущие сообщения. Тогда короткий
+    ответ без LLM не даём: пользователь мог спросить про то, что обсуждали выше, а
+    гард отвечает «не нашёл в базе документов», ни разу не заглянув в переписку.
+    Решение отдаём модели — у неё на руках и история, и правила ответа, включая
+    требование не выдумывать конкретику.
     """
     if not block_when_no_evidence or context_added or (not rag_client):
+        return None
+    if has_history:
+        logger.info(
+            "[RAG-NO-EVIDENCE] Контекст пуст, но в диалоге есть история — "
+            "отвечает модель, а не гард"
+        )
         return None
     counts = await fetch_rag_store_counts(
         rag_client,

@@ -65,7 +65,7 @@ export const CHAT_GEAR_MENU_PAPER_MIN_HEIGHT_PX = 96;
 /** Сколько карточек агента видно без скролла (остальные — прокрутка списка). */
 export const CHAT_GEAR_MENU_VISIBLE_AGENT_ROWS = 3;
 
-/** Поиск + вкладки «Стандартные / Мои» + строка «Оркестратор» + разделители, px. */
+/** Поиск + вкладки «Мои / Галерея» + разделители, px. */
 export const CHAT_GEAR_MENU_SEARCH_HEADER_RESERVE_PX = 118;
 
 /** Прокрутка без видимого скроллбара (Firefox / WebKit / IE legacy). */

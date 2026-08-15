@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, Union
 import json
 
+from app.clients.openai_models_compat_client import set_embed_log_context
 from app.clients.rag_models_client import RagModelsClient
 from app.core.config import get_settings
 from app.core.logging import get_logger
@@ -213,6 +214,16 @@ class ProjectRagService:
             timer.log(logger)
             return {"ok": False, "error": "Ошибка сохранения документа в БД", "document_id": None}
 
+        # Пометка для логов гардрейла: клиент видит только список строк, имя
+        # файла и id документа до него не доезжают. Ставим до ветвления, чтобы
+        # покрыть и иерархическую индексацию, и обычную.
+        set_embed_log_context(
+            store="project",
+            operation="upload",
+            project_id=project_id,
+            document_id=doc_id,
+            filename=filename,
+        )
         if (chunking_strategy or "").strip().lower() == "hierarchical":
             try:
                 with timer.stage("hierarchical_embed_insert"):
@@ -368,6 +379,16 @@ class ProjectRagService:
         # Удаление обходит ВСЕ таблицы (B2b) — при смене модели старые вектора
         # лежат в таблице прежней размерности и должны уйти.
         await repo.delete_vectors_by_document(document_id)
+        # Пометка для логов гардрейла: клиент видит только список строк, имя
+        # файла и id документа до него не доезжают. Ставим до ветвления, чтобы
+        # покрыть и иерархическую индексацию, и обычную.
+        set_embed_log_context(
+            store="project",
+            operation="reindex",
+            project_id=project_id,
+            document_id=document_id,
+            filename=filename,
+        )
         strategy = (chunking_strategy or "universal").strip().lower()
         if strategy == "hierarchical":
             from app.services.hierarchical_indexing import index_document_hierarchically

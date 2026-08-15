@@ -22,6 +22,7 @@ from backend.auth.jwt_handler import get_current_user
 from backend.rag_query.semantic_cache import bump_rag_semantic_cache
 from backend.schemas import RAGSettings, RagModelSelectRequest
 from backend.services.user_rag_settings import (
+    INDEX_AFFECTING_KEYS,
     chunk_params_from_rag_settings,
     default_rag_settings_snapshot,
     get_entity_rag_settings,
@@ -1019,9 +1020,15 @@ async def update_rag_settings(
         # и эмбеддер. top_k, порог и тумблеры препроцесса применяются на лету.
         if _rechunk_on_settings_change() and index_params_changed(before, merged):
             logger.info(
-                "[RECHUNK-USER] индексные настройки %s %s изменились → перечанковка",
+                # Печатаем "было -> стало" по каждому индексному ключу
+                "[RECHUNK-USER] индексные настройки %s %s изменились → перечанковка: %s",
                 kind,
                 entity_label,
+                {
+                    k: f"{before.get(k)!r} → {merged.get(k)!r}"
+                    for k in INDEX_AFFECTING_KEYS
+                    if before.get(k) != merged.get(k)
+                },
             )
             asyncio.create_task(
                 _run_background_rechunk_for_user(
@@ -1160,6 +1167,45 @@ CORSUR_PROVIDER_ID = os.getenv("RAG_CORSUR_PROVIDER_ID", "CORSUR")
 PHOENIX_EMBEDDINGS_PROVIDER_ID = os.getenv(
     "RAG_PHOENIX_EMBEDDINGS_PROVIDER_ID", "PHOENIX_Embeddings"
 )
+
+_dangling_default_warned: set = set()
+
+
+def _warn_if_dangling_cluster_default(catalog_rows: list) -> None:
+    """Кластерный дефолт указывает на шлюз, которого нет в каталоге.
+
+    Путь модели лежит в settings.json обычной строкой и переживает любое
+    переименование провайдера. Сущность без своей записи наследует его целиком —
+    то есть КАЖДЫЙ новый проект и агент. Префикс уходит в SVC-RAG как есть, там
+    он не находится, и первая же загрузка документа падает с 422 «провайдер не
+    найден», хотя пользователь модель не выбирал.
+    """
+    if not catalog_rows:
+        return
+    known = {str(r.get("source") or "").strip().lower() for r in catalog_rows}
+    known |= {"local", "native", ""}
+    for field, label in (
+        ("rag_embedding_model_path", "эмбеддинга"),
+        ("rag_reranker_model_path", "реранкера"),
+    ):
+        path = str(getattr(state, field, "") or "").strip()
+        prefix = path.split("/", 1)[0].strip().lower() if "/" in path else ""
+        if not path or prefix in known or path in _dangling_default_warned:
+            continue
+        _dangling_default_warned.add(path)
+        logger.warning(
+            "[RAG-CATALOG] кластерный дефолт модели %s — %r, но провайдера %r "
+            "в каталоге нет (есть: %s). Этот путь наследует каждая новая "
+            "сущность, и индексация в ней упадёт с 422 «провайдер не найден». "
+            "Поправьте %s в settings.json бэкенда либо верните запись провайдера "
+            "в rag_models.providers у SVC-RAG",
+            label,
+            path,
+            prefix,
+            ", ".join(sorted(k for k in known if k)) or "-",
+            field,
+        )
+
 
 # Внешние OpenAI-совместимые источники эмбеддингов/реранка в UI.
 # Вкладки (порядок и написание): CORSUR → PHOENIX → PHOENIX_Embeddings.
@@ -1608,18 +1654,54 @@ async def list_rag_models(
     project_id: Optional[str] = None,
     agent_id: Optional[int] = None,
 ):
-    """Каталог embedding/reranker для UI: CORSUR, PHOENIX, PHOENIX_Embeddings.
+    """Каталог embedding/reranker для UI: local (models/rag) + CORSUR/PHOENIX.
 
     ```scope``` — чей выбор подсвечивать как current: project (по умолчанию) или agent.
     ```project_id``` / ```agent_id``` — настройки конкретного проекта/агента.
     """
     try:
-        data: dict = {"models": {"embedding": [], "reranker": []}}
+        data: dict = {
+            "models": {"embedding": [], "reranker": []},
+            "offline": True,
+            "cluster_default": {},
+        }
+        # 1) Локальные папки из SVC-RAG-MODELS (./models/rag/*) — основной каталог.
+        if rag_models_client:
+            try:
+                local = await rag_models_client.list_models(type)
+                if isinstance(local, dict):
+                    data["offline"] = bool(local.get("offline", True))
+                    if isinstance(local.get("cluster_default"), dict):
+                        data["cluster_default"] = local["cluster_default"]
+                    elif isinstance(local.get("current"), dict):
+                        data["cluster_default"] = local["current"]
+                    if isinstance(local.get("models_dir"), str):
+                        data["models_dir"] = local["models_dir"]
+                    local_models = local.get("models") or {}
+                    for kind_key in ("embedding", "reranker"):
+                        if type and kind_key != type:
+                            continue
+                        for row in local_models.get(kind_key) or []:
+                            if not isinstance(row, dict) or not row.get("path"):
+                                continue
+                            row = dict(row)
+                            row.setdefault("source", "local")
+                            row.setdefault("kind", kind_key)
+                            data["models"].setdefault(kind_key, []).append(row)
+            except Exception:
+                logger.exception(
+                    "Каталог локальных RAG-моделей (svc-rag-models) недоступен"
+                )
+        # 2) Внешние шлюзы (CORSUR / PHOENIX) — опционально, если настроены.
         try:
             external_rows = await _external_rag_models_cached(type)
             for row in external_rows or []:
                 kind_key = row.get("kind") or "embedding"
                 data["models"].setdefault(kind_key, []).append(row)
+            catalog_for_warn: list = []
+            for kind_key in ("embedding", "reranker"):
+                catalog_for_warn.extend(data["models"].get(kind_key) or [])
+            _warn_if_dangling_cluster_default(catalog_for_warn)
         except Exception:
             logger.exception("Каталог внешних RAG-моделей недоступен")
         sc = normalize_scope(scope)

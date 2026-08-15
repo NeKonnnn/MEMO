@@ -26,6 +26,18 @@ import {
 import { getApiUrl, API_ENDPOINTS, getAuthFetchHeaders } from '../config/api';
 import { useRagEntityReadyMessage } from '../hooks/useRagEntityReadyMessage';
 import { ragDocumentDisplayIndex } from '../utils/ragDocumentDisplayIndex';
+import RagUploadingFileThumb from './RagUploadingFileThumb';
+import {
+  commitRagUploadUiUpdate,
+  createRagPendingUploads,
+  getRagFileTypeLabel,
+  mapWithConcurrency,
+  mergeRagDocumentsById,
+  parseRagUploadDocumentId,
+  removeRagPendingUploads,
+  RAG_UPLOAD_CONCURRENCY,
+  type RagPendingUpload,
+} from '../utils/ragPendingUpload';
 
 export interface ProjectRagDoc {
   id: number;
@@ -79,6 +91,7 @@ export default function ProjectRagLibraryInline({
     message: string;
     severity: 'success' | 'error' | 'info' | 'warning';
   } | null>(null);
+  const [pendingUploads, setPendingUploads] = useState<RagPendingUpload[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [resolvedId, setResolvedId] = useState<string | null>(projectId);
 
@@ -205,24 +218,6 @@ export default function ProjectRagLibraryInline({
     const list = Array.from(files || []);
     if (!list.length) return;
 
-    const pid = await ensureProjectId();
-    if (!pid) return;
-
-    const { embeddingPath, rerankerPath, rerankingEnabled } =
-      await resolveProjectRagModelPaths(pid);
-    if (!embeddingPath) {
-      showModelGuard(
-        'Сначала выберите модель эмбеддингов в настройках РАГ для проекта',
-      );
-      return;
-    }
-    if (rerankingEnabled && !rerankerPath) {
-      showModelGuard(
-        'Сначала выберите модель реранкера в настройках РАГ для проекта',
-      );
-      return;
-    }
-
     const valid = list.filter((f) => {
       const ext = '.' + f.name.split('.').pop()?.toLowerCase();
       return ALLOWED.includes(ext);
@@ -235,9 +230,53 @@ export default function ProjectRagLibraryInline({
       return;
     }
 
+    const pendingEntries = createRagPendingUploads(valid);
+    const dropPending = (ids: string[]) => {
+      setPendingUploads((prev) => removeRagPendingUploads(prev, ids));
+    };
+
+    const pid = await ensureProjectId();
+    if (!pid) {
+      dropPending(pendingEntries.map((entry) => entry.clientId));
+      return;
+    }
+
+    const { embeddingPath, rerankerPath, rerankingEnabled } =
+      await resolveProjectRagModelPaths(pid);
+    if (!embeddingPath) {
+      dropPending(pendingEntries.map((entry) => entry.clientId));
+      showModelGuard(
+        'Сначала выберите модель эмбеддингов в настройках РАГ для проекта',
+      );
+      return;
+    }
+    if (rerankingEnabled && !rerankerPath) {
+      dropPending(pendingEntries.map((entry) => entry.clientId));
+      showModelGuard(
+        'Сначала выберите модель реранкера в настройках РАГ для проекта',
+      );
+      return;
+    }
+
     setUploading(true);
     setBanner(null);
-    for (const file of valid) {
+    setPendingUploads((prev) => [...prev, ...pendingEntries]);
+
+    let stopRemaining = false;
+    let successCount = 0;
+
+    await mapWithConcurrency(valid, RAG_UPLOAD_CONCURRENCY, async (file, index) => {
+      if (stopRemaining) {
+        const pendingId = pendingEntries[index]?.clientId;
+        if (pendingId) {
+          commitRagUploadUiUpdate(() => {
+            setPendingUploads((prev) => removeRagPendingUploads(prev, [pendingId]));
+          });
+        }
+        return;
+      }
+
+      const pendingId = pendingEntries[index]?.clientId;
       try {
         const fd = new FormData();
         fd.append('file', file);
@@ -258,7 +297,6 @@ export default function ProjectRagLibraryInline({
                     )
                     .join('; ')
                 : JSON.stringify(detail);
-          // Сообщения про модели — оранжевая табличка, остальное error.
           if (
             typeof msg === 'string' &&
             (msg.includes('эмбеддинг') || msg.includes('реранкер'))
@@ -267,36 +305,80 @@ export default function ProjectRagLibraryInline({
           } else {
             setBanner({ message: `${file.name}: ${msg}`, severity: 'error' });
           }
-          setUploading(false);
+          stopRemaining = true;
+          if (pendingId) {
+            commitRagUploadUiUpdate(() => {
+              setPendingUploads((prev) => removeRagPendingUploads(prev, [pendingId]));
+            });
+          }
+          return;
+        }
+        const data = (await resp.json().catch(() => ({}))) as Record<string, unknown>;
+        const docId = parseRagUploadDocumentId(data);
+        successCount += 1;
+        commitRagUploadUiUpdate(() => {
+          if (docId != null) {
+            setDocuments((prev) => {
+              if (prev.some((d) => d.id === docId)) return prev;
+              return [
+                {
+                  id: docId,
+                  filename: file.name,
+                  size: file.size,
+                  file_type: getRagFileTypeLabel(file.name),
+                  created_at: new Date().toISOString(),
+                },
+                ...prev,
+              ];
+            });
+          }
+          if (pendingId) {
+            setPendingUploads((prev) => removeRagPendingUploads(prev, [pendingId]));
+          }
+        });
+        if (docId == null) {
           try {
-            setDocuments(await fetchList(pid));
+            const fresh = await fetchList(pid);
+            commitRagUploadUiUpdate(() => {
+              setDocuments((prev) => mergeRagDocumentsById(prev, fresh));
+            });
           } catch {
             /* ignore */
           }
-          return;
         }
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e);
         setBanner({ message: `${file.name}: ${msg}`, severity: 'error' });
-        setUploading(false);
-        try {
-          setDocuments(await fetchList(pid));
-        } catch {
-          /* ignore */
+        stopRemaining = true;
+        if (pendingId) {
+          commitRagUploadUiUpdate(() => {
+            setPendingUploads((prev) => removeRagPendingUploads(prev, [pendingId]));
+          });
         }
-        return;
       }
-    }
+    });
+
     setUploading(false);
+    if (stopRemaining) {
+      try {
+        setDocuments(await fetchList(pid));
+      } catch {
+        /* ignore */
+      }
+      commitRagUploadUiUpdate(() => {
+        setPendingUploads([]);
+      });
+      return;
+    }
     setBanner({
-      message: `Загружено файлов: ${valid.length}. Документы проиндексированы для RAG.`,
+      message: `Загружено файлов: ${successCount || valid.length}. Документы проиндексированы для RAG.`,
       severity: 'success',
     });
-    try {
-      setDocuments(await fetchList(pid));
-    } catch {
-      /* ignore */
-    }
+    void fetchList(pid)
+      .then((fresh) => {
+        setDocuments((prev) => mergeRagDocumentsById(prev, fresh));
+      })
+      .catch(() => undefined);
   };
 
   const handleDelete = async (doc: ProjectRagDoc) => {
@@ -358,7 +440,6 @@ export default function ProjectRagLibraryInline({
       >
         Выбрать файлы
       </Button>
-      {uploading && <LinearProgress sx={{ mt: 2 }} />}
     </Box>
   );
 
@@ -413,7 +494,7 @@ export default function ProjectRagLibraryInline({
 
       <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
         <Typography variant="subtitle2">
-          Проиндексированные документы ({documents.length})
+          Проиндексированные документы ({documents.length + pendingUploads.length})
         </Typography>
         <Button
           size="small"
@@ -431,12 +512,26 @@ export default function ProjectRagLibraryInline({
         </Typography>
       ) : loading ? (
         <LinearProgress />
-      ) : documents.length === 0 ? (
+      ) : documents.length === 0 && pendingUploads.length === 0 ? (
         <Typography color="text.secondary" variant="body2">
           Пока нет документов. Загрузите файлы выше — они станут доступны для поиска в рамках этого проекта.
         </Typography>
       ) : (
         <List dense disablePadding>
+          {pendingUploads.map((pending) => (
+            <ListItem
+              key={pending.clientId}
+              sx={{ borderBottom: 1, borderColor: 'divider' }}
+            >
+              <ListItemIcon sx={{ minWidth: 40 }}>
+                <RagUploadingFileThumb filename={pending.filename} size={28} />
+              </ListItemIcon>
+              <ListItemText
+                primary={pending.filename}
+                secondary={getRagFileTypeLabel(pending.filename)}
+              />
+            </ListItem>
+          ))}
           {documents.map((doc) => (
             <ListItem
               key={doc.id}

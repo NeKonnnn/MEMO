@@ -31,6 +31,18 @@ import {
 import { getApiUrl, API_ENDPOINTS, getAuthFetchHeaders } from '../config/api';
 import { useAppActions } from '../contexts/AppContext';
 import { ragDocumentDisplayIndex } from '../utils/ragDocumentDisplayIndex';
+import RagUploadingFileThumb from './RagUploadingFileThumb';
+import {
+  commitRagUploadUiUpdate,
+  createRagPendingUploads,
+  getRagFileTypeLabel,
+  mapWithConcurrency,
+  mergeRagDocumentsById,
+  parseRagUploadDocumentId,
+  removeRagPendingUploads,
+  RAG_UPLOAD_CONCURRENCY,
+  type RagPendingUpload,
+} from '../utils/ragPendingUpload';
 
 export interface MemoryRagDoc {
   id: number;
@@ -72,6 +84,7 @@ export default function MemoryRagLibraryModal({ open, onClose }: Props) {
   const [documents, setDocuments] = useState<MemoryRagDoc[]>([]);
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [pendingUploads, setPendingUploads] = useState<RagPendingUpload[]>([]);
   const [banner, setBanner] = useState<{
     message: string;
     severity: 'success' | 'error' | 'info';
@@ -129,9 +142,27 @@ export default function MemoryRagLibraryModal({ open, onClose }: Props) {
       });
       return;
     }
+    const pendingEntries = createRagPendingUploads(valid);
+
     setUploading(true);
     setBanner(null);
-    for (const file of valid) {
+    setPendingUploads((prev) => [...prev, ...pendingEntries]);
+
+    let stopRemaining = false;
+    let successCount = 0;
+
+    await mapWithConcurrency(valid, RAG_UPLOAD_CONCURRENCY, async (file, index) => {
+      if (stopRemaining) {
+        const pendingId = pendingEntries[index]?.clientId;
+        if (pendingId) {
+          commitRagUploadUiUpdate(() => {
+            setPendingUploads((prev) => removeRagPendingUploads(prev, [pendingId]));
+          });
+        }
+        return;
+      }
+
+      const pendingId = pendingEntries[index]?.clientId;
       try {
         const fd = new FormData();
         fd.append('file', file);
@@ -144,28 +175,72 @@ export default function MemoryRagLibraryModal({ open, onClose }: Props) {
           const err = await resp.json().catch(() => ({ detail: resp.statusText }));
           throw new Error(typeof err.detail === 'string' ? err.detail : JSON.stringify(err.detail));
         }
+        const data = (await resp.json().catch(() => ({}))) as Record<string, unknown>;
+        const docId = parseRagUploadDocumentId(data);
+        successCount += 1;
+        commitRagUploadUiUpdate(() => {
+          if (docId != null) {
+            setDocuments((prev) => {
+              if (prev.some((d) => d.id === docId)) return prev;
+              return [
+                {
+                  id: docId,
+                  filename: file.name,
+                  size: file.size,
+                  file_type: getRagFileTypeLabel(file.name),
+                  created_at: new Date().toISOString(),
+                },
+                ...prev,
+              ];
+            });
+          }
+          if (pendingId) {
+            setPendingUploads((prev) => removeRagPendingUploads(prev, [pendingId]));
+          }
+        });
+        if (docId == null) {
+          try {
+            const fresh = await fetchDocumentList();
+            commitRagUploadUiUpdate(() => {
+              setDocuments((prev) => mergeRagDocumentsById(prev, fresh));
+            });
+          } catch {
+            /* ignore */
+          }
+        }
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e);
         setBanner({ message: `${file.name}: ${msg}`, severity: 'error' });
-        setUploading(false);
-        try {
-          setDocuments(await fetchDocumentList());
-        } catch {
-          /* ignore */
+        stopRemaining = true;
+        if (pendingId) {
+          commitRagUploadUiUpdate(() => {
+            setPendingUploads((prev) => removeRagPendingUploads(prev, [pendingId]));
+          });
         }
-        return;
       }
-    }
+    });
+
     setUploading(false);
+    if (stopRemaining) {
+      try {
+        setDocuments(await fetchDocumentList());
+      } catch {
+        /* ignore */
+      }
+      commitRagUploadUiUpdate(() => {
+        setPendingUploads([]);
+      });
+      return;
+    }
     setBanner({
-      message: `Загружено файлов: ${valid.length}. Исходники сохранены в хранилище, текст проиндексирован в PostgreSQL (pgvector).`,
+      message: `Загружено файлов: ${successCount || valid.length}. Исходники сохранены в хранилище, текст проиндексирован в PostgreSQL (pgvector).`,
       severity: 'success',
     });
-    try {
-      setDocuments(await fetchDocumentList());
-    } catch {
-      /* ignore */
-    }
+    void fetchDocumentList()
+      .then((fresh) => {
+        setDocuments((prev) => mergeRagDocumentsById(prev, fresh));
+      })
+      .catch(() => undefined);
   };
 
   const handleDelete = async (doc: MemoryRagDoc) => {
@@ -254,21 +329,34 @@ export default function MemoryRagLibraryModal({ open, onClose }: Props) {
           >
             Выбрать файлы
           </Button>
-          {uploading && <LinearProgress sx={{ mt: 2 }} />}
         </Box>
 
         <Typography variant="subtitle2" gutterBottom>
-          Проиндексированные документы ({documents.length})
+          Проиндексированные документы ({documents.length + pendingUploads.length})
         </Typography>
         {loading ? (
           <LinearProgress />
-        ) : documents.length === 0 ? (
+        ) : documents.length === 0 && pendingUploads.length === 0 ? (
           <Typography color="text.secondary" variant="body2">
             Пока нет документов. После загрузки включите «Учитывать в ответах чата» здесь в настройках или кнопку
             «Общий RAG» в чате.
           </Typography>
         ) : (
           <List dense disablePadding>
+            {pendingUploads.map((pending) => (
+              <ListItem
+                key={pending.clientId}
+                sx={{ borderBottom: 1, borderColor: 'divider' }}
+              >
+                <ListItemIcon sx={{ minWidth: 40 }}>
+                  <RagUploadingFileThumb filename={pending.filename} size={28} />
+                </ListItemIcon>
+                <ListItemText
+                  primary={pending.filename}
+                  secondary={getRagFileTypeLabel(pending.filename)}
+                />
+              </ListItem>
+            ))}
             {documents.map((doc) => (
               <ListItem
                 key={doc.id}

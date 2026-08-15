@@ -90,6 +90,18 @@ import RAGSettings from './settings/RAGSettings';
 import { useRagEntityReadyMessage } from '../hooks/useRagEntityReadyMessage';
 import { fetchMergedUserAgents } from '../utils/fetchMergedUserAgents';
 import { getSidebarPanelBackground, getSidebarPanelChrome, getSidebarSecondaryButtonSx } from '../constants/sidebarPanelColor';
+import RagUploadingFileThumb from './RagUploadingFileThumb';
+import {
+  createRagPendingUploads,
+  commitRagUploadUiUpdate,
+  getRagFileTypeLabel,
+  mapWithConcurrency,
+  mergeRagDocumentsById,
+  parseRagUploadDocumentId,
+  removeRagPendingUploads,
+  RAG_UPLOAD_CONCURRENCY,
+  type RagPendingUpload,
+} from '../utils/ragPendingUpload';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -294,6 +306,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
   const [kbDocumentIds, setKbDocumentIds] = useState<number[]>([]);
   const [isLoadingKb, setIsLoadingKb] = useState(false);
   const [isUploadingKb, setIsUploadingKb] = useState(false);
+  const [pendingKbUploads, setPendingKbUploads] = useState<RagPendingUpload[]>([]);
 
   // Skills attached to agent (config.skill_ids — slugs)
   const [availableSkills, setAvailableSkills] = useState<Array<{ id: number; slug: string; name: string; description?: string }>>([]);
@@ -441,8 +454,8 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
     }
   }, []);
 
-  const loadKbDocuments = useCallback(async () => {
-    setIsLoadingKb(true);
+  const loadKbDocuments = useCallback(async (options?: { silent?: boolean }) => {
+    if (!options?.silent) setIsLoadingKb(true);
     try {
       const url = getApiUrl(API_ENDPOINTS.KB_DOCUMENTS_LIST);
       const resp = await fetch(url, { headers: getAuthFetchHeaders() });
@@ -472,11 +485,11 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
           };
         })
         .filter(d => Number.isFinite(d.id));
-      setKbDocuments(mapped);
+      setKbDocuments((prev) => (options?.silent ? mergeRagDocumentsById(prev, mapped) : mapped));
     } catch (e) {
       // silent
     } finally {
-      setIsLoadingKb(false);
+      if (!options?.silent) setIsLoadingKb(false);
     }
   }, []);
 
@@ -748,29 +761,39 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
     // FileList — live-коллекция input: если обнулить value до конца async,
     // список станет пустым и загрузка молча оборвётся без запроса на backend.
     const fileArr = Array.from(files || []);
+    const pendingEntries = createRagPendingUploads(fileArr);
+    const pendingIds = pendingEntries.map((entry) => entry.clientId);
+    const dropPending = (ids: string[] = pendingIds) => {
+      setPendingKbUploads((prev) => removeRagPendingUploads(prev, ids));
+    };
+
+    if (!fileArr.length) {
+      showKbGuard('Файл не выбран.');
+      return;
+    }
 
     if (!fileSearchEnabled) {
+      dropPending();
       showKbGuard('Сначала включите чекбокс «Искать по файлам агента».');
       return;
     }
     if (selectedAgentId === 'new' || typeof selectedAgentId !== 'number') {
+      dropPending();
       showKbGuard('Сначала сохраните агента, затем выберите модели в настройках РАГ.');
-      return;
-    }
-    if (!fileArr.length) {
-      showKbGuard('Файл не выбран.');
       return;
     }
 
     const { embeddingPath, rerankerPath, rerankingEnabled } =
       await resolveAgentRagModelPaths();
     if (!embeddingPath) {
+      dropPending();
       showKbGuard(
         'Сначала выберите модель эмбеддингов в настройках РАГ для агента',
       );
       return;
     }
     if (rerankingEnabled && !rerankerPath) {
+      dropPending();
       showKbGuard(
         'Сначала выберите модель реранкера в настройках РАГ для агента',
       );
@@ -778,6 +801,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
     }
 
     setKbGuardMessage(null);
+    setPendingKbUploads((prev) => [...prev, ...pendingEntries]);
     setIsUploadingKb(true);
     const uploadedIds: number[] = [];
     const chunkingStrategy =
@@ -785,7 +809,9 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
         (localStorage.getItem(ragUserId ? `rag_chunking_strategy:${ragUserId}` : '') ||
           localStorage.getItem('rag_chunking_strategy'))) ||
       'hierarchical';
-    for (const file of fileArr) {
+
+    await mapWithConcurrency(fileArr, RAG_UPLOAD_CONCURRENCY, async (file, index) => {
+      const pendingId = pendingEntries[index]?.clientId;
       const formData = new FormData();
       formData.append('file', file);
       // Agent KB: применяем стратегию чанкования из настроек RAG
@@ -809,29 +835,61 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
                 ? detail.map((d) => (typeof d === 'object' && d && 'msg' in d ? String((d as { msg: unknown }).msg) : String(d))).join('; ')
                 : `Не удалось загрузить «${file.name}» (${resp.status})`;
           showKbGuard(msg);
-          continue;
+          if (pendingId) {
+            commitRagUploadUiUpdate(() => {
+              setPendingKbUploads((prev) => removeRagPendingUploads(prev, [pendingId]));
+            });
+          }
+          return;
         }
-        const docId = Number(data.document_id ?? data.id);
-        if (Number.isFinite(docId)) {
+        const docId = parseRagUploadDocumentId(data);
+        if (docId != null) {
           uploadedIds.push(docId);
         } else {
           showKbGuard(
             `Файл «${file.name}» загружен, но сервер не вернул id документа`,
           );
         }
+        commitRagUploadUiUpdate(() => {
+          if (docId != null) {
+            setKbDocumentIds((prev) => Array.from(new Set([...prev, docId])));
+            setKbDocuments((prev) => {
+              if (prev.some((d) => d.id === docId)) return prev;
+              return [
+                ...prev,
+                {
+                  id: docId,
+                  filename: file.name,
+                  size: file.size,
+                  file_type: getRagFileTypeLabel(file.name),
+                  created_at: new Date().toISOString(),
+                  agentId: selectedAgentId,
+                },
+              ];
+            });
+          }
+          if (pendingId) {
+            setPendingKbUploads((prev) => removeRagPendingUploads(prev, [pendingId]));
+          }
+        });
+        if (docId == null) {
+          void loadKbDocuments({ silent: true });
+        }
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         showKbGuard(`Ошибка загрузки «${file.name}»: ${msg}`);
+        if (pendingId) {
+          commitRagUploadUiUpdate(() => {
+            setPendingKbUploads((prev) => removeRagPendingUploads(prev, [pendingId]));
+          });
+        }
       }
-    }
+    });
+
     setIsUploadingKb(false);
     if (uploadedIds.length) {
-      let nextIds: number[] = [];
-      setKbDocumentIds(prev => {
-        nextIds = Array.from(new Set([...prev, ...uploadedIds]));
-        return nextIds;
-      });
-      await persistAgentKbDocumentIds(selectedAgentId, nextIds);
+      const nextIds = Array.from(new Set([...kbDocumentIds, ...uploadedIds]));
+      void persistAgentKbDocumentIds(selectedAgentId, nextIds);
       showNotification(
         'success',
         uploadedIds.length === 1
@@ -839,7 +897,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
           : `Добавлено файлов: ${uploadedIds.length}`,
       );
     }
-    await loadKbDocuments();
+    void loadKbDocuments({ silent: true });
   };
 
   const handleKbDelete = async (docId: number) => {
@@ -1851,7 +1909,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
               <Box sx={{ display: 'flex', justifyContent: 'center', py: 1 }}>
                 <CircularProgress size={16} sx={{ color: panelChrome.fgSubtle }} />
               </Box>
-            ) : fileSearchEnabled && selectedKbDocuments.length > 0 ? (
+            ) : fileSearchEnabled && (selectedKbDocuments.length > 0 || pendingKbUploads.length > 0) ? (
               <Box
                 sx={{
                   mt: 0.5,
@@ -1863,6 +1921,40 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
                   width: '100%',
                 }}
               >
+                {pendingKbUploads.map((pending) => (
+                  <Box
+                    key={pending.clientId}
+                    sx={{
+                      position: 'relative',
+                      borderRadius: 1,
+                      bgcolor: '#2a2d3a',
+                      border: '1px solid rgba(255,255,255,0.08)',
+                      p: 0.5,
+                      minWidth: 0,
+                      display: 'flex',
+                      flexDirection: 'column',
+                      justifyContent: 'center',
+                    }}
+                  >
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, minWidth: 0, pr: 2 }}>
+                      <RagUploadingFileThumb filename={pending.filename} size={32} />
+                      <Box sx={{ minWidth: 0, flex: 1 }}>
+                        <Typography
+                          variant="caption"
+                          noWrap
+                          component="span"
+                          sx={{ color: 'white', fontSize: '0.68rem', display: 'block', fontWeight: 500, lineHeight: 1.3 }}
+                          title={pending.filename}
+                        >
+                          {shortFileName(pending.filename, 16)}
+                        </Typography>
+                        <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.45)', fontSize: '0.62rem', lineHeight: 1.2 }}>
+                          {getFileTypeLabel(pending.filename)}
+                        </Typography>
+                      </Box>
+                    </Box>
+                  </Box>
+                ))}
                 {selectedKbDocuments.map(doc => (
                   <Box
                     key={doc.id}

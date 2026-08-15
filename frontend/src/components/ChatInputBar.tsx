@@ -30,7 +30,10 @@ import { formatFileSize } from '../utils/inlineImage';
 import { getApiUrl, API_ENDPOINTS, getAuthFetchHeaders } from '../config/api';
 import { prepareSegmentForStt } from '../utils/dictationAudio';
 import InlineAttachmentsList from './InlineAttachmentsList';
-import InlineDocAttachmentChip, { InlineDocThumb, INLINE_DOC_ICON_SIZE } from './InlineDocAttachmentChip';
+import InlineDocAttachmentChip, {
+  InlineAttachUploadSpinner,
+  InlineDocUploadingThumb,
+} from './InlineDocAttachmentChip';
 import { INLINE_ATTACH_ACCEPT } from '../utils/inlineAttachmentRules';
 import SkillMentionAutocomplete, { SkillSuggestion } from './chat/SkillMentionAutocomplete';
 import {
@@ -51,6 +54,7 @@ export interface InlineAttachment {
   size?: number;
   minioObject?: string;
   minioBucket?: string;
+  tokenEstimate?: number;
 }
 
 export interface ChatInputBarProps {
@@ -1104,10 +1108,10 @@ export default function ChatInputBar({
                 alignItems: 'center',
                 justifyContent: 'center',
                 borderRadius: 1.5,
-                bgcolor: 'rgba(0, 0, 0, 0.35)',
+                pointerEvents: 'none',
               }}
             >
-              <CircularProgress size={22} sx={{ color: 'rgba(255, 255, 255, 0.92)' }} />
+              <InlineAttachUploadSpinner />
             </Box>
             <IconButton size="small" disabled sx={{ ...inlineImageRemoveSx, opacity: 0.45 }}>
               <CloseIcon sx={{ fontSize: '0.85rem' }} />
@@ -1123,26 +1127,10 @@ export default function ChatInputBar({
                   : 'Анализ...'
               }
               isDarkMode={isDarkMode}
+              uploading
               onRemove={() => undefined}
               removeDisabled
-              leading={(
-                <Box sx={{ position: 'relative', width: INLINE_DOC_ICON_SIZE, height: INLINE_DOC_ICON_SIZE, flexShrink: 0 }}>
-                  <InlineDocThumb filename={uploadingFile?.name || ''} isDarkMode={isDarkMode} />
-                  <Box
-                    sx={{
-                      position: 'absolute',
-                      inset: 0,
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      borderRadius: '8px',
-                      bgcolor: 'rgba(0, 0, 0, 0.28)',
-                    }}
-                  >
-                    <CircularProgress size={18} sx={{ color: 'rgba(255, 255, 255, 0.92)' }} />
-                  </Box>
-                </Box>
-              )}
+              leading={<InlineDocUploadingThumb filename={uploadingFile?.name || ''} isDarkMode={isDarkMode} />}
             />
           </Box>
         )}

@@ -17,7 +17,7 @@ export function getInlineDocKind(filename: string): InlineDocKind {
   return 'other';
 }
 
-function getInlineDocThumbColor(kind: InlineDocKind, isDarkMode: boolean): string {
+export function getInlineDocThumbColor(kind: InlineDocKind, isDarkMode: boolean): string {
   switch (kind) {
     case 'pdf': return '#d94a3a';
     case 'word': return '#2b579a';
@@ -51,12 +51,105 @@ function PdfThumbIcon() {
   return <PdfIcon sx={{ fontSize: '1.65rem' }} />;
 }
 
-export function InlineDocThumb({
+const UPLOAD_SPINNER_SIZE = 20;
+
+/** Серое кольцо + яркая белая дуга (как на макете загрузки вложения). */
+export function InlineAttachUploadSpinner({ size = UPLOAD_SPINNER_SIZE }: { size?: number }) {
+  const stroke = 2.75;
+  const radius = (size - stroke) / 2;
+  const center = size / 2;
+  const circumference = 2 * Math.PI * radius;
+  const arc = circumference * 0.28;
+
+  return (
+    <Box
+      component="span"
+      role="progressbar"
+      aria-label="Загрузка файла"
+      sx={{
+        width: size,
+        height: size,
+        display: 'block',
+        flexShrink: 0,
+        animation: 'inlineAttachSpinnerRotate 0.85s linear infinite',
+        '@keyframes inlineAttachSpinnerRotate': {
+          from: { transform: 'rotate(0deg)' },
+          to: { transform: 'rotate(360deg)' },
+        },
+      }}
+    >
+      <Box
+        component="svg"
+        viewBox={`0 0 ${size} ${size}`}
+        sx={{ width: '100%', height: '100%', display: 'block' }}
+      >
+        <circle
+          cx={center}
+          cy={center}
+          r={radius}
+          fill="none"
+          stroke="rgba(255, 255, 255, 0.42)"
+          strokeWidth={stroke}
+        />
+        <circle
+          cx={center}
+          cy={center}
+          r={radius}
+          fill="none"
+          stroke="#ffffff"
+          strokeWidth={stroke}
+          strokeLinecap="round"
+          strokeDasharray={`${arc} ${circumference - arc}`}
+        />
+      </Box>
+    </Box>
+  );
+}
+
+export function InlineDocUploadingThumb({
   filename,
   isDarkMode = false,
 }: {
   filename: string;
   isDarkMode?: boolean;
+}) {
+  return (
+    <Box
+      sx={{
+        position: 'relative',
+        width: INLINE_DOC_ICON_SIZE,
+        height: INLINE_DOC_ICON_SIZE,
+        flexShrink: 0,
+        opacity: 1,
+        filter: 'none',
+      }}
+    >
+      <InlineDocThumb filename={filename} isDarkMode={isDarkMode} hideSymbol />
+      <Box
+        sx={{
+          position: 'absolute',
+          inset: 0,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          pointerEvents: 'none',
+        }}
+      >
+        <InlineAttachUploadSpinner />
+      </Box>
+    </Box>
+  );
+}
+
+export function InlineDocThumb({
+  filename,
+  isDarkMode = false,
+  hideSymbol = false,
+}: {
+  filename: string;
+  isDarkMode?: boolean;
+  /** Только цветной фон без PDF/Word/Excel-символики (состояние загрузки). */
+  hideSymbol?: boolean;
 }) {
   const kind = getInlineDocKind(filename);
   const color = getInlineDocThumbColor(kind, isDarkMode);
@@ -72,6 +165,10 @@ export function InlineDocThumb({
     color: 'white',
     flexShrink: 0,
   };
+
+  if (hideSymbol) {
+    return <Box sx={boxSx} aria-hidden />;
+  }
 
   if (kind === 'pdf') {
     return (
@@ -159,6 +256,7 @@ interface InlineDocAttachmentChipProps {
   isMessage?: boolean;
   onRemove?: () => void;
   removeDisabled?: boolean;
+  uploading?: boolean;
   leading?: React.ReactNode;
 }
 
@@ -170,6 +268,7 @@ export default function InlineDocAttachmentChip({
   isMessage = false,
   onRemove,
   removeDisabled = false,
+  uploading = false,
   leading,
 }: InlineDocAttachmentChipProps) {
   const displayName = formatInlineAttachmentFileName(name);
@@ -196,7 +295,13 @@ export default function InlineDocAttachmentChip({
   };
 
   return (
-    <Box className="file-attachment" sx={getInlineDocChipSx(isDarkMode, isMessage)}>
+    <Box
+      className={uploading ? undefined : 'file-attachment'}
+      sx={{
+        ...getInlineDocChipSx(isDarkMode, isMessage),
+        ...(uploading ? { opacity: 1, filter: 'none' } : {}),
+      }}
+    >
       {leading ?? <InlineDocThumb filename={name} isDarkMode={isDarkMode} />}
       <Box sx={{ minWidth: 0, flex: 1 }}>
         <Typography variant="caption" sx={nameSx} title={name}>

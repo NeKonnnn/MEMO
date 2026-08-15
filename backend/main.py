@@ -56,7 +56,7 @@ import backend.app_state as state
 from backend.app_state import (
     settings, load_app_settings, save_app_settings,
     init_databases, close_databases, database_available,
-    initialize_agent_orchestrator, clear_dialog_history,
+    clear_dialog_history,
     memory_clear_on_restart, minio_client,
 )
 # -- FastAPI
@@ -169,12 +169,6 @@ async def startup_event():
                 logger.warning("Часть БД не инициализирована - файловый режим")
         except Exception:
             logger.exception("Ошибка init_databases")
-    if initialize_agent_orchestrator:
-        try:
-            if await initialize_agent_orchestrator():
-                logger.info("Агентная архитектура инициализирована")
-        except Exception as e:
-            logger.error(f"Ошибка инициализации оркестратора: {e}")
     if getattr(settings, "mcp", None) and settings.mcp.enabled:
         try:
             from backend.mcp.platform import get_mcp_platform

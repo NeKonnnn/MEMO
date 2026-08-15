@@ -186,12 +186,66 @@ def _strip_think_tags(text: str) -> str:
     рассуждения модели не попадали в финальный ответ пользователю.
     """
     if not text or "<think>" not in text.lower():
+        # Qwen3.5: открывающий <think> может быть только в промпте шаблона.
+        if text and "</think>" in text.lower():
+            parts = re.split(r"</think>", text, maxsplit=1, flags=re.IGNORECASE)
+            return (parts[1] if len(parts) > 1 else "").strip()
         return text
     # Закрытые блоки
     text = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE)
     # Незакрытый блок (модель не успела закрыть тег)
     text = re.sub(r"<think>[\s\S]*$", "", text, flags=re.IGNORECASE)
     return text.strip()
+
+
+class _PromptOpenedThinkSplitter:
+    """Разделяет content-токены, когда шаблон (Qwen3.5) уже открыл <think> в промпте.
+
+    Пока не встретили </think>, всё уходит в reasoning; после — в content.
+    """
+
+    _CLOSE_RE = re.compile(r"</think>", re.IGNORECASE)
+
+    def __init__(self, active: bool):
+        self.active = bool(active)
+        self.reasoning = ""
+        self.content = ""
+
+    def feed(self, chunk: str) -> list:
+        """Возвращает список (role, text), role = 'reasoning' | 'content'."""
+        if not chunk:
+            return []
+        if not self.active:
+            self.content += chunk
+            return [("content", chunk)]
+
+        combined = self.reasoning + chunk
+        match = self._CLOSE_RE.search(combined)
+        if not match:
+            self.reasoning = combined
+            return [("reasoning", chunk)]
+
+        before = combined[: match.start()]
+        after = combined[match.end() :]
+        new_think = before[len(self.reasoning) :]
+        self.reasoning = before
+        self.active = False
+        events = []
+        if new_think:
+            events.append(("reasoning", new_think))
+        if after:
+            self.content += after
+            events.append(("content", after))
+        return events
+
+    def finalize_combined(self) -> str:
+        if self.reasoning.strip() and (self.content.strip() or not self.active):
+            # Было мышление (закрытое или нет) — упаковываем для UI/истории.
+            answer = self.content.strip()
+            return f"<think>{self.reasoning.strip()}</think>\n\n{answer}".rstrip() + ("\n" if answer else "")
+        if self.reasoning.strip():
+            return f"<think>{self.reasoning.strip()}</think>\n\n"
+        return self.content or ""
 
 
 def _normalize_reasoning_payload(value: Any) -> str:
@@ -1333,6 +1387,9 @@ class LLMService:
             thinking_requested = is_thinking_requested(request_extra) or bool(
                 payload.get("enable_thinking")
             )
+            # Qwen3.5: шаблон при enable_thinking=true открывает <think> в промпте —
+            # токены content до </think> это рассуждение, не ответ.
+            prompt_think = _PromptOpenedThinkSplitter(active=thinking_requested)
             logger.info(
                 "[_stream_generation] POST /v1/chat/completions host=%r model=%r enable_thinking=%r",
                 host_id,
@@ -1391,6 +1448,8 @@ class LLMService:
                                         reasoning_source = delta.get("thought")
                                     reasoning_chunk = _normalize_reasoning_payload(reasoning_source)
                                     if thinking_requested and reasoning_chunk:
+                                        # Отдельный reasoning-канал — prompt-think splitter больше не нужен.
+                                        prompt_think.active = False
                                         reasoning_accumulated += reasoning_chunk
                                         if _invoke_stream_callback_safe(
                                             stream_callback, reasoning_chunk, reasoning_accumulated, "reasoning"
@@ -1405,20 +1464,37 @@ class LLMService:
                                     )
                                     if not chunk:
                                         continue
-                                    accumulated_text += chunk
-                                    if "<|im_start|>" in accumulated_text or "<|im_end|>" in accumulated_text:
+                                    if "<|im_start|>" in chunk or "<|im_end|>" in chunk:
                                         logger.info("[_stream_generation] Обнаружен im_start/im_end тег, обрезаем")
                                         break
-                                    if _invoke_stream_callback_safe(stream_callback, chunk, accumulated_text, "content") is False:
-                                        logger.info("[_stream_generation] Прервано колбэком")
-                                        return _clean_llm_response(accumulated_text) if accumulated_text else ""
+                                    for role, piece in prompt_think.feed(chunk):
+                                        if role == "reasoning":
+                                            reasoning_accumulated += piece
+                                            if _invoke_stream_callback_safe(
+                                                stream_callback, piece, reasoning_accumulated, "reasoning"
+                                            ) is False:
+                                                logger.info("[_stream_generation] Прервано колбэком (reasoning/content)")
+                                                return prompt_think.finalize_combined()
+                                        else:
+                                            accumulated_text += piece
+                                            if _invoke_stream_callback_safe(
+                                                stream_callback, piece, accumulated_text, "content"
+                                            ) is False:
+                                                logger.info("[_stream_generation] Прервано колбэком")
+                                                return prompt_think.finalize_combined()
                             except json.JSONDecodeError:
                                 continue
-            cleaned = _clean_llm_response(accumulated_text)
             if thinking_requested:
+                combined = prompt_think.finalize_combined()
+                if combined.strip():
+                    return combined
+                cleaned = _clean_llm_response(accumulated_text)
+                if reasoning_accumulated.strip() and "<think>" not in cleaned:
+                    return f"<think>{reasoning_accumulated.strip()}</think>\n\n{cleaned}"
                 return cleaned
+            cleaned = _clean_llm_response(accumulated_text)
             # Быстрый режим: если модель встроила <think> в content — убираем.
-            if "<think>" in cleaned.lower():
+            if "<think>" in cleaned.lower() or "</think>" in cleaned.lower():
                 return _strip_think_tags(cleaned)
             if reasoning_accumulated.strip() and "<think>" not in cleaned:
                 return f"<think>{reasoning_accumulated.strip()}</think>\n\n{cleaned}"

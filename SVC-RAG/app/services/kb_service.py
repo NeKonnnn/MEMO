@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import json
 
 from app.services.hierarchical_indexing import index_document_hierarchically
+from app.clients.openai_models_compat_client import set_embed_log_context
 from app.clients.rag_models_client import RagModelsClient
 from app.core.config import get_settings
 from app.core.logging import get_logger
@@ -211,7 +212,16 @@ class KbService:
                 "error": "Ошибка сохранения документа в БД",
                 "document_id": None,
             }
-
+        # Пометка для логов гардрейла: клиент видит только список строк, имя
+        # файла и id документа до него не доезжают. Ставим до ветвления, чтобы
+        # покрыть и иерархическую индексацию, и обычную.
+        set_embed_log_context(
+            store="kb",
+            operation="upload",
+            document_id=doc_id,
+            filename=filename,
+            owner_user_id=owner_user_id,
+        )
         if (chunking_strategy or "").strip().lower() == "hierarchical":
             try:
                 with timer.stage("hierarchical_embed_insert"):
@@ -374,6 +384,15 @@ class KbService:
         # Удаление обходит ВСЕ таблицы (B2b) — при смене модели старые вектора
         # лежат в таблице прежней размерности и должны уйти.
         await repo.delete_vectors_by_document(document_id)
+        # Пометка для логов гардрейла: клиент видит только список строк, имя
+        # файла и id документа до него не доезжают. Ставим до ветвления, чтобы
+        # покрыть и иерархическую индексацию, и обычную.
+        set_embed_log_context(
+            store="kb",
+            operation="reindex",
+            document_id=document_id,
+            filename=getattr(doc, "filename", None),
+        )
         strategy = (chunking_strategy or "universal").strip().lower()
         if strategy == "hierarchical":
             from app.services.hierarchical_indexing import index_document_hierarchically

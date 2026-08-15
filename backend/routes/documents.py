@@ -47,22 +47,40 @@ def _documents_bucket_name() -> str:
 
 
 router = APIRouter(prefix="/api/documents", tags=["documents"])
-INLINE_ATTACHMENT_MAX_BYTES = 50 * 1024 * 1024
-_INLINE_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
-_INLINE_DOC_EXTS = {".pdf", ".docx", ".xlsx", ".xls", ".txt"}
+INLINE_ATTACHMENT_MAX_BYTES = 20 * 1024 * 1024
+_INLINE_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
+_INLINE_DOC_EXTS = {
+    ".pdf",
+    ".docx",
+    ".docm",
+    ".doc",
+    ".xlsx",
+    ".xls",
+    ".xlsm",
+    ".txt",
+    ".md",
+    ".log",
+    ".rtf",
+}
 _INLINE_ATTACH_SUPPORTED_EXTENSIONS = sorted(_INLINE_IMAGE_EXTS | _INLINE_DOC_EXTS)
 _CONTENT_TYPE_BY_EXT = {
     ".pdf": "application/pdf",
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".docm": "application/vnd.ms-word.document.macroEnabled.12",
     ".doc": "application/msword",
     ".txt": "text/plain",
+    ".md": "text/markdown",
+    ".log": "text/plain",
+    ".rtf": "application/rtf",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".xlsm": "application/vnd.ms-excel.sheet.macroEnabled.12",
     ".xls": "application/vnd.ms-excel",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
     ".png": "image/png",
     ".webp": "image/webp",
     ".gif": "image/gif",
+    ".bmp": "image/bmp",
 }
 
 

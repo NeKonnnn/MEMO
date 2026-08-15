@@ -334,7 +334,7 @@ def split_into_chunks_with_meta(
     cfg = get_settings().rag
     chunk_size, chunk_overlap = resolve_chunk_params(chunk_size, chunk_overlap)
     strategy = normalize_chunking_strategy(chunking_strategy)
-    logger.debug(
+    logger.info(
         "[chunker] strategy=%s chunk_size=%s chunk_overlap=%s, длина текста: %s",
         strategy,
         chunk_size,
@@ -360,7 +360,7 @@ def split_into_chunks_with_meta(
 
     min_useful = max(20, int(getattr(cfg, "min_chunk_length", 40)) // 2)
     out = [(t, m) for t, m in out if len(t) >= min_useful]
-    logger.debug("[chunker] strategy=%s → чанков=%s (min_useful=%s)", strategy, len(out), min_useful)
+    logger.info("[chunker] strategy=%s → чанков=%s (min_useful=%s)", strategy, len(out), min_useful)
     return out
 
 

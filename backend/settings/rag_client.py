@@ -400,9 +400,15 @@ class RagClient:
         rerank_top_n = max(0, min(rerank_top_n, 64))
         body["use_reranking"] = effective_reranking
         logger.debug(
-            "[RAG-SEARCH] mode=%s strategy=%s k=%s reranking=%s rerank_top_n=%s"
-            "fix_typos=%s multi_query=%s hyde=%s document_id=%s project_id=%s",
+            "[RAG-SEARCH] mode=%s источник=%s emb=%s/%s rr=%s/%s strategy=%s k=%s "
+            "reranking=%s rerank_top_n=%s fix_typos=%s multi_query=%s hyde=%s "
+            "document_id=%s project_id=%s",
             path,
+            src,
+            emb_fields.get("embedding_provider") or "cluster",
+            emb_fields.get("embedding_model") or "default",
+            rr_fields.get("reranker_provider") or "cluster",
+            rr_fields.get("reranker_model") or "default",
             strategy,
             k,
             effective_reranking,

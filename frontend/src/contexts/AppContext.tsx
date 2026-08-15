@@ -27,6 +27,10 @@ export interface MultiLLMResponseSlot {
   currentResponseIndex?: number;
   /** Лайк/дизлайк для конкретного слота multi-LLM */
   feedback?: MessageFeedback | null;
+  /** Когда слот начал генерироваться (ms). */
+  generationStartedAtMs?: number;
+  /** Сколько секунд слот генерировался до готовности. */
+  generationDurationSec?: number;
 }
 
 // Типы данных
@@ -66,6 +70,7 @@ export interface Message {
     /** base64 data URL для изображений; пустая строка для текстовых (контент уже в промпте) */
     preview?: string;
     size?: number;
+    tokenEstimate?: number;
   }>;
   /** Варианты inline-вложений при перегенерации изображений */
   inlineAttachmentVariants?: Array<NonNullable<Message['inlineAttachments']>>;
@@ -94,6 +99,10 @@ export interface Message {
   /** Динамические follow-up подсказки (генерируются фоновым LLM-запросом) */
   followUpSuggestions?: ChatInputSuggestion[];
   followUpSuggestionsLoading?: boolean;
+  /** Когда началась генерация ответа ассистента (Date.now()). */
+  generationStartedAtMs?: number;
+  /** Длительность генерации в секундах (фиксируется по завершении). */
+  generationDurationSec?: number;
 }
 
 export interface Chat {
@@ -222,7 +231,7 @@ type AppAction =
   | { type: 'DELETE_ALL_CHATS' }
   | { type: 'ADD_MESSAGE'; payload: { chatId: string; message: Message } }
   | { type: 'UPDATE_MESSAGE'; payload: { chatId: string; messageId: string; content?: string; isStreaming?: boolean; multiLLMResponses?: Array<{ model: string; content: string; isStreaming?: boolean; error?: boolean; feedback?: MessageFeedback | null }>; alternativeResponses?: string[]; currentResponseIndex?: number; documentSearch?: Message['documentSearch']; reasoningContent?: string; mcpToolCalls?: Message['mcpToolCalls']; inlineAttachments?: Message['inlineAttachments']; isImageGenerating?: boolean; inlineAttachmentVariants?: Message['inlineAttachmentVariants']; feedback?: MessageFeedback | null } }
-  | { type: 'PATCH_MESSAGE_FIELDS'; payload: { chatId: string; messageId: string; fields: Partial<Pick<Message, 'followUpSuggestions' | 'followUpSuggestionsLoading'>> } }
+  | { type: 'PATCH_MESSAGE_FIELDS'; payload: { chatId: string; messageId: string; fields: Partial<Pick<Message, 'followUpSuggestions' | 'followUpSuggestionsLoading' | 'generationStartedAtMs' | 'generationDurationSec'>> } }
   | { type: 'APPEND_CHUNK'; payload: { chatId: string; messageId: string; chunk: string; isStreaming?: boolean } }
   | { type: 'SET_LOADING'; payload: boolean }
   | { type: 'SET_CHAT_LOADING'; payload: { chatId: string; loading: boolean } }
@@ -431,6 +440,16 @@ function appReducer(state: AppState, action: AppAction): AppState {
       const currentChat = state.chats.find(chat => chat.id === chatId);
       const updatedMessage = currentChat?.messages.find(msg => msg.id === messageId);
       const nextContent = content !== undefined ? content : (updatedMessage?.content || '');
+      const finishing =
+        isStreaming === false &&
+        Boolean(updatedMessage?.generationStartedAtMs) &&
+        (updatedMessage?.isStreaming || !updatedMessage?.generationDurationSec);
+      const generationDurationSec = finishing
+        ? Math.max(
+            1,
+            Math.round((Date.now() - (updatedMessage!.generationStartedAtMs as number)) / 1000),
+          )
+        : undefined;
       
       const newState = {
         ...state,
@@ -454,6 +473,7 @@ function appReducer(state: AppState, action: AppAction): AppState {
                         ...(isImageGenerating !== undefined ? { isImageGenerating } : {}),
                         ...(inlineAttachmentVariants !== undefined ? { inlineAttachmentVariants } : {}),
                         ...(feedback !== undefined ? { feedback } : {}),
+                        ...(generationDurationSec !== undefined ? { generationDurationSec } : {}),
                       }
                     : msg
                 ),
@@ -1186,7 +1206,15 @@ export function useAppActions() {
     patchMessageFields: (
       chatId: string,
       messageId: string,
-      fields: Partial<Pick<Message, 'followUpSuggestions' | 'followUpSuggestionsLoading'>>,
+      fields: Partial<
+        Pick<
+          Message,
+          | 'followUpSuggestions'
+          | 'followUpSuggestionsLoading'
+          | 'generationStartedAtMs'
+          | 'generationDurationSec'
+        >
+      >,
     ) => {
       dispatch({ type: 'PATCH_MESSAGE_FIELDS', payload: { chatId, messageId, fields } });
     },

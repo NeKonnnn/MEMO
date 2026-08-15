@@ -82,6 +82,7 @@ export function useChatContextUsage({
 }: UseChatContextUsageOptions): ChatContextUsageResult {
   const [selectedModelPath, setSelectedModelPath] = useState(readStoredModelPath);
   const [settingsContextSize, setSettingsContextSize] = useState<number | null>(null);
+  const [entityContextSize, setEntityContextSize] = useState<number | null>(null);
   const [overheadSegments, setOverheadSegments] = useState<ContextUsageSegment[]>([]);
   const [overheadLoading, setOverheadLoading] = useState(false);
   const [agentId, setAgentId] = useState<number | null>(() => readStoredAgentId());
@@ -92,7 +93,7 @@ export function useChatContextUsage({
 
   const loadModelSettings = useCallback(async () => {
     try {
-      const response = await fetch(getApiUrl('/api/models/settings'));
+      const response = await fetch(getApiUrl('/api/models/settings'), { headers: authHeaders() });
       if (!response.ok) return;
       const data = await response.json();
       const ctx = data?.context_size;
@@ -145,6 +146,7 @@ export function useChatContextUsage({
   }, [chatId]);
 
   const effectiveConfiguredSize =
+    entityContextSize ??
     settingsContextSize ??
     (typeof configuredContextSize === 'number' && configuredContextSize > 0
       ? configuredContextSize
@@ -211,8 +213,11 @@ export function useChatContextUsage({
         const segs = Array.isArray(data.segments) ? data.segments : [];
         overheadLoadedKeyRef.current = overheadRequestKey;
         setOverheadSegments(segs);
+        const entityCtx = data.entity_context_size;
+        setEntityContextSize(typeof entityCtx === 'number' && entityCtx > 0 ? entityCtx : null);
       } catch {
         setOverheadSegments([]);
+        setEntityContextSize(null);
       } finally {
         setOverheadLoading(false);
       }
@@ -222,6 +227,7 @@ export function useChatContextUsage({
   useEffect(() => {
     overheadLoadedKeyRef.current = '';
     setOverheadSegments([]);
+    setEntityContextSize(null);
   }, [overheadRequestKey]);
 
   const featureFlags = useMemo(

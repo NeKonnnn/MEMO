@@ -27,7 +27,7 @@ _SERVICES: Dict[str, Tuple[str, str]] = {
     "diarization": ("DIARIZATION_SERVICE_ENABLED", "Diarization (диаризация)"),
     "rag": ("RAG_SERVICE_ENABLED", "RAG (поиск по документам)"),
     "rag_models": ("RAG_MODELS_SERVICE_ENABLED", "RAG-models (эмбеддинги)"),
-    "agents": ("AGENTS_SERVICE_ENABLED", "Агенты (оркестратор)"),
+    "agents": ("AGENTS_SERVICE_ENABLED", "Пользовательские агенты (/api/agents)"),
     "minio": ("MINIO_SERVICE_ENABLED", "MinIO (хранилище файлов)"),
     "postgresql": ("POSTGRESQL_SERVICE_ENABLED", "PostgreSQL + pgvector"),
     "mcp": ("MCP_ENABLED", "MCP (инструменты)"),

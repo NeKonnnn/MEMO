@@ -19,18 +19,54 @@ LOG_FORMAT = (
 )
 LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
 _UVICORN_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access")
+
+# Библиотеки, у которых DEBUG означает «строка на каждый токен разбора».
+# Вернуть подробность: RAG_LOG_NOISY_LEVEL=DEBUG.
+_NOISY_LOGGERS = (
+    "pdfminer",
+    "pdfplumber",
+    "PIL",
+    "httpcore",
+    "httpx",
+    "urllib3",
+    "asyncio",
+    "multipart",
+)
+
 _configured = False
 
+def _settings_logging():
+    """Секция 'logging' из config.yml. Ошибка чтения - None."""
+    try:
+        from app.core.config import get_settings
+
+        return getattr(get_settings(), "logging", None)
+    except Exception:
+        return None
+
+def _level_from(env_names: tuple, yml_field: str, default: str) -> str:
+    """ENV -> config.yml -> дефолт. Первый непустой источник побеждает."""
+    for name in env_names:
+        value = (os.getenv(name) or "").strip()
+        if value:
+            return value.upper()
+    value = str(getattr(_settings_logging(), yml_field, "") or "").strip()
+    return (value or default).upper()
 
 def _level_name() -> str:
-    return (
-        os.getenv("APP_LOG_LEVEL") or os.getenv("SVC_RAG_LOG_LEVEL") or os.getenv("RAG_LOG_LEVEL") or "INFO"
-    ).upper()
+    """Уровень наших логгеров: APP_LOG_LEVEL / SVC_RAG_LOG_LEVEL / RAG_LOG_LEVEL,
+    затем 'logging.level' из config.yml, затем INFO."""
+    return _level_from(
+        ("APP_LOG_LEVEL", "SVC_RAG_LOG_LEVEL", "RAG_LOG_LEVEL"), "level", "INFO"
+    )
 
+def _noisy_level_name() -> str:
+    """Уровень чужих болтливых логгеров: RAG_LOG_NOISY_LEVEL, затем
+    'logging.noisy_level' из config.yml, затем WARNING."""
+    return _level_from(("RAG_LOG_NOISY_LEVEL",), "noisy_level", "WARNING")
 
 def _resolve_level() -> int:
     return LEVEL_BY_NAME.get(_level_name(), DEFAULT_LEVEL)
-
 
 def get_uvicorn_log_config() -> dict:
     """
@@ -41,6 +77,7 @@ def get_uvicorn_log_config() -> dict:
     "app" (наши логгеры) и root (httpx и всё прочее, что пропагейтит в корень)
     """
     level_name = _level_name()
+    noisy_level = _noisy_level_name()
     return {
         "version": 1,
         "disable_existing_loggers": False,
@@ -78,10 +115,13 @@ def get_uvicorn_log_config() -> dict:
                 "level": level_name,
                 "propagate": False,
             },
+            **{
+                name: {"level": noisy_level, "propagate": True}
+                for name in _NOISY_LOGGERS
+            },
         },
         "root": {"handlers": ["svc_rag_stdout"], "level": level_name},
     }
-
 
 def _ensure_stdout_utf8() -> None:
     """stdout → UTF-8, чтобы кириллица и символы [LLM→]/[LLM✗] не падали с UnicodeEncodeError"""
@@ -91,7 +131,6 @@ def _ensure_stdout_utf8() -> None:
                 stream.reconfigure(encoding="utf-8")
             except Exception:
                 pass
-
 
 def configure_logging(*, force: bool = False) -> None:
     """
@@ -104,7 +143,6 @@ def configure_logging(*, force: bool = False) -> None:
     _ensure_stdout_utf8()
     logging.config.dictConfig(get_uvicorn_log_config())
     _configured = True
-
 
 def get_logger(name: Optional[str] = None) -> logging.Logger:
     """

@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { useRightRailOffsetPx } from '../hooks/useRightSidebarInsetCssVar';
 import {
   Box,
   Fab,
@@ -19,7 +20,7 @@ import ReactMarkdown from 'react-markdown';
 import {
   findSupportArticle,
   formatArticleReply,
-} from '../../support/knowledgeArticles';
+} from './knowledgeArticles';
 
 /** Картинка помощника: положите файл сюда → public/static/support/assistant.png */
 const ASSISTANT_IMAGE_SRC = '/static/support/assistant.png';
@@ -38,7 +39,10 @@ const WELCOME =
  * свёрнут в FAB справа внизу → раскрывается панель с аватаром, вопросом и ответом.
  * Ответы пока из локальной базы статей; позже — LLM + RAG.
  */
+const HELP_FAB_GAP_PX = 16;
+
 export default function SupportAssistantWidget() {
+  const rightRailPx = useRightRailOffsetPx();
   const [open, setOpen] = useState(false);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
@@ -87,7 +91,7 @@ export default function SupportAssistantWidget() {
     <Box
       sx={{
         position: 'fixed',
-        right: 20,
+        right: rightRailPx + HELP_FAB_GAP_PX,
         bottom: 20,
         zIndex: 1400,
         display: 'flex',
@@ -153,7 +157,7 @@ export default function SupportAssistantWidget() {
             </Box>
             <Box sx={{ flex: 1, minWidth: 0, pt: 0.5 }}>
               <Typography variant="subtitle1" fontWeight={600} lineHeight={1.25}>
-                Привет, я - Астра! Чем могу помочь?
+                оператор: Астра
               </Typography>
               <Typography variant="caption" color="text.secondary">
                 Подскажу шаги по интерфейсу
