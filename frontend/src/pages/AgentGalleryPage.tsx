@@ -3,34 +3,25 @@ import {
   Alert,
   Box,
   Button,
-  Card,
-  CardActions,
-  CardContent,
   CircularProgress,
   Container,
-  InputAdornment,
   Pagination,
-  Rating,
-  TextField,
-  Tooltip,
   Typography,
 } from '@mui/material';
-import {
-  ContentCopy as CopyIcon,
-  Person as PersonIcon,
-  Search as SearchIcon,
-  SmartToy as AgentIcon,
-  TrendingUp as TrendingUpIcon,
-  Visibility as ViewIcon,
-} from '@mui/icons-material';
+import { SmartToy as AgentIcon } from '@mui/icons-material';
 import { useTheme } from '@mui/material/styles';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, Navigate } from 'react-router-dom';
 import { getApiUrl } from '../config/api';
 import { useAuth } from '../contexts/AuthContext';
 import { useAppActions } from '../contexts/AppContext';
 import { loadAgentModelOnly } from '../utils/applyAgentServer';
 import { persistAgentMcpConfig } from '../utils/applyAgentMcp';
 import { openAgentInConstructor } from '../utils/openAgentConstructorNav';
+import {
+  GalleryEntityCard,
+  GallerySearchBookmarksBar,
+  type GalleryCardItem,
+} from '../components/galleryCards';
 
 interface GalleryAgent {
   id: number;
@@ -54,7 +45,31 @@ const STORAGE_AGENT_ID = 'active_agent_id';
 const STORAGE_AGENT_NAME = 'active_agent_name';
 const STORAGE_AGENT_PROMPT = 'active_agent_prompt';
 
+function toCardItem(agent: GalleryAgent): GalleryCardItem {
+  const preview =
+    agent.description?.trim() ||
+    (agent.system_prompt.length > 160
+      ? `${agent.system_prompt.slice(0, 160)}…`
+      : agent.system_prompt);
+  return {
+    id: agent.id,
+    title: agent.name,
+    authorName: agent.author_name,
+    preview,
+    viewsCount: agent.views_count,
+    usageCount: agent.usage_count,
+    averageRating: agent.average_rating,
+    totalVotes: agent.total_votes,
+    userRating: agent.user_rating,
+    isBookmarked: agent.is_bookmarked,
+  };
+}
+
 export default function AgentGalleryPage() {
+  return <Navigate to="/gallery?tab=agents" replace />;
+}
+
+export function AgentGalleryContent({ embedded = false }: { embedded?: boolean }) {
   const { token } = useAuth();
   const { showNotification } = useAppActions();
   const theme = useTheme();
@@ -68,6 +83,7 @@ export default function AgentGalleryPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [usingId, setUsingId] = useState<number | null>(null);
+  const [showBookmarks, setShowBookmarks] = useState(false);
   const loadingRef = useRef(false);
 
   useEffect(() => {
@@ -77,25 +93,37 @@ export default function AgentGalleryPage() {
 
   useEffect(() => {
     setPage(1);
-  }, [debouncedSearch]);
+  }, [debouncedSearch, showBookmarks]);
 
   const loadAgents = useCallback(async () => {
     if (loadingRef.current) return;
     loadingRef.current = true;
     setLoading(true);
     try {
-      const params = new URLSearchParams({
-        page: String(page),
-        limit: '20',
-        sort_by: 'rating',
-        sort_order: 'desc',
-      });
-      if (debouncedSearch) params.set('search', debouncedSearch);
-
       const headers: HeadersInit = {};
       if (token) headers.Authorization = `Bearer ${token}`;
 
-      const resp = await fetch(`${getApiUrl('/api/agents/')}?${params}`, { headers });
+      let url: string;
+      if (showBookmarks) {
+        if (!token) {
+          setAgents([]);
+          setTotalPages(0);
+          return;
+        }
+        const params = new URLSearchParams({ page: String(page), limit: '20' });
+        url = `${getApiUrl('/api/agents/my/bookmarks')}?${params}`;
+      } else {
+        const params = new URLSearchParams({
+          page: String(page),
+          limit: '20',
+          sort_by: 'rating',
+          sort_order: 'desc',
+        });
+        if (debouncedSearch) params.set('search', debouncedSearch);
+        url = `${getApiUrl('/api/agents/')}?${params}`;
+      }
+
+      const resp = await fetch(url, { headers });
       if (!resp.ok) {
         setAgents([]);
         setTotalPages(0);
@@ -111,11 +139,44 @@ export default function AgentGalleryPage() {
       setLoading(false);
       loadingRef.current = false;
     }
-  }, [page, debouncedSearch, token]);
+  }, [page, debouncedSearch, token, showBookmarks]);
 
   useEffect(() => {
     void loadAgents();
   }, [loadAgents]);
+
+  const handleToggleBookmark = async (agent: GalleryAgent) => {
+    if (!token) {
+      showNotification('error', 'Для закладок нужно войти в систему');
+      return;
+    }
+    try {
+      const method = agent.is_bookmarked ? 'DELETE' : 'POST';
+      const resp = await fetch(getApiUrl(`/api/agents/${agent.id}/bookmark`), {
+        method,
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.detail || 'Не удалось изменить закладку');
+      }
+      showNotification(
+        'success',
+        agent.is_bookmarked ? 'Удалено из закладок' : 'Добавлено в закладки',
+      );
+      if (showBookmarks && agent.is_bookmarked) {
+        setAgents((prev) => prev.filter((a) => a.id !== agent.id));
+      } else {
+        setAgents((prev) =>
+          prev.map((a) =>
+            a.id === agent.id ? { ...a, is_bookmarked: !a.is_bookmarked } : a,
+          ),
+        );
+      }
+    } catch (e: unknown) {
+      showNotification('error', e instanceof Error ? e.message : 'Ошибка закладки');
+    }
+  };
 
   const handleRate = async (agentId: number, rating: number) => {
     if (!token) {
@@ -156,6 +217,9 @@ export default function AgentGalleryPage() {
           method: 'POST',
           headers,
         });
+        setAgents((prev) =>
+          prev.map((a) => (a.id === agent.id ? { ...a, is_bookmarked: true } : a)),
+        );
       }
 
       await fetch(getApiUrl(`/api/agents/${agent.id}/use`), {
@@ -193,7 +257,10 @@ export default function AgentGalleryPage() {
           `Агент «${full.name}» добавлен в «Агенты из галереи», но настройки не применились: ${applied.message}`,
         );
       } else {
-        showNotification('success', `Агент «${full.name}» добавлен. Промпт и настройки применятся в чате. Переходим…`);
+        showNotification(
+          'success',
+          `Агент «${full.name}» добавлен. Промпт и настройки применятся в чате. Переходим…`,
+        );
       }
 
       setTimeout(() => navigate('/'), 800);
@@ -206,52 +273,53 @@ export default function AgentGalleryPage() {
 
   return (
     <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-      <Box sx={{ py: 2 }}>
-        <Container maxWidth="xl">
-          <Box sx={{ textAlign: 'center' }}>
-            <Box
-              sx={{
-                display: 'flex',
-                flexDirection: 'row',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: 1.5,
-                mb: 0.5,
-                flexWrap: 'wrap',
-              }}
-            >
-              <AgentIcon color="primary" />
-              <Typography variant="h4" fontWeight="bold">
-                Галерея агентов
+      {!embedded && (
+        <Box sx={{ py: 2 }}>
+          <Container maxWidth="xl">
+            <Box sx={{ textAlign: 'center' }}>
+              <Box
+                sx={{
+                  display: 'flex',
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 1.5,
+                  mb: 0.5,
+                  flexWrap: 'wrap',
+                }}
+              >
+                <AgentIcon color="primary" />
+                <Typography variant="h4" fontWeight="bold">
+                  Галерея агентов
+                </Typography>
+                <Button size="small" onClick={() => navigate('/')}>
+                  К чату
+                </Button>
+              </Box>
+              <Typography variant="body2" color="text.secondary">
+                Нажмите на карточку, чтобы открыть агента в конструкторе · «Использовать» — добавить в чат
               </Typography>
-              <Button size="small" onClick={() => navigate('/')}>
-                К чату
-              </Button>
-              <Button size="small" onClick={() => navigate('/prompts')}>
-                Галерея промптов
-              </Button>
             </Box>
-            <Typography variant="body2" color="text.secondary">
-              Нажмите на карточку, чтобы открыть агента в конструкторе · «Использовать» — добавить в чат
-            </Typography>
-          </Box>
-        </Container>
-      </Box>
+          </Container>
+        </Box>
+      )}
+      {embedded && (
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5, textAlign: 'center' }}>
+          Нажмите на карточку, чтобы открыть агента в конструкторе · «Использовать» — добавить в чат
+        </Typography>
+      )}
 
-      <Box sx={{ py: 2 }}>
+      <Box sx={{ py: embedded ? 0 : 2, pb: embedded ? 1.5 : undefined }}>
         <Container maxWidth="xl">
-          <TextField
-            fullWidth
-            placeholder="Поиск агентов…"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            InputProps={{
-              startAdornment: (
-                <InputAdornment position="start">
-                  <SearchIcon />
-                </InputAdornment>
-              ),
-            }}
+          <GallerySearchBookmarksBar
+            searchQuery={searchQuery}
+            onSearchChange={setSearchQuery}
+            searchPlaceholder="Поиск агентов…"
+            showBookmarks={showBookmarks}
+            onToggleBookmarks={() => setShowBookmarks((v) => !v)}
+            bookmarksEnabled={Boolean(token)}
+            allLabel="Все агенты"
+            bookmarksLabel="Закладки"
           />
         </Container>
       </Box>
@@ -263,7 +331,9 @@ export default function AgentGalleryPage() {
           </Box>
         ) : agents.length === 0 ? (
           <Alert severity="info">
-            Публичных агентов пока нет. Опубликуйте агента из конструктора кнопкой «Опубликовать в галерее».
+            {showBookmarks
+              ? 'В закладках пока нет агентов. Добавьте агента кнопкой-закладкой на карточке.'
+              : 'Публичных агентов пока нет. Опубликуйте агента из конструктора кнопкой «Опубликовать в галерее».'}
           </Alert>
         ) : (
           <Box
@@ -274,14 +344,15 @@ export default function AgentGalleryPage() {
             }}
           >
             {agents.map((agent) => (
-              <AgentCard
+              <GalleryEntityCard
                 key={agent.id}
-                agent={agent}
+                item={toCardItem(agent)}
                 isDarkMode={isDarkMode}
                 using={usingId === agent.id}
                 onOpen={() => openAgentInConstructor(agent.id, navigate)}
                 onRate={(rating) => void handleRate(agent.id, rating)}
                 onUse={() => void handleUse(agent)}
+                onToggleBookmark={() => void handleToggleBookmark(agent)}
               />
             ))}
           </Box>
@@ -299,119 +370,5 @@ export default function AgentGalleryPage() {
         )}
       </Container>
     </Box>
-  );
-}
-
-function AgentCard({
-  agent,
-  isDarkMode,
-  using,
-  onOpen,
-  onRate,
-  onUse,
-}: {
-  agent: GalleryAgent;
-  isDarkMode: boolean;
-  using: boolean;
-  onOpen: () => void;
-  onRate: (rating: number) => void;
-  onUse: () => void;
-}) {
-  const preview =
-    agent.description?.trim() ||
-    (agent.system_prompt.length > 160
-      ? `${agent.system_prompt.slice(0, 160)}…`
-      : agent.system_prompt);
-
-  return (
-    <Card
-      sx={{
-        height: '100%',
-        display: 'flex',
-        flexDirection: 'column',
-        backgroundColor: isDarkMode ? undefined : '#ffffff',
-        boxShadow: isDarkMode ? undefined : '0 2px 8px rgba(0,0,0,0.1)',
-        border: isDarkMode ? undefined : '1px solid rgba(0,0,0,0.08)',
-        cursor: 'pointer',
-        transition: 'box-shadow 0.15s ease',
-        '&:hover': {
-          boxShadow: isDarkMode ? '0 4px 16px rgba(0,0,0,0.45)' : '0 4px 16px rgba(0,0,0,0.14)',
-        },
-      }}
-      onClick={onOpen}
-    >
-      <CardContent sx={{ flex: 1 }}>
-        <Typography variant="h6" fontWeight="bold" sx={{ mb: 1 }}>
-          {agent.name}
-        </Typography>
-
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 1 }}>
-          <PersonIcon fontSize="small" color="action" />
-          <Typography variant="caption" color="text.secondary">
-            {agent.author_name}
-          </Typography>
-        </Box>
-
-        <Typography
-          variant="body2"
-          color="text.secondary"
-          sx={{
-            mb: 2,
-            display: '-webkit-box',
-            WebkitLineClamp: 4,
-            WebkitBoxOrient: 'vertical',
-            overflow: 'hidden',
-          }}
-        >
-          {preview}
-        </Typography>
-
-        <Box
-          sx={{ display: 'flex', alignItems: 'center', gap: 1 }}
-          onClick={(e) => e.stopPropagation()}
-        >
-          <Rating
-            value={agent.average_rating}
-            precision={0.1}
-            readOnly={!!agent.user_rating}
-            onChange={(_, value) => {
-              if (value !== null) onRate(Math.round(value));
-            }}
-          />
-          <Typography variant="caption" color="text.secondary">
-            {Number(agent.average_rating || 0).toFixed(1)} ({agent.total_votes || 0})
-            {agent.user_rating ? ` • Ваша: ${agent.user_rating}` : ''}
-          </Typography>
-        </Box>
-
-        <Box sx={{ display: 'flex', gap: 2, mt: 1 }}>
-          <Tooltip title="Просмотров">
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-              <ViewIcon fontSize="small" color="action" />
-              <Typography variant="caption">{agent.views_count || 0}</Typography>
-            </Box>
-          </Tooltip>
-          <Tooltip title="Использований">
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-              <TrendingUpIcon fontSize="small" color="action" />
-              <Typography variant="caption">{agent.usage_count || 0}</Typography>
-            </Box>
-          </Tooltip>
-        </Box>
-      </CardContent>
-
-      <CardActions onClick={(e) => e.stopPropagation()}>
-        <Button
-          size="small"
-          startIcon={using ? <CircularProgress size={14} /> : <CopyIcon />}
-          onClick={onUse}
-          disabled={using}
-          fullWidth
-          variant="contained"
-        >
-          Использовать
-        </Button>
-      </CardActions>
-    </Card>
   );
 }

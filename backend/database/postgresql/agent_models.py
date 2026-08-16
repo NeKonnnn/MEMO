@@ -50,6 +50,16 @@ class AgentWithTags(Agent):
     )
 
 
+class Tag(BaseModel):
+    """Тег для галереи агентов (общая таблица tags)"""
+
+    id: Optional[int] = Field(None, description="ID тега")
+    name: str = Field(..., description="Название тега", min_length=2, max_length=100)
+    description: Optional[str] = Field(None, description="Описание тега", max_length=500)
+    color: Optional[str] = Field(None, description="Цвет для UI (hex)", pattern="^#[0-9A-Fa-f]{6}$")
+    created_at: datetime = Field(default_factory=datetime.utcnow, description="Дата создания")
+
+
 # Роли доступа к агенту
 AGENT_PERMISSION_VIEWER = "viewer"
 AGENT_PERMISSION_EDITOR = "editor"

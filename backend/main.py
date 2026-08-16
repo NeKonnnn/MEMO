@@ -107,12 +107,27 @@ from backend.routes.model_comparison import router as model_comparison_router
 from backend.routes.mcp import router as mcp_router
 from backend.routes.coding_agent import router as coding_agent_router
 from backend.routes.image_generation import router as image_generation_router
+_plugins_import_error: BaseException | None = None
+try:
+    from backend.routes.plugins import router as plugins_router
+except Exception as _plugins_exc:  # noqa: BLE001
+    plugins_router = None
+    _plugins_import_error = _plugins_exc
+if _plugins_import_error is not None:
+    logger.warning(
+        "plugins router недоступен при импорте — backend стартует без /api/plugins. err=%s",
+        _plugins_import_error,
+        exc_info=_plugins_import_error,
+    )
+elif plugins_router is not None:
+    logger.info("plugins router импортирован")
 for _r in (
     system_router, chat_router, models_router, llm_router, llm_providers_router,
     memory_router, voice_router, documents_router, transcription_router,
     rag_router, internal_rag_router, agents_router, context_prompts_router,
     project_rag_router, projects_router, model_comparison_router,
     mcp_router, coding_agent_router, image_generation_router,
+    *([plugins_router] if plugins_router is not None else []),
 ):
     app.include_router(_r)
 try:
@@ -122,10 +137,9 @@ try:
     logger.info("mcp_atlassian router подключен")
 except Exception as _e:
     logger.warning("mcp_atlassian router недоступен: %s", _e)
-# -- внешние роутеры (auth, prompts gallery, agents gallery, share)
+# -- внешние роутеры (auth, agents gallery, skills, share)
 for _name, _import_path in [
     ("auth",    "backend.auth.routes"),
-    ("prompts", "backend.api_prompts"),
     ("agents",  "backend.api_agents"),
     ("skills",  "backend.api_skills"),
     ("share",   "backend.routes.share"),
@@ -176,6 +190,20 @@ async def startup_event():
             logger.info("MCP platform инициализирована")
         except Exception as e:
             logger.error(f"Ошибка инициализации MCP platform: {e}")
+    try:
+        from backend.plugins.platform import get_plugins_platform
+
+        plugins_platform = get_plugins_platform()
+        plugins_platform.initialize()
+        catalog = plugins_platform.list_plugins()
+        logger.info(
+            "Plugins platform инициализирована: enabled=%s count=%s ids=%s",
+            plugins_platform.enabled,
+            len(catalog),
+            [p.id for p in catalog],
+        )
+    except Exception as e:
+        logger.error("Ошибка инициализации Plugins platform: %s", e)
     # очистка памяти при рестарте
     if state.memory_clear_on_restart and clear_dialog_history:
         try:

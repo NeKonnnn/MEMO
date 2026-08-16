@@ -92,6 +92,9 @@ export const API_ENDPOINTS = {
 
   // Skills (markdown instructions)
   SKILLS: '/api/skills',
+
+  // Plugins (HTTP microservices gallery)
+  PLUGINS: '/api/plugins',
 };
 
 // Для обратной совместимости (deprecated - используйте getSettings())

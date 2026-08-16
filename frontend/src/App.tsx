@@ -1,19 +1,22 @@
-import React, { useState, useEffect, startTransition } from 'react';
-import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
+import React, { useState, useEffect, useCallback, startTransition } from 'react';
+import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { ThemeProvider, createTheme } from '@mui/material/styles';
 import { CssBaseline, Box, IconButton, Tooltip } from '@mui/material';
 import { ChevronRight as ChevronRightIcon } from '@mui/icons-material';
-import Sidebar from './components/Sidebar';
+import { LeftBar } from './components/left_bar';
+import { RightBar, RightBarProvider } from './components/right_bar';
 import GlobalKeyboardShortcuts from './components/GlobalKeyboardShortcuts';
 import SettingsModal from './components/SettingsModal';
 import { ASTRA_FOCUS_CHAT_SEARCH, ASTRA_OPEN_SETTINGS, ASTRA_OPEN_SETTINGS_SECTION } from './constants/hotkeys';
+import { useRightSidebarInsetCssVar } from './hooks/useRightSidebarInsetCssVar';
 import UnifiedChatPage from './pages/UnifiedChatPage';
 import VoicePage from './pages/VoicePage';
 import DocumentsPage from './pages/DocumentsPage';
 // import SettingsPage from './pages/SettingsPage'; // Удалено - теперь используется модальное окно
 import HistoryPage from './pages/HistoryPage';
-import PromptGalleryPage from './pages/PromptGalleryPage';
 import AgentGalleryPage from './pages/AgentGalleryPage';
+import PluginGalleryPage from './pages/PluginGalleryPage';
+import GalleryHubPage from './pages/GalleryHubPage';
 import SkillsPage from './pages/SkillsPage';
 import ReleaseNotesPage from './pages/ReleaseNotesPage';
 import ProjectPage from './pages/ProjectPage';
@@ -33,6 +36,8 @@ import { initSettings } from './settings';
 import LlmStatusBanner from './components/LlmStatusBanner';
 import RagReindexStatusBanner from './components/RagReindexStatusBanner';
 import { RagReindexStatusProvider } from './contexts/RagReindexStatusContext';
+import PluginRunBanner from './components/PluginRunBanner';
+import { PluginRunProvider } from './contexts/PluginRunContext';
 import TabNotificationWatcher from './components/TabNotificationWatcher';
 import SupportAssistantWidget from './support_assistant';
 import './App.css';
@@ -150,6 +155,25 @@ function App() {
     const saved = localStorage.getItem('sidebarHidden');
     return saved !== null ? saved === 'true' : false;
   });
+  const [rightSidebarOpen, setRightSidebarOpen] = useState(() => {
+    const saved = localStorage.getItem('rightSidebarOpen');
+    return saved !== null ? saved === 'true' : true;
+  });
+  const [rightSidebarHidden, setRightSidebarHidden] = useState(() => {
+    const saved = localStorage.getItem('rightSidebarHidden');
+    return saved !== null ? saved === 'true' : false;
+  });
+
+  const setRightOpenStable = useCallback(
+    (v: boolean | ((prev: boolean) => boolean)) => setRightSidebarOpen(v),
+    [],
+  );
+  const setRightHiddenStable = useCallback(
+    (v: boolean | ((prev: boolean) => boolean)) => setRightSidebarHidden(v),
+    [],
+  );
+
+  useRightSidebarInsetCssVar(rightSidebarOpen, rightSidebarHidden);
 
   /** Счётчик для фокуса поля «Поиск в чатах» (в т.ч. после показа скрытого сайдбара). */
   const [searchFocusNonce, setSearchFocusNonce] = useState(0);
@@ -201,6 +225,14 @@ function App() {
     localStorage.setItem('sidebarHidden', String(sidebarHidden));
   }, [sidebarHidden]);
 
+  useEffect(() => {
+    localStorage.setItem('rightSidebarOpen', String(rightSidebarOpen));
+  }, [rightSidebarOpen]);
+
+  useEffect(() => {
+    localStorage.setItem('rightSidebarHidden', String(rightSidebarHidden));
+  }, [rightSidebarHidden]);
+
   // CSS-переменные для меню: единый серый hover, скругление, подушечка подсветки (перебивают глобальные стили в App.css)
   useEffect(() => {
     const root = document.documentElement;
@@ -226,6 +258,19 @@ function App() {
     });
   };
 
+  const toggleRightSidebar = () => {
+    startTransition(() => {
+      setRightSidebarOpen((o) => !o);
+    });
+  };
+
+  const rightBarLayout = {
+    open: rightSidebarOpen,
+    hidden: rightSidebarHidden,
+    setOpen: setRightOpenStable,
+    setHidden: setRightHiddenStable,
+  };
+
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline />
@@ -235,6 +280,8 @@ function App() {
           <Router>
             <RagReindexStatusProvider>
               <RagReindexStatusBanner />
+              <PluginRunProvider>
+              <PluginRunBanner />
               <SocketProvider>
                 <TabNotificationWatcher />
                 <SessionTimeoutWatcher />
@@ -252,9 +299,10 @@ function App() {
                   path="/*"
                   element={
                     <PrivateRoute>
-                      <Box sx={{ display: 'flex', height: '100vh' }}>
+                      <RightBarProvider value={rightBarLayout}>
+                      <Box sx={{ display: 'flex', height: '100vh', overflow: 'hidden', bgcolor: 'background.default' }}>
                         {!sidebarHidden && (
-                          <Sidebar 
+                          <LeftBar 
                             open={sidebarOpen} 
                             onToggle={toggleSidebar}
                             isDarkMode={isDarkMode}
@@ -277,16 +325,25 @@ function App() {
                         <Box 
                           component="main" 
                           sx={{ 
-                            flexGrow: 1, 
+                            flexGrow: 1,
+                            minWidth: 0,
+                            minHeight: 0,
+                            height: '100%',
                             display: 'flex',
                             flexDirection: 'column',
                             overflow: 'hidden',
+                            // При hide с collapsed: margin -64→0 без анимации, иначе на 0.3s шире viewport → серые скроллбары.
                             marginLeft: sidebarHidden ? 0 : (sidebarOpen ? 0 : '-64px'),
-                            transition: 'margin-left 0.3s ease',
+                            marginRight: rightSidebarHidden ? 0 : (rightSidebarOpen ? 0 : '-64px'),
+                            transition: [
+                              sidebarHidden ? 'margin-left 0s' : 'margin-left 0.3s ease',
+                              rightSidebarHidden ? 'margin-right 0s' : 'margin-right 0.3s ease',
+                            ].join(', '),
                             position: 'relative',
+                            bgcolor: 'background.default',
                           }}
                         >
-                          {/* Кнопка для показа скрытой панели */}
+                          {/* Кнопка для показа скрытой левой панели */}
                           {sidebarHidden && (
                             <Box
                               sx={{
@@ -329,8 +386,10 @@ function App() {
                             <Route path="/documents" element={<UnifiedChatPage isDarkMode={isDarkMode} sidebarOpen={sidebarOpen} sidebarHidden={sidebarHidden} />} />
                             <Route path="/search" element={<UnifiedChatPage isDarkMode={isDarkMode} sidebarOpen={sidebarOpen} sidebarHidden={sidebarHidden} />} />
                             <Route path="/creations" element={<CreationsPage />} />
-                            <Route path="/prompts" element={<PromptGalleryPage />} />
+                            <Route path="/gallery" element={<GalleryHubPage />} />
+                            <Route path="/prompts" element={<Navigate to="/gallery?tab=agents" replace />} />
                             <Route path="/agents-gallery" element={<AgentGalleryPage />} />
+                            <Route path="/plugins-gallery" element={<PluginGalleryPage />} />
                             <Route path="/skills" element={<SkillsPage />} />
                             <Route path="/docs/astrachat-release-1.0" element={<ReleaseNotesPage />} />
                             <Route path="/docs/astrachat-release-1.0.html" element={<ReleaseNotesPage />} />
@@ -340,12 +399,29 @@ function App() {
                           {/* Прототип: плавающий помощник поддержки (LLM/RAG — следующий этап) */}
                           <SupportAssistantWidget />
                         </Box>
+                        <RightBar
+                          open={rightSidebarOpen}
+                          hidden={rightSidebarHidden}
+                          isDarkMode={isDarkMode}
+                          onToggleOpen={toggleRightSidebar}
+                          onHide={() => startTransition(() => setRightSidebarHidden(true))}
+                          onShow={() => {
+                            startTransition(() => {
+                              setRightSidebarHidden(false);
+                              setRightSidebarOpen(false);
+                            });
+                          }}
+                          setOpen={setRightOpenStable}
+                          setHidden={setRightHiddenStable}
+                        />
                       </Box>
+                      </RightBarProvider>
                     </PrivateRoute>
                   }
                 />
                 </Routes>
               </SocketProvider>
+              </PluginRunProvider>
             </RagReindexStatusProvider>
           </Router>
         </AppProvider>

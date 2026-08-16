@@ -90,15 +90,33 @@ class SkillListItem(BaseModel):
     author_name: str
     created_at: datetime
     updated_at: datetime
+    views_count: int = 0
+    usage_count: int = 0
+    average_rating: float = 0.0
+    total_votes: int = 0
+    user_rating: Optional[int] = None
+    is_bookmarked: bool = False
     is_shared_with_me: bool = False
     my_permission: Optional[str] = None
     write_access: bool = False
 
 
 class SkillOut(Skill):
+    views_count: int = 0
+    usage_count: int = 0
+    average_rating: float = 0.0
+    total_votes: int = 0
+    user_rating: Optional[int] = None
+    is_bookmarked: bool = False
     is_shared_with_me: bool = False
     my_permission: Optional[str] = None
     write_access: bool = False
+
+
+class SkillRatingRequest(BaseModel):
+    """Запрос на оценку skill (1–5)."""
+
+    rating: int = Field(..., ge=1, le=5)
 
 
 class SkillCreate(BaseModel):
@@ -135,7 +153,7 @@ class SkillUpdate(BaseModel):
 
 class SkillFilters(BaseModel):
     search_query: Optional[str] = None
-    view_option: Optional[str] = Field(None, description="created | shared | ''")
+    view_option: Optional[str] = Field(None, description="created | shared | public | ''")
     author_id: Optional[str] = None
     category: Optional[str] = None
     limit: int = Field(30, ge=1, le=100)

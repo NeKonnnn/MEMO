@@ -3,13 +3,13 @@ import { Box, ListItem, ListItemButton, Tooltip, Typography } from '@mui/materia
 import type { SxProps, Theme } from '@mui/material/styles';
 import {
   getSidebarRailCollapsedListItemButtonSx,
-} from '../constants/menuStyles';
+} from '../../constants/menuStyles';
 import {
   getSidebarRailCollapsedIconHoverSx,
   getSidebarRailCollapsedItemEnterSx,
   SIDEBAR_RAIL_ICON_CLASS,
   type SidebarRailCollapsedActionVariant,
-} from '../constants/sidebarRailAnimations';
+} from '../../constants/sidebarRailAnimations';
 
 interface SidebarRailCollapsedActionProps {
   variant: SidebarRailCollapsedActionVariant;

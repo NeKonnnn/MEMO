@@ -152,6 +152,8 @@ async def _resolve_agent_chat_params(agent_id_raw, user_id=None) -> dict:
         "skills_enabled": False,
         "mcp_enabled": False,
         "mcp_server_ids": [],
+        "plugins_enabled": False,
+        "plugin_ids": [],
         "artifacts_enabled": False,
         "shadcn_enabled": False,
         "user_prompt_mode": False,
@@ -229,6 +231,13 @@ async def _resolve_agent_chat_params(agent_id_raw, user_id=None) -> dict:
         raw_mcp_ids = cfg.get("mcp_server_ids")
         if isinstance(raw_mcp_ids, list):
             out["mcp_server_ids"] = [str(v).strip() for v in raw_mcp_ids if str(v).strip()]
+        raw_plugin_ids = cfg.get("plugin_ids")
+        if isinstance(raw_plugin_ids, list):
+            out["plugin_ids"] = [str(v).strip() for v in raw_plugin_ids if str(v).strip()]
+        if "plugins_enabled" in cfg:
+            out["plugins_enabled"] = bool(cfg.get("plugins_enabled"))
+        else:
+            out["plugins_enabled"] = bool(out["plugin_ids"])
         out["artifacts_enabled"] = bool(cfg.get("artifacts_enabled", False))
         out["shadcn_enabled"] = bool(cfg.get("shadcn_enabled", False))
         out["user_prompt_mode"] = bool(cfg.get("user_prompt_mode", False))
@@ -238,6 +247,7 @@ async def _resolve_agent_chat_params(agent_id_raw, user_id=None) -> dict:
             f"file_search={out['file_search_enabled']}, "
             f"kb_document_ids={out['kb_document_ids']}, "
             f"mcp_enabled={out['mcp_enabled']}, mcp_server_ids={out['mcp_server_ids']}, "
+            f"plugins_enabled={out['plugins_enabled']}, plugin_ids={out['plugin_ids']}, "
             f"artifacts_enabled={out['artifacts_enabled']}, "
             f"shadcn_enabled={out['shadcn_enabled']}, "
             f"user_prompt_mode={out['user_prompt_mode']}"
@@ -263,3 +273,19 @@ def agent_mcp_tool_ids(agent_profile: dict) -> List[str]:
             if tid not in out:
                 out.append(tid)
     return out
+
+
+def agent_plugin_ids(agent_profile: dict) -> List[str]:
+    """Активные plugin_ids из карточки агента."""
+    if not isinstance(agent_profile, dict):
+        return []
+    enabled = agent_profile.get("plugins_enabled")
+    raw = agent_profile.get("plugin_ids") or []
+    if not isinstance(raw, list):
+        raw = []
+    ids = [str(v).strip() for v in raw if str(v).strip()]
+    if enabled is None:
+        enabled = bool(ids)
+    if not enabled:
+        return []
+    return ids

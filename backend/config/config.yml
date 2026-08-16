@@ -345,3 +345,12 @@ urls:
   # MCP Open-WebSearch (8013 — веб-поиск для LLM)
   mcp_websearch_service_port: "http://localhost:8013"
   mcp_websearch_service_docker: "http://mcp-websearch:3000"
+
+# ========================================================
+# ПЛАГИНЫ (HTTP-микросервисы в галерее / конструкторе агентов)
+# ========================================================
+plugins:
+  enabled: true
+  # ENV: PLUGINS_ENABLED
+  # Каталог пуст: cash-flow и др. добавим, когда сервис будет доступен.
+  catalog: {}

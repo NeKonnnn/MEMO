@@ -13,7 +13,7 @@ type Props = {
 
 /**
  * Кнопка меню rail: `<img>` + data URL (надёжнее `background-image` для data:).
- * Размер как у иконок «Новый чат» / узкой правой панели.
+ * Общий для left_bar и right_bar.
  */
 export default function SidebarRailMenuGlyph({ side, className }: Props) {
   const src =

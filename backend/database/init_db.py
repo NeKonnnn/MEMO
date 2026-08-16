@@ -49,7 +49,6 @@ except ImportError as e:
 try:
     from .postgresql.connection import PostgreSQLConnection
     from .postgresql.repository import DocumentRepository, VectorRepository
-    from .postgresql.prompt_repository import PromptRepository, TagRepository
     from .postgresql.agent_repository import AgentRepository
     from .postgresql.user_settings_repository import UserSettingsRepository
     from .postgresql.skill_repository import SkillRepository
@@ -63,8 +62,6 @@ except ImportError as e:
     PostgreSQLConnection = None
     DocumentRepository = None
     VectorRepository = None
-    PromptRepository = None
-    TagRepository = None
     AgentRepository = None
     UserSettingsRepository = None
     SkillRepository = None
@@ -88,8 +85,6 @@ postgresql_connection: Optional[PostgreSQLConnection] = None
 conversation_repo: Optional[ConversationRepository] = None
 document_repo: Optional[DocumentRepository] = None
 vector_repo: Optional[VectorRepository] = None
-prompt_repo: Optional[PromptRepository] = None
-tag_repo: Optional[TagRepository] = None
 agent_repo: Optional[AgentRepository] = None
 skill_repo: Optional["SkillRepository"] = None
 user_settings_repo: Optional["UserSettingsRepository"] = None
@@ -202,8 +197,6 @@ async def init_postgresql() -> bool:
             # Создаем репозитории
             document_repo = DocumentRepository(postgresql_connection)
             vector_repo = VectorRepository(postgresql_connection, embedding_dim)
-            prompt_repo = PromptRepository(postgresql_connection)
-            tag_repo = TagRepository(postgresql_connection)
             agent_repo = AgentRepository(postgresql_connection)
             skill_repo = SkillRepository(postgresql_connection)
             user_settings_repo = UserSettingsRepository(postgresql_connection)
@@ -213,7 +206,6 @@ async def init_postgresql() -> bool:
             # Создаем таблицы
             await document_repo.create_tables()
             await vector_repo.create_tables()
-            await prompt_repo.create_tables()
             await agent_repo.create_tables()
             await _migrate_agent_model_settings(agent_repo)
             await skill_repo.create_tables()
@@ -368,24 +360,6 @@ def reset_mongodb_globals():
     global mongodb_connection, conversation_repo
     mongodb_connection = None
     conversation_repo = None
-
-
-def get_prompt_repository():
-    """Получение репозитория промптов"""
-    if not postgresql_available:
-        raise RuntimeError("PostgreSQL модули недоступны. Установите psycopg2.")
-    if prompt_repo is None:
-        raise RuntimeError("PostgreSQL не инициализирован. Вызовите init_postgresql() сначала.")
-    return prompt_repo
-
-
-def get_tag_repository():
-    """Получение репозитория тегов"""
-    if not postgresql_available:
-        raise RuntimeError("PostgreSQL модули недоступны. Установите psycopg2.")
-    if tag_repo is None:
-        raise RuntimeError("PostgreSQL не инициализирован. Вызовите init_postgresql() сначала.")
-    return tag_repo
 
 
 def get_agent_repository():

@@ -1,13 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Box, Paper, Typography } from '@mui/material';
 import { Message } from '../contexts/AppContext';
+import { useRightBarLayout } from './right_bar';
 
 interface MessageNavigationBarProps {
   messages: Message[];
   isDarkMode: boolean;
   onNavigate: (index: number) => void;
-  rightSidebarOpen: boolean;
-  rightSidebarHidden: boolean;
 }
 
 interface TooltipState {
@@ -90,9 +89,8 @@ export const MessageNavigationBar: React.FC<MessageNavigationBarProps> = ({
   messages,
   isDarkMode,
   onNavigate,
-  rightSidebarOpen,
-  rightSidebarHidden,
 }) => {
+  const { open: rightSidebarOpen, hidden: rightSidebarHidden } = useRightBarLayout();
   const [activeMessageIndex, setActiveMessageIndex] = useState<number | null>(null);
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   const [showListPanel, setShowListPanel] = useState(false);

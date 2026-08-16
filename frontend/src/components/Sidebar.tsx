@@ -499,11 +499,8 @@ export default function Sidebar({ open, onToggle, isDarkMode, onToggleTheme, onH
       case 'archive':
         setShowArchiveModal(true);
         break;
-      case 'prompts':
-        navigate('/prompts');
-        break;
       case 'agents-gallery':
-        navigate('/agents-gallery');
+        navigate('/gallery?tab=agents');
         break;
       case 'logout':
         logout();

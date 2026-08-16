@@ -38,6 +38,7 @@ from backend.realtime.helpers import (
     _resolve_agent_chat_params,
     _terminal_chat_inference_banner,
     agent_mcp_tool_ids,
+    agent_plugin_ids,
     kb_search_agent_documents,
 )
 from backend.services.user_feedback_context import (
@@ -645,6 +646,9 @@ def register_handlers(sio):
                 _agent_mcp = agent_mcp_tool_ids(agent_profile if isinstance(agent_profile, dict) else {})
                 if _agent_mcp:
                     data["tool_ids"] = _agent_mcp
+            _agent_plugins = agent_plugin_ids(agent_profile if isinstance(agent_profile, dict) else {})
+            if _agent_plugins:
+                data["__plugin_ids__"] = _agent_plugins
             agent_kb_enabled = bool(agent_profile.get("file_search_enabled"))
             agent_kb_doc_ids = agent_profile.get("kb_document_ids") or []
             use_agent_scoped_kb = (
@@ -799,6 +803,26 @@ def register_handlers(sio):
                 use_memory_library_rag,
                 use_agent_scoped_kb,
                 project_id,
+            )
+            _ia = data.get("inline_attachments") if isinstance(data, dict) else None
+            logger.info(
+                "[plugin-dispatch] chat_message mode=%s agent_id=%s plugins_enabled=%s plugin_ids=%s "
+                "inline_attachments=%s inline_context_chars=%s",
+                chat_mode,
+                data.get("agent_id") if isinstance(data, dict) else None,
+                (agent_profile or {}).get("plugins_enabled") if isinstance(agent_profile, dict) else None,
+                (agent_profile or {}).get("plugin_ids") if isinstance(agent_profile, dict) else None,
+                [
+                    {
+                        "name": (a or {}).get("name") if isinstance(a, dict) else None,
+                        "has_object": bool(isinstance(a, dict) and a.get("minio_object")),
+                        "bucket": (a or {}).get("minio_bucket") if isinstance(a, dict) else None,
+                    }
+                    for a in (_ia or [])
+                ]
+                if isinstance(_ia, list)
+                else _ia,
+                len(inline_context or ""),
             )
 
             async def async_stream_cb(chunk, acc, stream_role="content"):
@@ -1117,6 +1141,17 @@ async def _handle_multi_llm(
             from backend.services.skills import append_to_system_prompt
 
             prompt = append_to_system_prompt(prompt, skill_append)
+        try:
+            from backend.plugins.tools import build_plugins_system_append
+            from backend.realtime.helpers import agent_plugin_ids as _agent_plugin_ids
+            from backend.services.skills import append_to_system_prompt as _append_plugins
+
+            _pids = _agent_plugin_ids(agent_profile if isinstance(agent_profile, dict) else {})
+            plugins_block = build_plugins_system_append(_pids)
+            if plugins_block:
+                prompt = _append_plugins(prompt, plugins_block)
+        except Exception:
+            logger.exception("[multi-llm] plugins prompt injection failed")
         try:
             from backend.prompts.artifacts import maybe_artifacts_prompt_for_agent
             from backend.services.skills import append_to_system_prompt as _append_sp
@@ -1664,6 +1699,57 @@ async def _handle_direct(
             if hit_scope:
                 rag_scopes.add(hit_scope)
     chat_timer.mark("rag_retrieve", time.perf_counter() - _t_rag0)
+    # Инструментов в прямом режиме нет, поэтому плагин вызывает сам backend.
+    # Решаем это до сборки промпта: файл, который уйдёт в сервис, дампом ячеек
+    # в промпт не вставляем — вместо него будет вердикт плагина.
+    direct_plugin_run = None
+    direct_plugin_ids: list = []
+    try:
+        from backend.plugins.orchestrator_bridge import resolve_agent_plugin_ids
+        from backend.services.plugins_direct import pick_plugin_run
+
+        direct_plugin_ids = resolve_agent_plugin_ids(
+            agent_profile if isinstance(agent_profile, dict) else None
+        )
+        logger.info(
+            "[plugin-dispatch] mode=direct gate: plugin_ids=%s has_inline_attachments=%s "
+            "inline_attachments_count=%s agent_name=%r",
+            direct_plugin_ids,
+            bool(isinstance(data, dict) and data.get("inline_attachments")),
+            len(data.get("inline_attachments") or []) if isinstance(data, dict) else 0,
+            (agent_profile or {}).get("name") if isinstance(agent_profile, dict) else None,
+        )
+        if direct_plugin_ids:
+            direct_plugin_run = pick_plugin_run(
+                direct_plugin_ids,
+                data.get("inline_attachments") if isinstance(data, dict) else None,
+                user_message,
+                chat_mode="direct",
+            )
+            if not direct_plugin_run:
+                logger.info(
+                    "[plugin-dispatch] mode=direct: плагин к сервису НЕ отправляем "
+                    "(см. SKIP выше)"
+                )
+        else:
+            logger.info(
+                "[plugin-dispatch] mode=direct SKIP: у агента нет активных plugin_ids"
+            )
+    except Exception:
+        logger.exception("[direct] выбор плагина для вложения не удался")
+    if inline_context and direct_plugin_run:
+        from backend.services.inline_context import prepare_inline_context
+
+        inline_context = prepare_inline_context(
+            inline_context,
+            plugin_ids=[direct_plugin_run.plugin_id],
+            attachments=data.get("inline_attachments") if isinstance(data, dict) else None,
+            label="direct",
+            note_override=(
+                f"[Файл «{direct_plugin_run.file_name}» целиком отправлен в сервис плагина "
+                f"«{direct_plugin_run.label}»; его вердикт приведён в этом сообщении.]"
+            ),
+        )
     if inline_context:
         inline_block = f"""[Прикреплённый документ]
 {inline_context}"""
@@ -1744,10 +1830,99 @@ async def _handle_direct(
             eff_system_prompt = append_to_system_prompt(eff_system_prompt, artifacts_block)
     except Exception:
         logger.exception("[direct] artifacts prompt injection failed")
+    try:
+        from backend.plugins.tools import build_plugins_system_append
+        from backend.services.plugins_chat import apply_plugins_to_context
+        from backend.services.skills import append_to_system_prompt as _append_plugins
+        from backend.tools.tool_context import get_tool_context, set_tool_context
+
+        plugins_append, plugin_ids, ctx = apply_plugins_to_context(
+            agent_profile=agent_profile if isinstance(agent_profile, dict) else {},
+            context=get_tool_context() or {},
+        )
+        if plugin_ids:
+            ctx["current_user"] = current_user
+            if isinstance(data, dict) and data.get("inline_attachments"):
+                ctx["inline_attachments"] = data.get("inline_attachments")
+            set_tool_context(ctx)
+        if plugins_append:
+            eff_system_prompt = _append_plugins(eff_system_prompt, plugins_append)
+    except Exception:
+        logger.exception("[direct] plugins injection failed")
+    plugin_direct_artifact = ""
+    plugin_direct_ran = False
+    if direct_plugin_ids:
+        try:
+            from backend.services.plugins_direct import (
+                prompt_block_for_outcome,
+                run_plugin_direct,
+                system_note_no_tools,
+                system_note_prerun,
+            )
+            from backend.services.skills import append_to_system_prompt as _append_plugin_note
+
+            plugin_note = (
+                system_note_prerun(direct_plugin_run)
+                if direct_plugin_run
+                else system_note_no_tools(direct_plugin_ids)
+            )
+            if plugin_note:
+                eff_system_prompt = _append_plugin_note(eff_system_prompt, plugin_note)
+            if direct_plugin_run:
+                await sio.emit(
+                    "chat_thinking",
+                    {
+                        "status": "processing",
+                        "message": (
+                            f"Плагин «{direct_plugin_run.label}»: файл "
+                            f"«{direct_plugin_run.file_name}» отправлен в сервис. "
+                            "Полный аудит модели занимает до нескольких десятков минут."
+                        ),
+                    },
+                    room=sid,
+                )
+                logger.info(
+                    "[direct plugin] %s: запускаю для «%s» object=%s bucket=%s",
+                    direct_plugin_run.plugin_id,
+                    direct_plugin_run.file_name,
+                    direct_plugin_run.minio_object,
+                    direct_plugin_run.minio_bucket,
+                )
+                _t_plugin0 = time.perf_counter()
+                outcome = await run_plugin_direct(direct_plugin_run, chat_mode="direct")
+                chat_timer.mark("plugin_direct", time.perf_counter() - _t_plugin0)
+                plugin_direct_ran = True
+                logger.info(
+                    "[plugin-dispatch] mode=direct DONE ok=%s bytes=%s url=%s status=%s error=%r",
+                    outcome.ok,
+                    outcome.bytes_sent,
+                    outcome.invoke_url or "?",
+                    outcome.result_status or "?",
+                    outcome.error or "",
+                )
+                final_message = (
+                    f"{prompt_block_for_outcome(direct_plugin_run, outcome)}\n\n{final_message}"
+                )
+                if outcome.ok:
+                    plugin_direct_artifact = outcome.artifact_markdown
+                else:
+                    await sio.emit(
+                        "chat_info",
+                        {
+                            "message": (
+                                f"Плагин «{direct_plugin_run.label}» не смог обработать файл: "
+                                f"{outcome.error}"
+                            )
+                        },
+                        room=sid,
+                    )
+        except Exception:
+            logger.exception("[direct] вызов плагина не удался")
     canned = await maybe_rag_no_evidence_message(
         rag_client,
         block_when_no_evidence=rag_block,
-        context_added=context_added,
+        # Вердикт плагина — тоже контекст: иначе строгий RAG подменит его заглушкой.
+        context_added=context_added or plugin_direct_ran,
         project_id=project_id,
         use_kb_rag=use_kb_rag,
         use_memory_library_rag=sources.memory,
@@ -1937,6 +2112,10 @@ async def _handle_direct(
     chat_timer.mark("llm", time.perf_counter() - _t_llm0)
     if context_added and (not canned) and response:
         response = await maybe_replace_ungrounded(final_message[:20000], response, RAG_STRICT_NOT_FOUND_MESSAGE)
+    if plugin_direct_artifact:
+        from backend.plugins.artifact_format import append_artifacts_to_answer
+
+        response = append_artifacts_to_answer(response, plugin_direct_artifact)
     if _generation_stopped(sid):
         await sio.emit("generation_stopped", {"message": "Генерация остановлена"}, room=sid)
         return

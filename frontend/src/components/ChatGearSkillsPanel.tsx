@@ -288,7 +288,7 @@ export default function ChatGearSkillsPanel({ isDarkMode }: ChatGearSkillsPanelP
           component="button"
           type="button"
           underline="hover"
-          onClick={() => navigate('/skills')}
+          onClick={() => navigate('/gallery?tab=skills')}
           sx={{ fontSize: '0.75rem', color: muted }}
         >
           Управление skills →

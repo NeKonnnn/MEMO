@@ -53,20 +53,20 @@ import {
   CheckBoxOutlineBlank as CheckBoxBlankIcon,
   ExpandMore as ExpandMoreIcon,
 } from '@mui/icons-material';
-import { getApiUrl, API_ENDPOINTS, getAuthFetchHeaders } from '../config/api';
-import { useAuth } from '../contexts/AuthContext';
-import { useAppActions } from '../contexts/AppContext';
-import { loadAgentModelOnly } from '../utils/applyAgentServer';
-import { saveEntityRagSettings, type EntityRagDraft } from '../utils/entityRagSettings';
+import { getApiUrl, API_ENDPOINTS, getAuthFetchHeaders } from '../../config/api';
+import { useAuth } from '../../contexts/AuthContext';
+import { useAppActions } from '../../contexts/AppContext';
+import { loadAgentModelOnly } from '../../utils/applyAgentServer';
+import { saveEntityRagSettings, type EntityRagDraft } from '../../utils/entityRagSettings';
 import {
   fetchRagEntityDefaults,
   resolveRagEmbeddingModelPath,
   resolveRagRerankerModelPath,
-} from '../constants/ragEntityDefaults';
+} from '../../constants/ragEntityDefaults';
 import {
   ASTRA_OPEN_AGENT_CONSTRUCTOR,
   ASTRA_OPEN_AGENT_CONSTRUCTOR_ID_KEY,
-} from '../constants/hotkeys';
+} from '../../constants/hotkeys';
 import {
   getDropdownChevronSx,
   getDropdownPopoverPaperSx,
@@ -79,18 +79,20 @@ import {
   flattenSx,
   AGENT_CONSTRUCTOR_OUTLINED_INPUT_SX,
   SIDEBAR_HIDE_SCROLLBAR_SX,
-} from '../constants/menuStyles';
-import ModelParametersModal, { type ModelParamsState } from './ModelParametersModal';
-import { MODEL_SETTINGS_DEFAULT, type ModelSettingsState } from '../constants/modelSettingsStyles';
-import ShareAgentDialog from './ShareAgentDialog';
-import { fetchMcpServers } from '../mcp/api';
-import type { McpServerConfigPublic } from '../mcp/types';
-import { applyAgentMcpToChat, persistAgentMcpConfig } from '../utils/applyAgentMcp';
-import RAGSettings from './settings/RAGSettings';
-import { useRagEntityReadyMessage } from '../hooks/useRagEntityReadyMessage';
-import { fetchMergedUserAgents } from '../utils/fetchMergedUserAgents';
-import { getSidebarPanelBackground, getSidebarPanelChrome, getSidebarSecondaryButtonSx } from '../constants/sidebarPanelColor';
-import RagUploadingFileThumb from './RagUploadingFileThumb';
+} from '../../constants/menuStyles';
+import ModelParametersModal, { type ModelParamsState } from '../ModelParametersModal';
+import { MODEL_SETTINGS_DEFAULT, type ModelSettingsState } from '../../constants/modelSettingsStyles';
+import ShareAgentDialog from '../ShareAgentDialog';
+import { fetchMcpServers } from '../../mcp/api';
+import type { McpServerConfigPublic } from '../../mcp/types';
+import { fetchPlugins } from '../../plugins/api';
+import type { PluginPublic } from '../../plugins/types';
+import { applyAgentMcpToChat, persistAgentMcpConfig } from '../../utils/applyAgentMcp';
+import RAGSettings from '../settings/RAGSettings';
+import { useRagEntityReadyMessage } from '../../hooks/useRagEntityReadyMessage';
+import { fetchMergedUserAgents } from '../../utils/fetchMergedUserAgents';
+import { getSidebarPanelBackground, getSidebarPanelChrome, getSidebarSecondaryButtonSx } from '../../constants/sidebarPanelColor';
+import RagUploadingFileThumb from '../RagUploadingFileThumb';
 import {
   createRagPendingUploads,
   commitRagUploadUiUpdate,
@@ -101,7 +103,7 @@ import {
   removeRagPendingUploads,
   RAG_UPLOAD_CONCURRENCY,
   type RagPendingUpload,
-} from '../utils/ragPendingUpload';
+} from '../../utils/ragPendingUpload';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -234,6 +236,53 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
     () => getSidebarSecondaryButtonSx(panelChrome, { dashed: true }),
     [panelChrome],
   );
+  const footerActionBtnSx = useMemo(
+    () => ({
+      textTransform: 'none' as const,
+      fontSize: '0.72rem',
+      fontWeight: 600,
+      py: 0.55,
+      px: 1.25,
+      whiteSpace: 'nowrap' as const,
+      minHeight: 30,
+      flex: '1 1 140px',
+      justifyContent: 'flex-start',
+      textAlign: 'left' as const,
+      '& .MuiButton-startIcon': {
+        marginRight: '8px',
+        marginLeft: 0,
+        color: 'inherit',
+      },
+      '& .MuiButton-startIcon .MuiSvgIcon-root': {
+        fontSize: '0.9rem',
+      },
+    }),
+    [],
+  );
+  const footerNeutralActionBtnSx = useMemo(
+    () => ({
+      ...footerActionBtnSx,
+      color: panelChrome.fgMuted,
+      border: panelChrome.buttonBorder,
+      bgcolor: 'transparent',
+      '&:hover': { bgcolor: panelChrome.hoverBg, color: panelChrome.fgMuted },
+    }),
+    [footerActionBtnSx, panelChrome],
+  );
+  const footerDeleteActionBtnSx = useMemo(
+    () => ({
+      ...footerActionBtnSx,
+      color: '#ef5350',
+      border: '1px solid rgba(239,83,80,0.45)',
+      bgcolor: 'rgba(239,83,80,0.08)',
+      '&:hover': {
+        bgcolor: 'rgba(239,83,80,0.16)',
+        color: '#ef5350',
+        borderColor: 'rgba(239,83,80,0.55)',
+      },
+    }),
+    [footerActionBtnSx],
+  );
   useEffect(() => {
     const onColorChanged = () => setPanelBg(getSidebarPanelBackground());
     window.addEventListener('sidebarColorChanged', onColorChanged);
@@ -321,6 +370,13 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
   const mcpTriggerRef = useRef<HTMLDivElement>(null);
   const [skillsPopoverAnchor, setSkillsPopoverAnchor] = useState<HTMLElement | null>(null);
   const skillsTriggerRef = useRef<HTMLDivElement>(null);
+
+  // Plugins (config.plugins_enabled, config.plugin_ids) — из галереи плагинов
+  const [pluginsEnabled, setPluginsEnabled] = useState(false);
+  const [pluginIds, setPluginIds] = useState<string[]>([]);
+  const [availablePlugins, setAvailablePlugins] = useState<PluginPublic[]>([]);
+  const [pluginsPopoverAnchor, setPluginsPopoverAnchor] = useState<HTMLElement | null>(null);
+  const pluginsTriggerRef = useRef<HTMLDivElement>(null);
 
   // Support contacts
   const [supportName, setSupportName] = useState('');
@@ -545,6 +601,14 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
     })();
     void (async () => {
       try {
+        const list = await fetchPlugins(false);
+        setAvailablePlugins(list.filter((p) => p.enabled !== false));
+      } catch {
+        setAvailablePlugins([]);
+      }
+    })();
+    void (async () => {
+      try {
         const headers: HeadersInit = tokenRef.current
           ? { Authorization: `Bearer ${tokenRef.current}` }
           : {};
@@ -655,6 +719,16 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
         ? cfg.mcp_server_ids.map((x: unknown) => String(x).trim()).filter(Boolean)
         : []
     );
+    setPluginIds(
+      Array.isArray(cfg.plugin_ids)
+        ? cfg.plugin_ids.map((x: unknown) => String(x).trim()).filter(Boolean)
+        : []
+    );
+    setPluginsEnabled(
+      typeof cfg.plugins_enabled === 'boolean'
+        ? cfg.plugins_enabled
+        : Array.isArray(cfg.plugin_ids) && cfg.plugin_ids.length > 0
+    );
     setSupportName(cfg.support_name || '');
     setSupportEmail(cfg.support_email || '');
     // eslint-disable-next-line react-hooks/exhaustive-deps -- только смена агента; agents читаем из ref
@@ -681,6 +755,8 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
     setSkillsEnabled(false);
     setMcpEnabled(false);
     setMcpServerIds([]);
+    setPluginsEnabled(false);
+    setPluginIds([]);
     setSupportName('');
     setSupportEmail('');
   }
@@ -954,6 +1030,8 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
         skills_enabled: skillsEnabled,
         mcp_enabled: mcpEnabled,
         mcp_server_ids: mcpServerIds,
+        plugins_enabled: pluginsEnabled,
+        plugin_ids: pluginIds,
         support_name: supportName,
         support_email: supportEmail,
       },
@@ -1865,6 +1943,125 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
           </Box>
         </Box>
 
+        {/* ── Plugins ──────────────────────────────────────────────────────── */}
+        <Box sx={{ minWidth: 0 }}>
+          <SectionHeader>Плагины</SectionHeader>
+          <Box sx={{ mt: 1 }}>
+            <FormControlLabel
+              control={
+                <Checkbox
+                  size="small"
+                  disabled={readOnly}
+                  checked={pluginsEnabled}
+                  onChange={(e) => {
+                    const checked = e.target.checked;
+                    setPluginsEnabled(checked);
+                    if (!checked) setPluginIds([]);
+                  }}
+                  sx={{ color: panelChrome.fgSubtle, '&.Mui-checked': { color: '#2196f3' }, p: 0.5 }}
+                />
+              }
+              label={
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                  <Typography variant="caption" sx={{ color: panelChrome.fgMuted, fontSize: '0.78rem' }}>
+                    Добавить плагины
+                  </Typography>
+                  <Tooltip title="Подключить плагины из «Галереи плагинов» к этому агенту. Настройка сохраняется в карточке агента." arrow>
+                    <HelpIcon sx={{ fontSize: 12, color: panelChrome.fgSubtle }} />
+                  </Tooltip>
+                </Box>
+              }
+              sx={{ m: 0, mb: pluginsEnabled ? 1 : 0, '& .MuiFormControlLabel-label': { ml: 0.5 } }}
+            />
+            {pluginsEnabled && (
+              <Box>
+                <FormControl variant="outlined" fullWidth size="small" sx={categoryFieldSx}>
+                  <InputLabel htmlFor="agent-constructor-plugins">Плагины</InputLabel>
+                  <OutlinedInput
+                    ref={pluginsTriggerRef}
+                    id="agent-constructor-plugins"
+                    label="Плагины"
+                    value={
+                      pluginIds.length === 0
+                        ? ''
+                        : pluginIds.length === 1
+                          ? (availablePlugins.find((p) => p.id === pluginIds[0])?.display_name || pluginIds[0])
+                          : `Выбрано: ${pluginIds.length}`
+                    }
+                    readOnly
+                    placeholder="Выберите плагины"
+                    sx={AGENT_CONSTRUCTOR_OUTLINED_INPUT_SX}
+                    onClick={() => {
+                      if (readOnly) return;
+                      setPluginsPopoverAnchor(pluginsTriggerRef.current);
+                    }}
+                    endAdornment={
+                      <InputAdornment position="end">
+                        <ExpandMoreIcon
+                          sx={{ ...dropdownChevronSx, transform: Boolean(pluginsPopoverAnchor) ? 'rotate(180deg)' : 'none' }}
+                        />
+                      </InputAdornment>
+                    }
+                  />
+                </FormControl>
+                <Popover
+                  open={!readOnly && Boolean(pluginsPopoverAnchor)}
+                  anchorEl={pluginsPopoverAnchor}
+                  onClose={() => setPluginsPopoverAnchor(null)}
+                  anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
+                  transformOrigin={{ vertical: 'top', horizontal: 'left' }}
+                  slotProps={{
+                    paper: { sx: getDropdownPopoverPaperSx(pluginsPopoverAnchor, darkFields) },
+                  }}
+                >
+                  <Box sx={{ py: 0.5, maxHeight: 220, overflowY: 'auto', ...SIDEBAR_HIDE_SCROLLBAR_SX }}>
+                    {availablePlugins.length === 0 ? (
+                      <Box sx={{ px: 1.5, py: 1.5, fontSize: '0.78rem', color: darkFields ? 'rgba(255,255,255,0.35)' : 'rgba(0,0,0,0.45)', textAlign: 'center' }}>
+                        Нет плагинов в галерее
+                      </Box>
+                    ) : (
+                      availablePlugins.map((pl) => {
+                        const selected = pluginIds.includes(pl.id);
+                        return (
+                          <Box
+                            key={pl.id}
+                            onClick={() => {
+                              setPluginIds((prev) =>
+                                prev.includes(pl.id)
+                                  ? prev.filter((x) => x !== pl.id)
+                                  : [...prev, pl.id],
+                              );
+                            }}
+                            sx={{
+                              ...dropdownItemSx,
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: 0.75,
+                              ...getDropdownItemStateSx(darkFields, selected),
+                            }}
+                          >
+                            {selected ? (
+                              <CheckBoxIcon sx={{ fontSize: 16, color: '#2196f3', flexShrink: 0 }} />
+                            ) : (
+                              <CheckBoxBlankIcon sx={{ fontSize: 16, color: darkFields ? 'rgba(255,255,255,0.35)' : 'rgba(0,0,0,0.35)', flexShrink: 0 }} />
+                            )}
+                            <Box sx={{ minWidth: 0 }}>
+                              <Box component="span" sx={{ display: 'block' }}>{pl.display_name || pl.id}</Box>
+                              <Box component="span" sx={{ display: 'block', opacity: 0.5, fontSize: '0.72rem' }}>
+                                {pl.id}
+                              </Box>
+                            </Box>
+                          </Box>
+                        );
+                      })
+                    )}
+                  </Box>
+                </Popover>
+              </Box>
+            )}
+          </Box>
+        </Box>
+
         {/* ── File Search (KB) ─────────────────────────────────────────────── */}
         <Box sx={{ minWidth: 0 }}>
           <SectionHeader>Документы агента</SectionHeader>
@@ -2279,92 +2476,73 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
         </Box>
         */}
 
-        {/* Share + Publish + Delete + Save */}
+        {/* Share + Publish + Delete + Save — дизайн как в GPB_ASTRA */}
         <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
           {selectedAgentId !== 'new' && isOwner && (
-            <Tooltip title="Поделиться агентом">
-              <IconButton
-                size="small"
-                onClick={() => setShareDialogOpen(true)}
-                sx={{
-                  color: panelChrome.fgSubtle,
-                  border: panelChrome.buttonBorder,
-                  borderRadius: 1,
-                  p: 0.75,
-                  '&:hover': { bgcolor: panelChrome.hoverBg, color: panelChrome.fg },
-                }}
-              >
-                <ShareIcon sx={{ fontSize: '1rem' }} />
-              </IconButton>
-            </Tooltip>
-          )}
-          {selectedAgentId !== 'new' && isOwner && (
-            <Tooltip
-              title={
-                selectedAgent?.is_public
-                  ? 'Снять с публикации в галерее'
-                  : 'Опубликовать агента в галерее'
-              }
-            >
-              <span>
+            <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', width: '100%' }}>
+              <Box component="span" sx={{ flex: '1 1 140px', minWidth: 0, display: 'flex' }}>
                 <Button
                   size="small"
+                  fullWidth
+                  startIcon={<ShareIcon />}
+                  onClick={() => setShareDialogOpen(true)}
+                  sx={footerNeutralActionBtnSx}
+                >
+                  Поделиться агентом
+                </Button>
+              </Box>
+              <Box component="span" sx={{ flex: '1 1 140px', minWidth: 0, display: 'flex' }}>
+                <Button
+                  size="small"
+                  fullWidth
                   disabled={isPublishing}
                   startIcon={
                     isPublishing ? (
                       <CircularProgress size={12} sx={{ color: 'inherit' }} />
                     ) : selectedAgent?.is_public ? (
-                      <PublicOffIcon sx={{ fontSize: '0.9rem !important' }} />
+                      <PublicOffIcon />
                     ) : (
-                      <PublicIcon sx={{ fontSize: '0.9rem !important' }} />
+                      <PublicIcon />
                     )
                   }
                   onClick={() => void handleTogglePublish()}
                   sx={{
-                    textTransform: 'none',
-                    fontSize: '0.72rem',
-                    fontWeight: 600,
+                    ...footerActionBtnSx,
+                    flex: '1 1 auto',
+                    width: '100%',
                     color: selectedAgent?.is_public ? '#2e7d32' : panelChrome.fgMuted,
                     border: `1px solid ${selectedAgent?.is_public ? 'rgba(46,125,50,0.45)' : panelChrome.buttonBorder.replace('1px solid ', '')}`,
                     bgcolor: selectedAgent?.is_public ? 'rgba(46,125,50,0.1)' : 'transparent',
-                    py: 0.55,
-                    px: 1,
-                    whiteSpace: 'nowrap',
                     '&:hover': {
                       bgcolor: selectedAgent?.is_public
                         ? 'rgba(46,125,50,0.16)'
                         : panelChrome.hoverBg,
+                      color: selectedAgent?.is_public ? '#2e7d32' : panelChrome.fgMuted,
                     },
                     '&:disabled': { color: panelChrome.fgSubtle },
                   }}
                 >
-                  {selectedAgent?.is_public ? 'В галерее' : 'Опубликовать в галерее'}
+                  {selectedAgent?.is_public ? 'Снять с публикации' : 'Опубликовать в галерее'}
                 </Button>
-              </span>
-            </Tooltip>
-          )}
-          {selectedAgentId !== 'new' && isOwner && (
-            <Tooltip title="Удалить агента">
-              <IconButton
-                size="small"
-                onClick={handleDelete}
-                sx={{
-                  color: panelChrome.fgSubtle,
-                  border: panelChrome.buttonBorder,
-                  borderRadius: 1,
-                  p: 0.75,
-                  '&:hover': { color: '#ef5350', borderColor: 'rgba(239,83,80,0.4)', bgcolor: 'rgba(239,83,80,0.08)' },
-                }}
-              >
-                <DeleteIcon sx={{ fontSize: '1rem' }} />
-              </IconButton>
-            </Tooltip>
+              </Box>
+              <Box component="span" sx={{ flex: '1 1 140px', minWidth: 0, display: 'flex' }}>
+                <Button
+                  size="small"
+                  fullWidth
+                  startIcon={<DeleteIcon />}
+                  onClick={handleDelete}
+                  sx={footerDeleteActionBtnSx}
+                >
+                  Удалить агента
+                </Button>
+              </Box>
+            </Box>
           )}
           {canEdit ? (
             <Button
               fullWidth
               variant="contained"
-              startIcon={isSaving ? <CircularProgress size={14} sx={{ color: 'white' }} /> : <SaveIcon sx={{ fontSize: '0.9rem !important' }} />}
+              startIcon={isSaving ? <CircularProgress size={14} sx={{ color: 'white' }} /> : <SaveIcon />}
               onClick={handleSave}
               disabled={isSaving}
               sx={{
@@ -2373,6 +2551,13 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
                 fontWeight: 600,
                 fontSize: '0.82rem',
                 py: 0.9,
+                justifyContent: 'flex-start',
+                textAlign: 'left',
+                '& .MuiButton-startIcon': {
+                  marginRight: '8px',
+                  marginLeft: 0,
+                  color: 'inherit',
+                },
                 '&:hover': { bgcolor: '#388e3c' },
                 '&:disabled': { bgcolor: 'rgba(46,125,50,0.4)', color: 'rgba(255,255,255,0.5)' },
               }}
@@ -2383,15 +2568,22 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
             <Button
               fullWidth
               variant="outlined"
-              startIcon={<AgentIcon sx={{ fontSize: '0.9rem !important' }} />}
+              startIcon={<AgentIcon />}
               onClick={handleUseAgent}
               sx={{
                 textTransform: 'none',
                 fontWeight: 600,
                 fontSize: '0.82rem',
                 py: 0.9,
+                justifyContent: 'flex-start',
+                textAlign: 'left',
                 color: panelChrome.fg,
                 borderColor: panelChrome.buttonBorderHover,
+                '& .MuiButton-startIcon': {
+                  marginRight: '8px',
+                  marginLeft: 0,
+                  color: 'inherit',
+                },
                 '&:hover': { borderColor: panelChrome.fg, bgcolor: panelChrome.hoverBg },
               }}
             >

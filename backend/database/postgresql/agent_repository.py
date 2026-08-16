@@ -16,7 +16,7 @@ from backend.database.postgresql.agent_models import (
     normalize_permission,
 )
 from backend.database.postgresql.connection import PostgreSQLConnection
-from backend.database.postgresql.prompt_models import Tag
+from backend.database.postgresql.agent_models import Tag
 from backend.settings.logging import get_logger
 
 logger = get_logger(__name__)
@@ -53,6 +53,15 @@ class AgentRepository:
                         is_public BOOLEAN DEFAULT true,
                         usage_count INTEGER DEFAULT 0,
                         views_count INTEGER DEFAULT 0
+                    )
+                    """)
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS tags (
+                        id SERIAL PRIMARY KEY,
+                        name VARCHAR(100) UNIQUE NOT NULL,
+                        description TEXT,
+                        color VARCHAR(7),
+                        created_at TIMESTAMP DEFAULT NOW()
                     )
                     """)
                 await conn.execute("""

@@ -4,6 +4,7 @@
 """
 import yaml
 import os
+import re
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 from pydantic import BaseModel, Field, model_validator
@@ -565,6 +566,102 @@ class McpPlatformConfig(BaseModel):
         return data
 
 
+class PluginConfig(BaseModel):
+    """Один HTTP-плагин из каталога (галерея плагинов)."""
+
+    id: str
+    display_name: str = ""
+    description: str = ""
+    enabled: bool = True
+    kind: str = "http"
+    category: str = ""
+    tags: List[str] = Field(default_factory=list)
+    base_url: str = ""
+    health_path: str = "/health"
+    invoke_path: str = "/audit"
+    timeout_seconds: int = 600
+    invoke_file_field: str = "model_file"
+    invoke_optional_file_field: str = "quality_file"
+    invoke_prompt_field: str = "prompt"
+
+
+class PluginsPlatformConfig(BaseModel):
+    """Каталог HTTP-плагинов (cash-flow и др.)."""
+
+    enabled: bool = True
+    catalog: List[PluginConfig] = Field(default_factory=list)
+
+    @staticmethod
+    def _normalize_catalog(raw: Any) -> list[dict]:
+        if raw is None:
+            return []
+        if isinstance(raw, list):
+            return [dict(item) for item in raw if isinstance(item, dict)]
+        if isinstance(raw, dict):
+            items: list[dict] = []
+            for pid, cfg in raw.items():
+                if isinstance(cfg, dict):
+                    item = dict(cfg)
+                elif cfg is None:
+                    item = {}
+                else:
+                    item = {"base_url": str(cfg)}
+                item.setdefault("id", str(pid))
+                items.append(item)
+            return items
+        return []
+
+    @staticmethod
+    def _env_timeout_seconds(plugin_id: str) -> Optional[int]:
+        """PLUGIN_<ID>_TIMEOUT_SECONDS, иначе PLUGINS_DEFAULT_TIMEOUT_SECONDS."""
+        keys = []
+        slug = re.sub(r"[^A-Za-z0-9]+", "_", plugin_id).strip("_").upper()
+        if slug:
+            keys.append(f"PLUGIN_{slug}_TIMEOUT_SECONDS")
+        keys.append("PLUGINS_DEFAULT_TIMEOUT_SECONDS")
+        for key in keys:
+            raw = os.getenv(key)
+            if raw is None:
+                continue
+            try:
+                value = int(str(raw).strip())
+            except ValueError:
+                continue
+            if value > 0:
+                return value
+        return None
+
+    @model_validator(mode="before")
+    @classmethod
+    def load_from_env(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            data = {}
+        env_enabled = os.getenv("PLUGINS_ENABLED")
+        if env_enabled is not None:
+            data["enabled"] = env_enabled.strip().lower() in ("1", "true", "yes", "on")
+        raw_catalog = data.get("catalog")
+        if raw_catalog is None:
+            raw_catalog = data.get("plugins")
+        if raw_catalog is None:
+            raw_catalog = data.get("items")
+        normalized = cls._normalize_catalog(raw_catalog)
+        for item in normalized:
+            sid = str(item.get("id") or "").strip()
+            item["id"] = sid
+            if not str(item.get("display_name") or "").strip():
+                item["display_name"] = sid.replace("-", " ").replace("_", " ").title()
+            tags = item.get("tags")
+            if isinstance(tags, str):
+                item["tags"] = [t.strip() for t in tags.split(",") if t.strip()]
+            elif not isinstance(tags, list):
+                item["tags"] = []
+            env_timeout = cls._env_timeout_seconds(sid)
+            if env_timeout is not None:
+                item["timeout_seconds"] = env_timeout
+        data["catalog"] = normalized
+        return data
+
+
 class UrlsConfig(BaseModel):
     """Конфигурация URL адресов
     Все значения должны быть заданы в YAML или ENV
@@ -576,6 +673,8 @@ class UrlsConfig(BaseModel):
     llm_service_port: str
     mcp_atlassian_service_port: Optional[str] = None
     mcp_atlassian_service_docker: Optional[str] = None
+    cash_flow_service_port: Optional[str] = None
+    cash_flow_service_docker: Optional[str] = None
     model_config = {"extra": "allow"}
     # =============== Когда будем подрубать остальные микросервисы, прочекать эти моменты ===============
     # llm_service_docker: Optional[str] = None
@@ -633,6 +732,7 @@ class Settings(BaseModel):
     llm_providers: List[Dict[str, Any]] = Field(default_factory=list)
     default_llm_provider: Optional[str] = None
     mcp: McpPlatformConfig = Field(default_factory=McpPlatformConfig)
+    plugins: PluginsPlatformConfig = Field(default_factory=PluginsPlatformConfig)
     coding_agent: CodingAgentConfig = Field(default_factory=CodingAgentConfig)
     image_generation: ImageGenerationConfig = Field(default_factory=ImageGenerationConfig)
     class Config:
@@ -642,7 +742,7 @@ class Settings(BaseModel):
         """Базовый URL микросервиса: в Docker — *_docker, с хоста — *_port (или fallback _docker)."""
         u = self.urls
         if _docker_runtime():
-            v = getattr(u, docker_field, None)
+            v = getattr(u, docker_field, None) or getattr(u, port_field, None)
         else:
             v = getattr(u, port_field, None) or getattr(u, docker_field, None)
         if not v or not str(v).strip():
@@ -667,6 +767,26 @@ class Settings(BaseModel):
         for srv in self.mcp.servers:
             if srv.id == sid:
                 return srv
+        return None
+
+    def resolve_plugin_base_url(self, plugin_id: str) -> str:
+        """Базовый URL плагина: base_url из конфига или urls.{id}_service_*."""
+        pid = str(plugin_id or "").strip()
+        if not pid:
+            raise ValueError("plugin_id обязателен")
+        for plugin in self.plugins.catalog:
+            if plugin.id == pid and str(plugin.base_url or "").strip():
+                return str(plugin.base_url).strip().rstrip("/")
+        key = pid.replace("-", "_")
+        if key == "cash_flow":
+            return self.microservice_http_base("cash_flow_service_docker", "cash_flow_service_port")
+        return self.microservice_http_base(f"{key}_service_docker", f"{key}_service_port")
+
+    def get_plugin_config(self, plugin_id: str) -> Optional[PluginConfig]:
+        pid = str(plugin_id or "").strip()
+        for plugin in self.plugins.catalog:
+            if plugin.id == pid:
+                return plugin
         return None
 
     @classmethod

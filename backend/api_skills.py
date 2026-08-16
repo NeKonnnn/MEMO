@@ -15,6 +15,7 @@ from backend.database.postgresql.skill_models import (
     SkillFilters,
     SkillListItem,
     SkillOut,
+    SkillRatingRequest,
     SkillShareEntry,
     SkillShareRequest,
     SkillSharesResponse,
@@ -171,6 +172,33 @@ async def create_skill(
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
+@router.get("/my/bookmarks", response_model=SkillsListResponse)
+async def get_my_bookmarks(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    page: Annotated[int, Query(ge=1)] = 1,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+):
+    """Закладки текущего пользователя (пагинация)."""
+    try:
+        repo = get_skill_repository()
+        bookmark_ids, total = await repo.get_user_bookmarks(
+            current_user["user_id"], limit=limit, offset=(page - 1) * limit
+        )
+        if not bookmark_ids:
+            return SkillsListResponse(items=[], total=0, page=page, pages=0)
+        items: List[SkillListItem] = []
+        admin = _is_admin(current_user)
+        for sid in bookmark_ids:
+            skill = await repo.get_skill_by_id(sid, current_user["user_id"], is_admin=admin)
+            if skill:
+                items.append(SkillListItem(**skill.model_dump(exclude={"content"})))
+        pages = (total + limit - 1) // limit if total else 0
+        return SkillsListResponse(items=items, total=total, page=page, pages=pages)
+    except Exception as e:
+        logger.exception("Ошибка get_my_bookmarks skills")
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
 @router.get("/id/{skill_id}", response_model=SkillOut)
 @router.get("/{skill_id}", response_model=SkillOut)
 async def get_skill(skill_id: str, current_user: Annotated[dict, Depends(get_current_user)]):
@@ -185,11 +213,106 @@ async def get_skill(skill_id: str, current_user: Annotated[dict, Depends(get_cur
             skill = await repo.get_skill_by_slug(skill_id, current_user["user_id"], is_admin=admin)
         if not skill:
             raise HTTPException(status_code=404, detail="Skill не найден")
+        await repo.increment_views(skill.id)
         return skill
     except HTTPException:
         raise
     except Exception as e:
         logger.exception("Ошибка get_skill")
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@router.post("/{skill_id}/rate", response_model=dict)
+async def rate_skill(
+    skill_id: int,
+    rating_request: SkillRatingRequest,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    """Оценка skill пользователем."""
+    try:
+        repo = get_skill_repository()
+        if not await repo.can_read(skill_id, current_user["user_id"], is_admin=_is_admin(current_user)):
+            raise HTTPException(status_code=404, detail="Skill не найден")
+        success = await repo.rate_skill(
+            skill_id=skill_id, user_id=current_user["user_id"], rating=rating_request.rating
+        )
+        if success:
+            return {"success": True, "message": "Оценка сохранена"}
+        raise HTTPException(status_code=404, detail="Skill не найден")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Ошибка rate_skill")
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@router.post("/{skill_id}/view", response_model=dict)
+async def view_skill(skill_id: int, current_user: Annotated[dict, Depends(get_current_user)]):
+    """Увеличить счётчик просмотров skill."""
+    try:
+        repo = get_skill_repository()
+        if not await repo.can_read(skill_id, current_user["user_id"], is_admin=_is_admin(current_user)):
+            raise HTTPException(status_code=404, detail="Skill не найден")
+        success = await repo.increment_views(skill_id)
+        if success:
+            return {"success": True, "message": "Просмотр учтён"}
+        raise HTTPException(status_code=404, detail="Skill не найден")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Ошибка view_skill")
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@router.post("/{skill_id}/use", response_model=dict)
+async def use_skill(skill_id: int, current_user: Annotated[dict, Depends(get_current_user)]):
+    """Увеличить счётчик использований skill."""
+    try:
+        repo = get_skill_repository()
+        if not await repo.can_read(skill_id, current_user["user_id"], is_admin=_is_admin(current_user)):
+            raise HTTPException(status_code=404, detail="Skill не найден")
+        success = await repo.increment_usage(skill_id)
+        if success:
+            return {"success": True, "message": "Использование учтено"}
+        raise HTTPException(status_code=404, detail="Skill не найден")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Ошибка use_skill")
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@router.post("/{skill_id}/bookmark", response_model=dict)
+async def add_bookmark(skill_id: int, current_user: Annotated[dict, Depends(get_current_user)]):
+    """Добавить skill в закладки."""
+    try:
+        repo = get_skill_repository()
+        if not await repo.can_read(skill_id, current_user["user_id"], is_admin=_is_admin(current_user)):
+            raise HTTPException(status_code=404, detail="Skill не найден")
+        success = await repo.add_bookmark(skill_id, current_user["user_id"])
+        if success:
+            return {"success": True, "message": "Добавлено в закладки"}
+        raise HTTPException(status_code=404, detail="Skill не найден")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Ошибка add_bookmark skill")
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@router.delete("/{skill_id}/bookmark", response_model=dict)
+async def remove_bookmark(skill_id: int, current_user: Annotated[dict, Depends(get_current_user)]):
+    """Удалить skill из закладок."""
+    try:
+        repo = get_skill_repository()
+        success = await repo.remove_bookmark(skill_id, current_user["user_id"])
+        if success:
+            return {"success": True, "message": "Удалено из закладок"}
+        raise HTTPException(status_code=404, detail="Skill не найден")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Ошибка remove_bookmark skill")
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 

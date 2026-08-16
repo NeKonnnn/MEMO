@@ -81,6 +81,8 @@ def _row_common(row) -> Dict[str, Any]:
         "author_name": row["author_name"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
+        "views_count": int(_get("views_count") or 0),
+        "usage_count": int(_get("usage_count") or 0),
     }
 
 
@@ -112,6 +114,8 @@ class SkillRepository:
                         category VARCHAR(100),
                         version INTEGER DEFAULT 1,
                         file_count INTEGER DEFAULT 0,
+                        views_count INTEGER DEFAULT 0,
+                        usage_count INTEGER DEFAULT 0,
                         author_id VARCHAR(100) NOT NULL,
                         author_name VARCHAR(255) NOT NULL,
                         created_at TIMESTAMP DEFAULT NOW(),
@@ -129,6 +133,8 @@ class SkillRepository:
                     "ALTER TABLE skills ADD COLUMN IF NOT EXISTS category VARCHAR(100)",
                     "ALTER TABLE skills ADD COLUMN IF NOT EXISTS version INTEGER DEFAULT 1",
                     "ALTER TABLE skills ADD COLUMN IF NOT EXISTS file_count INTEGER DEFAULT 0",
+                    "ALTER TABLE skills ADD COLUMN IF NOT EXISTS views_count INTEGER DEFAULT 0",
+                    "ALTER TABLE skills ADD COLUMN IF NOT EXISTS usage_count INTEGER DEFAULT 0",
                 ):
                     await conn.execute(stmt)
 
@@ -164,6 +170,30 @@ class SkillRepository:
                     )
                     """
                 )
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS skill_ratings (
+                        id SERIAL PRIMARY KEY,
+                        skill_id INTEGER REFERENCES skills(id) ON DELETE CASCADE,
+                        user_id VARCHAR(100) NOT NULL,
+                        rating INTEGER CHECK (rating >= 1 AND rating <= 5),
+                        created_at TIMESTAMP DEFAULT NOW(),
+                        updated_at TIMESTAMP DEFAULT NOW(),
+                        UNIQUE(skill_id, user_id)
+                    )
+                    """
+                )
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS skill_bookmarks (
+                        id SERIAL PRIMARY KEY,
+                        skill_id INTEGER REFERENCES skills(id) ON DELETE CASCADE,
+                        user_id VARCHAR(100) NOT NULL,
+                        created_at TIMESTAMP DEFAULT NOW(),
+                        UNIQUE(skill_id, user_id)
+                    )
+                    """
+                )
                 await conn.execute("CREATE INDEX IF NOT EXISTS idx_skills_author ON skills(author_id)")
                 await conn.execute("CREATE INDEX IF NOT EXISTS idx_skills_slug ON skills(slug)")
                 await conn.execute("CREATE INDEX IF NOT EXISTS idx_skills_updated ON skills(updated_at DESC)")
@@ -174,6 +204,8 @@ class SkillRepository:
                 )
                 await conn.execute("CREATE INDEX IF NOT EXISTS idx_skill_shares_skill ON skill_shares(skill_id)")
                 await conn.execute("CREATE INDEX IF NOT EXISTS idx_skill_files_skill ON skill_files(skill_id)")
+                await conn.execute("CREATE INDEX IF NOT EXISTS idx_skill_ratings_skill ON skill_ratings(skill_id)")
+                await conn.execute("CREATE INDEX IF NOT EXISTS idx_skill_bookmarks_user ON skill_bookmarks(user_id)")
                 logger.info("Таблицы skills / skill_files созданы")
         except Exception:
             logger.exception("Ошибка при создании таблиц skills")
@@ -187,9 +219,17 @@ class SkillRepository:
         is_shared_with_me: bool = False,
         my_permission: Optional[str] = None,
         write_access: bool = False,
+        average_rating: float = 0.0,
+        total_votes: int = 0,
+        user_rating: Optional[int] = None,
+        is_bookmarked: bool = False,
     ) -> Union[SkillOut, SkillListItem]:
         base = {
             **_row_common(row),
+            "average_rating": float(average_rating or 0.0),
+            "total_votes": int(total_votes or 0),
+            "user_rating": user_rating,
+            "is_bookmarked": bool(is_bookmarked),
             "is_shared_with_me": is_shared_with_me,
             "my_permission": my_permission,
             "write_access": write_access,
@@ -359,12 +399,58 @@ class SkillRepository:
         else:
             return None
 
+        average_rating = 0.0
+        total_votes = 0
+        user_rating = None
+        is_bookmarked = False
+        try:
+            async with await self.db_connection.acquire() as conn:
+                stats = await conn.fetchrow(
+                    """
+                    SELECT
+                        COALESCE(AVG(rating), 0) AS average_rating,
+                        COUNT(id) AS total_votes
+                    FROM skill_ratings
+                    WHERE skill_id = $1
+                    """,
+                    row["id"],
+                )
+                if stats:
+                    average_rating = float(stats["average_rating"] or 0)
+                    total_votes = int(stats["total_votes"] or 0)
+                if uid:
+                    rating_row = await conn.fetchrow(
+                        """
+                        SELECT rating FROM skill_ratings
+                        WHERE skill_id = $1 AND LOWER(TRIM(user_id)) = LOWER(TRIM($2))
+                        """,
+                        row["id"],
+                        uid,
+                    )
+                    if rating_row:
+                        user_rating = rating_row["rating"]
+                    bookmark_row = await conn.fetchrow(
+                        """
+                        SELECT id FROM skill_bookmarks
+                        WHERE skill_id = $1 AND LOWER(TRIM(user_id)) = LOWER(TRIM($2))
+                        """,
+                        row["id"],
+                        uid,
+                    )
+                    is_bookmarked = bookmark_row is not None
+        except Exception:
+            logger.exception("Ошибка обогащения skill рейтингом/закладками")
+
         return self._row_to_out(
             row,
             include_content=include_content,
             is_shared_with_me=is_shared,
             my_permission=my_permission,
             write_access=write_access,
+            average_rating=average_rating,
+            total_votes=total_votes,
+            user_rating=user_rating,
+            is_bookmarked=is_bookmarked,
         )
 
     async def list_skills(
@@ -399,6 +485,9 @@ class SkillRepository:
                     )
                     params.append(uid)
                     idx += 1
+                elif view == "public":
+                    # Как галерея агентов: только опубликованные
+                    where.append("s.is_public = true")
                 else:
                     where.append(
                         f"""(
@@ -864,3 +953,153 @@ class SkillRepository:
         except Exception:
             logger.exception("Ошибка delete_skill_file")
             return False
+
+    async def rate_skill(self, skill_id: int, user_id: str, rating: int) -> bool:
+        """Оценка skill пользователем (1–5)."""
+        try:
+            user_id = user_id.strip().lower() if user_id else user_id
+            if rating < 1 or rating > 5:
+                return False
+            async with await self.db_connection.acquire() as conn:
+                exists = await conn.fetchval("SELECT EXISTS(SELECT 1 FROM skills WHERE id = $1)", skill_id)
+                if not exists:
+                    logger.warning(f"Попытка оценить несуществующий skill: {skill_id}")
+                    return False
+                existing = await conn.fetchrow(
+                    """
+                    SELECT rating, id FROM skill_ratings
+                    WHERE skill_id = $1 AND LOWER(TRIM(user_id)) = LOWER(TRIM($2))
+                    """,
+                    skill_id,
+                    user_id,
+                )
+                if existing:
+                    await conn.execute(
+                        """
+                        UPDATE skill_ratings
+                        SET rating = $1, updated_at = NOW()
+                        WHERE skill_id = $2 AND LOWER(TRIM(user_id)) = LOWER(TRIM($3))
+                        """,
+                        rating,
+                        skill_id,
+                        user_id,
+                    )
+                else:
+                    await conn.execute(
+                        """
+                        INSERT INTO skill_ratings (skill_id, user_id, rating)
+                        VALUES ($1, $2, $3)
+                        """,
+                        skill_id,
+                        user_id,
+                        rating,
+                    )
+                return True
+        except Exception:
+            logger.exception("Ошибка rate_skill")
+            return False
+
+    async def increment_views(self, skill_id: int) -> bool:
+        """Увеличить счётчик просмотров."""
+        try:
+            async with await self.db_connection.acquire() as conn:
+                result = await conn.execute(
+                    """
+                    UPDATE skills SET views_count = COALESCE(views_count, 0) + 1
+                    WHERE id = $1
+                    """,
+                    skill_id,
+                )
+                return result != "UPDATE 0"
+        except Exception:
+            logger.exception("Ошибка increment_views skill")
+            return False
+
+    async def increment_usage(self, skill_id: int) -> bool:
+        """Увеличить счётчик использований."""
+        try:
+            async with await self.db_connection.acquire() as conn:
+                result = await conn.execute(
+                    """
+                    UPDATE skills SET usage_count = COALESCE(usage_count, 0) + 1
+                    WHERE id = $1
+                    """,
+                    skill_id,
+                )
+                return result != "UPDATE 0"
+        except Exception:
+            logger.exception("Ошибка increment_usage skill")
+            return False
+
+    async def add_bookmark(self, skill_id: int, user_id: str) -> bool:
+        """Добавить skill в закладки."""
+        try:
+            user_id = user_id.strip().lower() if user_id else user_id
+            async with await self.db_connection.acquire() as conn:
+                exists = await conn.fetchval("SELECT EXISTS(SELECT 1 FROM skills WHERE id = $1)", skill_id)
+                if not exists:
+                    logger.warning(f"Попытка добавить в закладки несуществующий skill: {skill_id}")
+                    return False
+                await conn.execute(
+                    """
+                    INSERT INTO skill_bookmarks (skill_id, user_id)
+                    VALUES ($1, $2)
+                    ON CONFLICT (skill_id, user_id) DO NOTHING
+                    """,
+                    skill_id,
+                    user_id,
+                )
+                return True
+        except Exception:
+            logger.exception("Ошибка add_bookmark skill")
+            return False
+
+    async def remove_bookmark(self, skill_id: int, user_id: str) -> bool:
+        """Удалить skill из закладок."""
+        try:
+            user_id = user_id.strip().lower() if user_id else user_id
+            async with await self.db_connection.acquire() as conn:
+                await conn.execute(
+                    """
+                    DELETE FROM skill_bookmarks
+                    WHERE skill_id = $1 AND LOWER(TRIM(user_id)) = LOWER(TRIM($2))
+                    """,
+                    skill_id,
+                    user_id,
+                )
+                return True
+        except Exception:
+            logger.exception("Ошибка remove_bookmark skill")
+            return False
+
+    async def get_user_bookmarks(
+        self, user_id: str, limit: int = 100, offset: int = 0
+    ) -> Tuple[List[int], int]:
+        """Список ID skills в закладках пользователя."""
+        try:
+            user_id = user_id.strip().lower() if user_id else user_id
+            async with await self.db_connection.acquire() as conn:
+                rows = await conn.fetch(
+                    """
+                    SELECT skill_id
+                    FROM skill_bookmarks
+                    WHERE LOWER(TRIM(user_id)) = LOWER(TRIM($1))
+                    ORDER BY created_at DESC
+                    LIMIT $2 OFFSET $3
+                    """,
+                    user_id,
+                    limit,
+                    offset,
+                )
+                total = await conn.fetchval(
+                    """
+                    SELECT COUNT(*)
+                    FROM skill_bookmarks
+                    WHERE LOWER(TRIM(user_id)) = LOWER(TRIM($1))
+                    """,
+                    user_id,
+                )
+                return ([row["skill_id"] for row in rows], int(total or 0))
+        except Exception:
+            logger.exception("Ошибка get_user_bookmarks skill")
+            return ([], 0)
