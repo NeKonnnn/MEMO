@@ -459,7 +459,7 @@ export default function ModelsSettings() {
             onChange={setModelSettings}
             maxValues={maxValues}
             accordion
-            darkPanel={false}
+            darkPanel={isDarkMode}
           />
 
           <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap', ...MODEL_SETTINGS_RESET_BUTTON_SX }}>

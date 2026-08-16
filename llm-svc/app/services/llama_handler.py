@@ -304,18 +304,50 @@ class LlamaHandler(BaseLLMHandler):
                 "max_tokens": max_tokens,
                 "stream": stream,
             }
-            if enable_thinking is not None:
+            if enable_thinking is None:
+                return llama.create_chat_completion(**kwargs)
+
+            # llama-cpp-python 0.3.x: create_chat_completion НЕ принимает enable_thinking
+            # и не пробрасывает **kwargs. Но chat handler / Jinja-шаблон — да.
+            # У Qwen3.5 в tokenizer.chat_template мышление только при
+            # `enable_thinking is true` (не как у старого Qwen3).
+            thinking_flag = bool(enable_thinking)
+            try:
+                params = inspect.signature(llama.create_chat_completion).parameters
+                if "enable_thinking" in params or any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+                ):
+                    kwargs["enable_thinking"] = thinking_flag
+                    return llama.create_chat_completion(**kwargs)
+            except (TypeError, ValueError):
+                pass
+
+            handler = getattr(llama, "chat_handler", None)
+            if handler is None:
                 try:
-                    params = inspect.signature(llama.create_chat_completion).parameters
-                    if "enable_thinking" in params:
-                        kwargs["enable_thinking"] = bool(enable_thinking)
-                    else:
-                        logger.debug(
-                            "enable_thinking=%r ignored: llama-cpp-python does not support this kwarg",
-                            enable_thinking,
-                        )
-                except (TypeError, ValueError):
-                    pass
+                    from llama_cpp import llama_chat_format
+
+                    chat_format = getattr(llama, "chat_format", None)
+                    handlers = getattr(llama, "_chat_handlers", None) or {}
+                    handler = handlers.get(chat_format) if chat_format else None
+                    if handler is None and chat_format:
+                        handler = llama_chat_format.get_chat_completion_handler(chat_format)
+                except Exception as exc:
+                    logger.debug("resolve chat_handler failed: %s", exc)
+                    handler = None
+
+            if handler is not None:
+                logger.info(
+                    "Passing enable_thinking=%r via chat_handler (template kwargs)",
+                    thinking_flag,
+                )
+                return handler(llama=llama, enable_thinking=thinking_flag, **kwargs)
+
+            logger.warning(
+                "enable_thinking=%r ignored: create_chat_completion and chat_handler "
+                "cannot receive this template kwarg",
+                thinking_flag,
+            )
             return llama.create_chat_completion(**kwargs)
 
         return await self._run_in_executor(lambda: create_completion(convert_to_dict_messages))
