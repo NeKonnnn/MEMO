@@ -3,14 +3,15 @@ import {
   Box,
   Button,
   IconButton,
-  Stack,
-  TextField,
-  Typography,
   List,
   ListItem,
   ListItemText,
+  Stack,
+  TextField,
+  Tooltip,
+  Typography,
 } from '@mui/material';
-import { Delete as DeleteIcon } from '@mui/icons-material';
+import { Delete as DeleteIcon, HelpOutline as HelpOutlineIcon } from '@mui/icons-material';
 import { getApiUrl, API_ENDPOINTS } from '../../config/api';
 
 interface SkillFileRow {
@@ -24,6 +25,51 @@ interface SkillFilesEditorProps {
   skillId: number;
   token: string;
   canWrite: boolean;
+}
+
+/** Заголовок раздела — как «Документы агента» в конструкторе. */
+function SectionHeader({
+  children,
+  help,
+  helpAriaLabel,
+}: {
+  children: React.ReactNode;
+  help?: React.ReactNode;
+  helpAriaLabel?: string;
+}) {
+  return (
+    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+      <Typography
+        variant="caption"
+        sx={{
+          color: 'inherit',
+          opacity: 0.65,
+          fontWeight: 600,
+          textTransform: 'uppercase',
+          letterSpacing: '0.06em',
+          fontSize: '0.7rem',
+        }}
+      >
+        {children}
+      </Typography>
+      {help ? (
+        <Tooltip title={help} arrow placement="top">
+          <IconButton
+            size="small"
+            aria-label={helpAriaLabel || 'Справка'}
+            sx={{
+              p: 0.25,
+              color: 'inherit',
+              opacity: 0.45,
+              '&:hover': { opacity: 0.75, bgcolor: 'transparent' },
+            }}
+          >
+            <HelpOutlineIcon sx={{ fontSize: 14 }} />
+          </IconButton>
+        </Tooltip>
+      ) : null}
+    </Box>
+  );
 }
 
 export default function SkillFilesEditor({ skillId, token, canWrite }: SkillFilesEditorProps) {
@@ -81,14 +127,25 @@ export default function SkillFilesEditor({ skillId, token, canWrite }: SkillFile
 
   return (
     <Box sx={{ borderTop: 1, borderColor: 'divider', pt: 2 }}>
-      <Typography variant="subtitle2" gutterBottom>
-        Вложенные файлы (scripts / references / assets)
-      </Typography>
-      <Typography variant="caption" color="text.secondary" display="block" mb={1}>
-        Дополнительные материалы skill: скрипты, справки и ресурсы. Основной текст — в поле
-        «Текст / SKILL.md» выше.
-      </Typography>
-      <List dense>
+      <SectionHeader
+        helpAriaLabel="Справка: вложенные файлы"
+        help={
+          <Box sx={{ maxWidth: 300 }}>
+            <Typography variant="subtitle2" fontWeight={600} sx={{ mb: 0.5 }}>
+              Вложенные файлы
+            </Typography>
+            <Typography variant="body2" sx={{ opacity: 0.95 }}>
+              Дополнительные материалы skill: скрипты, справки и ресурсы (scripts / references /
+              assets). Основной текст инструкций задаётся в поле «Текст / SKILL.md» выше — сюда
+              кладут сопутствующие файлы, на которые skill может ссылаться.
+            </Typography>
+          </Box>
+        }
+      >
+        Вложенные файлы
+      </SectionHeader>
+
+      <List dense sx={{ mt: 0.5 }}>
         {files.map((f) => (
           <ListItem
             key={f.id}
@@ -119,13 +176,44 @@ export default function SkillFilesEditor({ skillId, token, canWrite }: SkillFile
       </List>
       {canWrite && (
         <Stack gap={1} mt={1}>
-          <TextField
-            size="small"
-            label="Относительный путь"
-            value={path}
-            onChange={(e) => setPath(e.target.value)}
-            helperText="Например: scripts/run.sh или references/api.md"
-          />
+          <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 0.5 }}>
+            <TextField
+              size="small"
+              label="Относительный путь"
+              value={path}
+              onChange={(e) => setPath(e.target.value)}
+              fullWidth
+            />
+            <Tooltip
+              arrow
+              placement="top"
+              title={
+                <Box sx={{ maxWidth: 280 }}>
+                  <Typography variant="subtitle2" fontWeight={600} sx={{ mb: 0.5 }}>
+                    Относительный путь
+                  </Typography>
+                  <Typography variant="body2" sx={{ opacity: 0.95 }}>
+                    Путь файла внутри skill. Обычно начинают с scripts/, references/ или assets/
+                    — например scripts/run.sh или references/api.md.
+                  </Typography>
+                </Box>
+              }
+            >
+              <IconButton
+                size="small"
+                aria-label="Справка: относительный путь"
+                sx={{
+                  mt: 0.75,
+                  p: 0.35,
+                  color: 'inherit',
+                  opacity: 0.45,
+                  '&:hover': { opacity: 0.75, bgcolor: 'transparent' },
+                }}
+              >
+                <HelpOutlineIcon sx={{ fontSize: 16 }} />
+              </IconButton>
+            </Tooltip>
+          </Box>
           <TextField
             size="small"
             label="Содержимое файла"

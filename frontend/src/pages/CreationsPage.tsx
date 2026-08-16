@@ -3,6 +3,7 @@ import { Box, useTheme } from '@mui/material';
 import CreationsGallery from '../components/CreationsGallery';
 import { getWorkZoneBackgroundColor } from '../constants/workZoneBackground';
 import { useWorkZoneBgMode } from '../hooks/useWorkZoneBgMode';
+import { SIDEBAR_HIDE_SCROLLBAR_SX } from '../constants/menuStyles';
 
 export default function CreationsPage() {
   const theme = useTheme();
@@ -21,6 +22,7 @@ export default function CreationsPage() {
         pb: 3,
         backgroundColor: workZoneBgColor,
         color: isDarkMode ? 'white' : '#333',
+        ...SIDEBAR_HIDE_SCROLLBAR_SX,
       }}
     >
       <Box sx={{ maxWidth: 1200, mx: 'auto' }}>

@@ -12,8 +12,10 @@ import {
   Checkbox,
   CircularProgress,
   FormControlLabel,
+  IconButton,
   Popover,
   TextField,
+  Tooltip,
   Typography,
   useTheme,
 } from '@mui/material';
@@ -22,6 +24,7 @@ import {
   ExpandMore as ExpandMoreIcon,
   FileDownload as ExportIcon,
   FileUpload as ImportIcon,
+  HelpOutline as HelpOutlineIcon,
   Public as PublicIcon,
   PublicOff as PublicOffIcon,
   Save as SaveIcon,
@@ -48,6 +51,7 @@ import {
 } from '../../constants/sidebarPanelColor';
 import {
   getActiveSkillIds,
+  renameActiveSkillSlug,
   SKILL_SELECTION_CHANGED_EVENT,
   toggleActiveSkill,
 } from '../../utils/skillSelectionStorage';
@@ -103,6 +107,38 @@ const emptyForm = {
 
 interface SkillsSidebarPanelProps {
   isOpen?: boolean;
+}
+
+/** Подпись поля + «?» со всплывающей подсказкой (как «Стратегия поиска» в RAG). */
+function FieldWithHelp({
+  children,
+  help,
+  ariaLabel,
+}: {
+  children: React.ReactNode;
+  help: React.ReactNode;
+  ariaLabel: string;
+}) {
+  return (
+    <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 0.5, width: '100%' }}>
+      <Box sx={{ flex: 1, minWidth: 0 }}>{children}</Box>
+      <Tooltip title={help} arrow placement="top">
+        <IconButton
+          size="small"
+          aria-label={ariaLabel}
+          sx={{
+            mt: 0.75,
+            p: 0.35,
+            color: 'inherit',
+            opacity: 0.45,
+            '&:hover': { opacity: 0.75, bgcolor: 'transparent' },
+          }}
+        >
+          <HelpOutlineIcon sx={{ fontSize: 16 }} />
+        </IconButton>
+      </Tooltip>
+    </Box>
+  );
 }
 
 export default function SkillsSidebarPanel({
@@ -220,6 +256,8 @@ export default function SkillsSidebarPanel({
   const [busyImportExport, setBusyImportExport] = useState(false);
   const [activeIds, setActiveIds] = useState<string[]>(() => getActiveSkillIds());
   const [loadingDetail, setLoadingDetail] = useState(false);
+  /** Slug на момент загрузки skill — чтобы обновить активный выбор при переименовании. */
+  const loadedSlugRef = useRef<string>('');
 
   const authHeaders = useCallback((): HeadersInit => {
     const h: HeadersInit = { 'Content-Type': 'application/json' };
@@ -261,6 +299,7 @@ export default function SkillsSidebarPanel({
     setForm(emptyForm);
     setSaveSuccess(false);
     setSaveError(null);
+    loadedSlugRef.current = '';
   }, []);
 
   const loadSkillDetail = useCallback(
@@ -294,6 +333,7 @@ export default function SkillsSidebarPanel({
           category: full.category || '',
           tags: (full.meta?.tags || []).join(', '),
         });
+        loadedSlugRef.current = full.slug || '';
       } catch (e) {
         showNotification('error', e instanceof Error ? e.message : 'Ошибка загрузки');
         resetToNew();
@@ -408,9 +448,23 @@ export default function SkillsSidebarPanel({
     setSaveSuccess(false);
     try {
       const rawSlug = form.slug.trim();
+      if (!rawSlug) {
+        const msg = 'Укажите служебное имя ($упоминание)';
+        setSaveError(msg);
+        setSaveSuccess(false);
+        showNotification('error', msg);
+        return;
+      }
       const slug = /^[a-z0-9][a-z0-9._-]*$/i.test(rawSlug)
         ? rawSlug.toLowerCase()
-        : slugifySkillName(form.name);
+        : slugifySkillName(rawSlug || form.name);
+      if (!slug) {
+        const msg = 'Служебное имя должно содержать латиницу, цифры или . _ -';
+        setSaveError(msg);
+        setSaveSuccess(false);
+        showNotification('error', msg);
+        return;
+      }
       const payload = {
         slug,
         name: form.name.trim(),
@@ -476,6 +530,17 @@ export default function SkillsSidebarPanel({
         category: saved.category || f.category,
         tags: (saved.meta?.tags || []).join(', ') || f.tags,
       }));
+      const finalSlug = saved.slug || slug;
+      if (isEdit && loadedSlugRef.current && loadedSlugRef.current !== finalSlug) {
+        setActiveIds(
+          renameActiveSkillSlug(
+            loadedSlugRef.current,
+            finalSlug,
+            saved.display_title || saved.name || form.display_title || form.name,
+          ),
+        );
+      }
+      loadedSlugRef.current = finalSlug;
       await loadSkills();
       notifySkillsChanged();
       setSaveSuccess(true);
@@ -829,18 +894,40 @@ export default function SkillsSidebarPanel({
               inputProps={{ maxLength: 128 }}
             />
 
-            <TextField
-              value={form.slug}
-              onChange={(e) => setForm((f) => ({ ...f, slug: slugifySkillName(e.target.value) }))}
-              label="Служебное имя ($упоминание)"
-              placeholder="my-skill"
-              helperText="В чате: $имя · только латиница, цифры, . _ -"
-              variant="outlined"
-              size="small"
-              fullWidth
-              disabled={readOnly || selectedSkillId !== 'new'}
-              sx={formFieldInputSx}
-            />
+            <FieldWithHelp
+              ariaLabel="Справка: служебное имя"
+              help={
+                <Box sx={{ maxWidth: 280 }}>
+                  <Typography variant="subtitle2" fontWeight={600} sx={{ mb: 0.5 }}>
+                    Служебное имя
+                  </Typography>
+                  <Typography variant="body2" sx={{ opacity: 0.95 }}>
+                    Технический идентификатор skill для вызова в чате через $имя (например $my-skill).
+                    Только латиница, цифры и символы . _ -. Сохраняется вместе со skill.
+                  </Typography>
+                </Box>
+              }
+            >
+              <TextField
+                value={form.slug}
+                onChange={(e) => {
+                  const next = e.target.value
+                    .toLowerCase()
+                    .replace(/\s+/g, '-')
+                    .replace(/[^a-z0-9._-]/g, '');
+                  setForm((f) => ({ ...f, slug: next.slice(0, 100) }));
+                }}
+                label="Служебное имя ($упоминание)"
+                placeholder="my-skill"
+                variant="outlined"
+                size="small"
+                fullWidth
+                // Редактируется и у новых, и у существующих skills (сохраняется в БД через PUT).
+                disabled={readOnly}
+                InputProps={{ readOnly: false }}
+                sx={formFieldInputSx}
+              />
+            </FieldWithHelp>
 
             <TextField
               value={form.description}
@@ -884,18 +971,33 @@ export default function SkillsSidebarPanel({
               sx={formFieldInputSx}
             />
 
-            <TextField
-              value={form.allowed_tools}
-              onChange={(e) => setForm((f) => ({ ...f, allowed_tools: e.target.value }))}
-              label="Разрешённые инструменты (через запятую)"
-              placeholder="tool-a, tool-b"
-              helperText="ID MCP/инструментов — объединяются при ручном вызове или «Всегда применять»"
-              variant="outlined"
-              size="small"
-              fullWidth
-              disabled={readOnly}
-              sx={formFieldInputSx}
-            />
+            <FieldWithHelp
+              ariaLabel="Справка: разрешённые инструменты"
+              help={
+                <Box sx={{ maxWidth: 300 }}>
+                  <Typography variant="subtitle2" fontWeight={600} sx={{ mb: 0.5 }}>
+                    Разрешённые инструменты
+                  </Typography>
+                  <Typography variant="body2" sx={{ opacity: 0.95 }}>
+                    ID MCP-серверов и инструментов через запятую. Они подмешиваются к skill при
+                    ручном вызове ($имя) или когда включено «Всегда применять» — модель сможет
+                    пользоваться только указанным набором.
+                  </Typography>
+                </Box>
+              }
+            >
+              <TextField
+                value={form.allowed_tools}
+                onChange={(e) => setForm((f) => ({ ...f, allowed_tools: e.target.value }))}
+                label="Разрешённые инструменты (через запятую)"
+                placeholder="tool-a, tool-b"
+                variant="outlined"
+                size="small"
+                fullWidth
+                disabled={readOnly}
+                sx={formFieldInputSx}
+              />
+            </FieldWithHelp>
 
             <TextField
               value={form.tags}

@@ -94,6 +94,34 @@ export function toggleActiveSkill(slug: string, enabled: boolean, name?: string)
   return next.map((r) => r.slug);
 }
 
+/** Если skill был активен под старым slug — перенести выбор на новый. */
+export function renameActiveSkillSlug(
+  oldSlug: string,
+  newSlug: string,
+  name?: string,
+): string[] {
+  const from = (oldSlug || '').trim();
+  const to = (newSlug || '').trim();
+  if (!from || !to || from === to) return getActiveSkillIds();
+  const current = getActiveSkillRefs();
+  if (!current.some((r) => r.slug === from)) return getActiveSkillIds();
+  const trimmed = (name || '').trim();
+  const next = current.map((r) => {
+    if (r.slug !== from) return r;
+    return trimmed ? { slug: to, name: trimmed } : { slug: to, name: r.name };
+  });
+  // убрать дубль, если newSlug уже был в списке
+  const seen = new Set<string>();
+  const deduped: ActiveSkillRef[] = [];
+  for (const r of next) {
+    if (seen.has(r.slug)) continue;
+    seen.add(r.slug);
+    deduped.push(r);
+  }
+  setActiveSkillRefs(deduped);
+  return deduped.map((r) => r.slug);
+}
+
 export function clearActiveSkills(): void {
   setActiveSkillRefs([]);
 }

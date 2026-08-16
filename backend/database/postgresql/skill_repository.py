@@ -568,8 +568,19 @@ class SkillRepository:
                 params: List[Any] = []
                 n = 1
                 if data.slug is not None:
+                    new_slug = slugify_skill_id(data.slug)
+                    if not new_slug:
+                        return None
+                    clash = await conn.fetchval(
+                        "SELECT id FROM skills WHERE LOWER(slug) = LOWER($1) AND id <> $2",
+                        new_slug,
+                        skill_id,
+                    )
+                    if clash is not None:
+                        logger.warning("Skill slug уже занят: %s", new_slug)
+                        raise ValueError(f"Служебное имя «{new_slug}» уже занято")
                     fields.append(f"slug = ${n}")
-                    params.append(slugify_skill_id(data.slug))
+                    params.append(new_slug)
                     n += 1
                 if data.name is not None:
                     fields.append(f"name = ${n}")
@@ -632,6 +643,8 @@ class SkillRepository:
                     *params,
                 )
             return await self.get_skill_by_id(skill_id, user_id=user_id, is_admin=is_admin)
+        except ValueError:
+            raise
         except Exception:
             logger.exception("Ошибка update_skill")
             return None
