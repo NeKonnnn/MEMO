@@ -41,6 +41,7 @@ import {
   Upload as UploadIcon,
   HubOutlined as GearMenuMcpIcon,
   Code as GearMenuCodingIcon,
+  ImageOutlined as GearMenuImageGenIcon,
   SmartToyOutlined as GearMenuAgentsIcon,
   ChevronLeft as ChevronLeftIcon,
   ChevronRight as ChevronRightIcon,
@@ -85,7 +86,13 @@ import ImageGenerationPlaceholder from '../components/ImageGenerationPlaceholder
 import ChatGearAgentsPanel from '../components/ChatGearAgentsPanel';
 import ChatGearMcpPanel from '../components/ChatGearMcpPanel';
 import ChatGearCodingPanel from '../components/ChatGearCodingPanel';
+import ChatGearGenerationPanel from '../components/ChatGearGenerationPanel';
 import { enableCodingFromGearPanel } from '../coding/selectionStorage';
+import {
+  isAnyGenerationModeEnabled,
+  isImageGenerationModeEnabled,
+  isVideoGenerationModeEnabled,
+} from '../imageGeneration/selectionStorage';
 import ChatGearSkillsPanel from '../components/ChatGearSkillsPanel';
 import VoiceChatDialog from '../components/VoiceChatDialog';
 import AgentSelector from '../components/AgentSelector';
@@ -720,6 +727,69 @@ const ReasoningBlock = React.memo(({
   );
 });
 
+function ChatImageGenerationIndicator({
+  leftAlignMessages,
+  widescreenMode,
+  startedAtMs,
+  mediaKind = 'image',
+}: {
+  isDarkMode: boolean;
+  leftAlignMessages: boolean;
+  widescreenMode: boolean;
+  startedAtMs?: number | null;
+  mediaKind?: 'image' | 'video';
+}) {
+  const elapsedSec = useElapsedSeconds(startedAtMs, true);
+  const timerLabel =
+    elapsedSec !== null && elapsedSec > 0 ? formatGenerationDuration(elapsedSec) : null;
+  const label = mediaKind === 'video' ? 'видео' : 'изображение';
+
+  return (
+    <Box
+      sx={{
+        width: '100%',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: leftAlignMessages ? 'flex-start' : 'flex-start',
+        mb: 1.5,
+      }}
+    >
+      <Box
+        sx={{
+          display: 'flex',
+          alignItems: 'center',
+          mb: 0.75,
+          width: '100%',
+          maxWidth: widescreenMode ? '100%' : '75%',
+        }}
+      >
+        <Avatar
+          src="/astra.png"
+          sx={{ width: 24, height: 24, mr: 1, bgcolor: 'transparent' }}
+        />
+        <Typography variant="caption" sx={{ opacity: 0.8, fontSize: '0.75rem', fontWeight: 500 }}>
+          AstraChat
+        </Typography>
+        <Typography
+          variant="caption"
+          sx={{
+            ml: 1,
+            opacity: 0.65,
+            fontSize: '0.7rem',
+            fontWeight: 500,
+            color: 'text.secondary',
+          }}
+        >
+          {timerLabel ? `генерирует ${label} ${timerLabel}` : `генерирует ${label}…`}
+        </Typography>
+      </Box>
+      <Box sx={{ width: '100%', maxWidth: widescreenMode ? 520 : 420 }}>
+        <ImageGenerationPlaceholder maxWidth="100%" />
+      </Box>
+    </Box>
+  );
+}
+
 const MessageCardComponent = ({
   message, index, isPairStart, isSelected, nextMessageId,
   shareMode, isSpeaking, isDarkMode, isLastChatMessage, interfaceSettings, username, dataRef,
@@ -779,14 +849,8 @@ const MessageCardComponent = ({
     () => (isUser ? undefined : getAssistantInlineAttachments(message)),
     [isUser, message],
   );
-  const showImageGenerationPlaceholder = Boolean(
-    !isUser &&
-      message.isImageGenerating &&
-      message.isStreaming &&
-      !assistantInlineAttachments?.length,
-  );
   const isReasoningStreaming = useMemo(() => {
-    if (message.isImageGenerating) return false;
+    if (message.isImageGenerating || message.isVideoGenerating) return false;
     // Пока сообщение стримится и есть блок рассуждений — держим «Думает» над ответом.
     // Не ждём пустого visibleContent: иначе после первых токенов ответа заголовок
     // пропадает/меняется, и кажется, что «Думает» оказалось «под» ответом.
@@ -796,6 +860,7 @@ const MessageCardComponent = ({
     );
   }, [
     message.isImageGenerating,
+    message.isVideoGenerating,
     parsedMessage.isThinkingStreaming,
     parsedMessage.reasoningContent,
     message.isStreaming,
@@ -1005,18 +1070,13 @@ const MessageCardComponent = ({
           <McpToolCallsPanel toolCalls={message.mcpToolCalls} />
         )}
 
-        {showImageGenerationPlaceholder ? (
-          <Box sx={{ mb: parsedMessage.visibleContent.trim() ? 1 : 0 }}>
-            <ImageGenerationPlaceholder />
-          </Box>
-        ) : null}
-
         {!isUser && assistantInlineAttachments && assistantInlineAttachments.length > 0 && (
           <InlineAttachmentsList
             files={assistantInlineAttachments.map((a) => ({
               name: a.name,
               contentType: a.contentType,
               imageSrc: a.contentType === 'image' ? a.preview : undefined,
+              videoSrc: a.contentType === 'video' ? a.preview : undefined,
               size: a.size,
             }))}
             isDarkMode={isDarkMode}
@@ -1033,6 +1093,7 @@ const MessageCardComponent = ({
               name: a.name,
               contentType: a.contentType,
               imageSrc: a.contentType === 'image' ? a.preview : undefined,
+              videoSrc: a.contentType === 'video' ? a.preview : undefined,
               size: a.size,
             }))}
             isDarkMode={isDarkMode}
@@ -1369,7 +1430,7 @@ const MessageCardComponent = ({
                 isDarkMode={isDarkMode}
               />
             ) : null}
-            {!showImageGenerationPlaceholder || parsedMessage.visibleContent.trim() ? (
+            {parsedMessage.visibleContent.trim() ? (
               <MessageRenderer
                 content={parsedMessage.visibleContent}
                 isStreaming={message.isStreaming && !isReasoningStreaming}
@@ -1717,9 +1778,16 @@ export default function UnifiedChatPage({
   const [showDocumentDialog, setShowDocumentDialog] = useState(false);
   const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
   /** Раскрытый подпункт меню «Инструменты» (колонка справа, как в LeChat). */
-  const [gearToolsPanel, setGearToolsPanel] = useState<'main' | 'agents' | 'skills' | 'mcp' | 'coding' | 'model-mode'>('main');
+  const [gearToolsPanel, setGearToolsPanel] = useState<
+    'main' | 'agents' | 'skills' | 'mcp' | 'coding' | 'generation' | 'model-mode'
+  >('main');
   const gearSubPanelOpen =
-    gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding';
+    gearToolsPanel === 'agents'
+    || gearToolsPanel === 'skills'
+    || gearToolsPanel === 'model-mode'
+    || gearToolsPanel === 'mcp'
+    || gearToolsPanel === 'coding'
+    || gearToolsPanel === 'generation';
   const [modelThinkingMode, setModelThinkingMode] = useState<ModelThinkingMode>(() => {
     const saved = (localStorage.getItem(MODEL_THINKING_MODE_STORAGE_KEY) || 'fast') as ModelThinkingMode;
     return saved === 'auto' || saved === 'thinking' || saved === 'fast' ? saved : 'fast';
@@ -2017,7 +2085,34 @@ export default function UnifiedChatPage({
     return () => window.removeEventListener('agentSelected', onAgentSelected);
   }, [state.currentChatId]);
 
-  const ensureModelSelectedForSend = useCallback((): boolean => {
+  const [imageGenModeOn, setImageGenModeOn] = useState(() => isImageGenerationModeEnabled(currentChat?.id));
+  const [videoGenModeOn, setVideoGenModeOn] = useState(() => isVideoGenerationModeEnabled(currentChat?.id));
+  const generationModeOn = imageGenModeOn || videoGenModeOn;
+
+  useEffect(() => {
+    setImageGenModeOn(isImageGenerationModeEnabled(currentChat?.id));
+    setVideoGenModeOn(isVideoGenerationModeEnabled(currentChat?.id));
+  }, [currentChat?.id]);
+
+  useEffect(() => {
+    const sync = () => {
+      setImageGenModeOn(isImageGenerationModeEnabled(currentChat?.id));
+      setVideoGenModeOn(isVideoGenerationModeEnabled(currentChat?.id));
+    };
+    window.addEventListener('astrachatGenerationModeChanged', sync);
+    window.addEventListener('astrachatImageGenModeChanged', sync);
+    window.addEventListener('astrachatVideoGenModeChanged', sync);
+    return () => {
+      window.removeEventListener('astrachatGenerationModeChanged', sync);
+      window.removeEventListener('astrachatImageGenModeChanged', sync);
+      window.removeEventListener('astrachatVideoGenModeChanged', sync);
+    };
+  }, [currentChat?.id]);
+
+  const ensureModelSelectedForSend = useCallback((message?: string): boolean => {
+    if (isAnyGenerationModeEnabled(currentChat?.id)) {
+      return Boolean((message || '').trim());
+    }
     const rawAgentId = localStorage.getItem('active_agent_id');
     const parsedAgentId = rawAgentId ? parseInt(rawAgentId, 10) : NaN;
     if (Number.isFinite(parsedAgentId)) {
@@ -2029,7 +2124,7 @@ export default function UnifiedChatPage({
     }
     setModelErrorBanner('Модель не выбрана! Пожалуйста, выберите модель');
     return false;
-  }, []);
+  }, [currentChat?.id]);
 
   // Стабильный обработчик для MessageRenderer (НЕ меняется при ререндерах!)
   const handleSendMessageFromRendererRef = useRef<((prompt: string) => void) | null>(null);
@@ -2038,7 +2133,7 @@ export default function UnifiedChatPage({
   // Обновляем ref при изменении зависимостей, но НЕ создаем новую функцию
   useEffect(() => {
     handleSendMessageFromRendererRef.current = (prompt: string) => {
-      if (!ensureModelSelectedForSend()) {
+      if (!ensureModelSelectedForSend(prompt)) {
         return;
       }
       if (currentChat && isConnected && !currentChatLoading) {
@@ -2136,8 +2231,8 @@ export default function UnifiedChatPage({
   const chatAwaitingTokens = useMemo(() => {
     if (!currentChatLoading || hasRunningMcpTools) return false;
     if (!lastStreamingAssistant) return true;
-    // Генерация картинки: в пузыре уже ImageGenerationPlaceholder — не дублируем «думает...»
-    if (lastStreamingAssistant.isImageGenerating) return false;
+    // Генерация картинки: пустой пузырь скрыт, анимация — в ChatImageGenerationIndicator снизу.
+    if (lastStreamingAssistant.isImageGenerating || lastStreamingAssistant.isVideoGenerating) return false;
     // Смотрим и content, и активный alternativeResponses[index]
     // (при перегенерации UI читает пустой слот, content тоже обнулён).
     const visible = getStreamingAssistantVisibleContent(lastStreamingAssistant);
@@ -2194,7 +2289,10 @@ export default function UnifiedChatPage({
     if (isMultiLlmMode && !multiLlmHasSelection) {
       return 'Выберите модели для сравнения (до 4, хотя бы одну)';
     }
+    if (lastStreamingAssistant?.isVideoGenerating) return 'Генерация видео…';
     if (lastStreamingAssistant?.isImageGenerating) return 'Генерация изображения…';
+    if (videoGenModeOn) return 'Опишите видео — текст сообщения станет промптом';
+    if (imageGenModeOn) return 'Опишите изображение — текст сообщения станет промптом';
     if (chatAwaitingTokens) {
       return chainThinkingName ? `${chainThinkingName} думает...` : 'astrachat думает...';
     }
@@ -2208,6 +2306,9 @@ export default function UnifiedChatPage({
     multiLlmHasSelection,
     chatAwaitingTokens,
     lastStreamingAssistant?.isImageGenerating,
+    lastStreamingAssistant?.isVideoGenerating,
+    imageGenModeOn,
+    videoGenModeOn,
     chainThinkingName,
   ]);
   const socketBlocksChatInput = !isConnected && !isConnecting && !token;
@@ -2232,6 +2333,17 @@ export default function UnifiedChatPage({
     }
   }, []);
 
+  const handleOpenGenerationGearPanel = useCallback(() => {
+    const shell = chatInputToolsAnchorRef.current;
+    if (shell) {
+      setGearToolsPanel('generation');
+      setAnchorEl(shell);
+      const rect = shell.getBoundingClientRect();
+      setGearToolsMenuWidthPx(Math.round(rect.width));
+      setGearToolsPaperHeightPx(getChatGearMenuPaperHeightPx(rect.top));
+    }
+  }, []);
+
   const handleClearMyAgent = useCallback(() => {
     clearActiveAgent();
     showNotification('info', 'Агент снят');
@@ -2248,6 +2360,9 @@ export default function UnifiedChatPage({
         isDarkMode={isDarkMode}
         libraryActive={useKbRag}
         onLibraryToggle={toggleKbRag}
+        generationImageActive={imageGenModeOn}
+        generationVideoActive={videoGenModeOn}
+        onGenerationClick={handleOpenGenerationGearPanel}
         myAgentName={myAgentSelection?.name ?? null}
         onAgentToggle={myAgentSelection?.name ? handleClearMyAgent : undefined}
         activeSkills={activeSkills}
@@ -2260,6 +2375,9 @@ export default function UnifiedChatPage({
       isDarkMode,
       useKbRag,
       toggleKbRag,
+      imageGenModeOn,
+      videoGenModeOn,
+      handleOpenGenerationGearPanel,
       myAgentSelection?.name,
       handleClearMyAgent,
       activeSkills,
@@ -2796,7 +2914,7 @@ export default function UnifiedChatPage({
     if ((!inputMessage.trim() && inlineAttachments.length === 0) || currentChatLoading) {
       return;
     }
-    if (!ensureModelSelectedForSend()) {
+    if (!ensureModelSelectedForSend(inputMessage.trim())) {
       return;
     }
     if (!isConnected && !isConnecting) {
@@ -4366,6 +4484,15 @@ export default function UnifiedChatPage({
               px: interfaceSettings.widescreenMode ? 4 : 2,
             }}>
               {messages.map((message, index) => {
+                const isMediaGenStreamingPlaceholder =
+                  message.role === 'assistant' &&
+                  (message.isImageGenerating || message.isVideoGenerating) &&
+                  message.isStreaming &&
+                  !message.inlineAttachments?.length &&
+                  !message.content.trim();
+                if (isMediaGenStreamingPlaceholder) {
+                  return null;
+                }
                 const isEmptyAssistantPlaceholder =
                   message.role === 'assistant' &&
                   !message.content.trim() &&
@@ -4373,6 +4500,7 @@ export default function UnifiedChatPage({
                   !message.multiLLMResponses?.length &&
                   !message.documentSearch &&
                   !message.isImageGenerating &&
+                  !message.isVideoGenerating &&
                   !message.inlineAttachments?.length &&
                   !message.chainCurrentAgent &&
                   !message.chainSteps?.length;
@@ -4380,7 +4508,6 @@ export default function UnifiedChatPage({
                   ? extractReasoningBlock(message.content || '', message.isStreaming)
                   : null;
                 // Прячем пустой пузырь только пока ждём обычный LLM-стрим («думает...» снизу).
-                // Сообщение с isImageGenerating содержит ImageGenerationPlaceholder — его нельзя выкидывать.
                 if (
                   isEmptyAssistantPlaceholder &&
                   currentChatLoading &&
@@ -4413,6 +4540,18 @@ export default function UnifiedChatPage({
                 );
               })}
               
+              {(lastStreamingAssistant?.isImageGenerating || lastStreamingAssistant?.isVideoGenerating) &&
+              lastStreamingAssistant.isStreaming &&
+              !getAssistantInlineAttachments(lastStreamingAssistant)?.length ? (
+                <ChatImageGenerationIndicator
+                  isDarkMode={isDarkMode}
+                  leftAlignMessages={interfaceSettings.leftAlignMessages}
+                  widescreenMode={interfaceSettings.widescreenMode}
+                  startedAtMs={lastStreamingAssistant.generationStartedAtMs}
+                  mediaKind={lastStreamingAssistant.isVideoGenerating ? 'video' : 'image'}
+                />
+              ) : null}
+
               {/* Индикатор размышления - показывается только до начала потоковой генерации, сразу после сообщений */}
               {chatAwaitingTokens && !chainThinkingName && (
                 <ChatThinkingIndicator
@@ -4649,7 +4788,7 @@ export default function UnifiedChatPage({
                        gearToolsPaperHeightPx < CHAT_GEAR_MENU_PAPER_MAX_HEIGHT_PX ? 'auto' : 'hidden',
                    }
                  : { maxHeight: CHAT_GEAR_MENU_PAPER_MAX_HEIGHT, overflowY: 'auto' }),
-                ...((gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding')
+                ...((gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding' || gearToolsPanel === 'generation')
                 ? CHAT_GEAR_SCROLL_AREA_NO_VISIBLE_SCROLLBAR_SX
                 : {}),
              },
@@ -4661,15 +4800,15 @@ export default function UnifiedChatPage({
              display: 'flex',
              flexDirection: 'row',
              alignItems: 'stretch',
-            gap: gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding' ? `${CHAT_GEAR_MENU_PANELS_GAP_PX}px` : 0,
+            gap: gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding' || gearToolsPanel === 'generation' ? `${CHAT_GEAR_MENU_PANELS_GAP_PX}px` : 0,
              width:
-             (gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding') && gearToolsMenuWidthPx != null
+             (gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding' || gearToolsPanel === 'generation') && gearToolsMenuWidthPx != null
                  ? `${gearToolsMenuWidthPx}px`
-                : gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding'
+                : gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding' || gearToolsPanel === 'generation'
                    ? CHAT_GEAR_MENU_EXPANDED_WIDTH_PX
                    : CHAT_GEAR_MENU_PANEL_WIDTH_PX,
              maxWidth:
-             (gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding') && gearToolsMenuWidthPx != null
+             (gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding' || gearToolsPanel === 'generation') && gearToolsMenuWidthPx != null
                  ? `${gearToolsMenuWidthPx}px`
                  : 'min(96vw, 580px)',
              minHeight: gearToolsPaperHeightPx != null ? `${gearToolsPaperHeightPx}px` : undefined,
@@ -4683,7 +4822,7 @@ export default function UnifiedChatPage({
              sx={{
                ...dropdownPanelSx,
                width:
-               gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding'
+               gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding' || gearToolsPanel === 'generation'
                   ? CHAT_GEAR_MENU_LEFT_RAIL_WIDTH_PX
                   : '100%',
                flexShrink: 0,
@@ -4827,6 +4966,36 @@ export default function UnifiedChatPage({
               />
             </Box>
             <Box
+              onClick={() => setGearToolsPanel((p) => (p === 'generation' ? 'main' : 'generation'))}
+              sx={{
+                ...dropdownItemSx,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 1,
+                color: isDarkMode ? 'white' : '#333',
+                bgcolor:
+                  gearToolsPanel === 'generation' || generationModeOn
+                    ? isDarkMode
+                      ? DROPDOWN_ITEM_HOVER_BG_DARK
+                      : DROPDOWN_ITEM_HOVER_BG_LIGHT
+                    : 'transparent',
+              }}
+            >
+              <GearMenuImageGenIcon
+                sx={{ fontSize: 18, color: isDarkMode ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.6)', flexShrink: 0 }}
+              />
+              <Typography sx={{ flex: 1, minWidth: 0, fontSize: MENU_ACTION_TEXT_SIZE, whiteSpace: 'nowrap' }}>
+                Режим генерации
+              </Typography>
+              <ChevronRightIcon
+                sx={{
+                  ...DROPDOWN_CHEVRON_SX,
+                  flexShrink: 0,
+                  transform: gearToolsPanel === 'generation' ? 'rotate(90deg)' : 'none',
+                }}
+              />
+            </Box>
+            <Box
               onClick={() => setGearToolsPanel((p) => (p === 'model-mode' ? 'main' : 'model-mode'))}
               sx={{
                 ...dropdownItemSx,
@@ -4888,7 +5057,7 @@ export default function UnifiedChatPage({
                </span>
              </Tooltip>
            </Box>
-          {gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding' ? (
+          {gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding' || gearToolsPanel === 'generation' ? (
              <Box
                sx={{
                  ...dropdownPanelSx,
@@ -4913,6 +5082,8 @@ export default function UnifiedChatPage({
                   chatId={currentChat?.id}
                   projectId={currentChat?.projectId}
                 />
+              ) : gearToolsPanel === 'generation' ? (
+                <ChatGearGenerationPanel isDarkMode={isDarkMode} chatId={currentChat?.id} />
               ) : (
                 <Box sx={{ p: 1, display: 'flex', flexDirection: 'column', gap: 0.5, overflowY: 'auto' }}>
                   {([

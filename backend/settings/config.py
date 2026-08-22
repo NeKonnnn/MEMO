@@ -193,6 +193,111 @@ class ImageGenerationConfig(BaseModel):
         return result
 
 
+class VideoGenerationPreset(BaseModel):
+    id: str = ""
+    label: str = ""
+    description: str = ""
+    workflow_path: str = ""
+    checkpoint_name: str = ""
+    default_width: int = 512
+    default_height: int = 512
+    default_steps: int = 20
+    default_frames: int = 16
+    node_map: Dict[str, ImageGenerationNodeMapEntry] = Field(default_factory=dict)
+
+
+class VideoGenerationConfig(BaseModel):
+    """ComfyUI — генерация видео из чата."""
+    enabled: bool = False
+    comfyui_base_url: str = "http://127.0.0.1:8188"
+    comfyui_public_url: str = "http://localhost:8188"
+    workflow_path: str = ""
+    request_timeout_sec: float = 1800
+    poll_interval_sec: float = 1.0
+    node_map: Dict[str, ImageGenerationNodeMapEntry] = Field(default_factory=dict)
+    chat_triggers_enabled: bool = False
+    default_width: int = 512
+    default_height: int = 512
+    default_steps: int = 20
+    default_frames: int = 16
+    checkpoint_name: str = ""
+    default_preset_id: str = ""
+    presets: Dict[str, VideoGenerationPreset] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def load_from_yaml_or_env(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            data = {}
+        result = dict(data)
+
+        env_enabled = _truthy_env_optional("VIDEO_GEN_ENABLED")
+        if env_enabled is not None:
+            result["enabled"] = env_enabled
+
+        env_url = _get_env_value("VIDEO_GEN_COMFYUI_URL")
+        if env_url:
+            result["comfyui_base_url"] = env_url
+
+        env_pub = _get_env_value("VIDEO_GEN_COMFYUI_PUBLIC_URL")
+        if env_pub:
+            result["comfyui_public_url"] = env_pub
+
+        env_wf = _get_env_value("VIDEO_GEN_WORKFLOW_PATH")
+        if env_wf:
+            result["workflow_path"] = env_wf
+
+        env_ckpt = _get_env_value("VIDEO_GEN_CHECKPOINT_NAME")
+        if env_ckpt:
+            result["checkpoint_name"] = env_ckpt
+
+        env_chat = _truthy_env_optional("VIDEO_GEN_CHAT_TRIGGERS")
+        if env_chat is not None:
+            result["chat_triggers_enabled"] = env_chat
+
+        for key, env_name, cast in (
+            ("default_width", "VIDEO_GEN_DEFAULT_WIDTH", int),
+            ("default_height", "VIDEO_GEN_DEFAULT_HEIGHT", int),
+            ("default_steps", "VIDEO_GEN_DEFAULT_STEPS", int),
+            ("default_frames", "VIDEO_GEN_DEFAULT_FRAMES", int),
+            ("request_timeout_sec", "VIDEO_GEN_TIMEOUT_SEC", float),
+        ):
+            raw = _get_env_value(env_name)
+            if raw is not None and str(raw).strip() != "":
+                try:
+                    result[key] = cast(raw)
+                except (TypeError, ValueError):
+                    pass
+
+        nm = result.get("node_map")
+        if isinstance(nm, dict):
+            parsed: Dict[str, Any] = {}
+            for k, v in nm.items():
+                if isinstance(v, dict) and v.get("node") and v.get("input"):
+                    parsed[str(k)] = v
+            result["node_map"] = parsed
+
+        raw_presets = result.get("presets")
+        if isinstance(raw_presets, dict):
+            parsed_presets: Dict[str, Any] = {}
+            for pid, val in raw_presets.items():
+                if not isinstance(val, dict):
+                    continue
+                entry = dict(val)
+                entry["id"] = str(pid)
+                nm = entry.get("node_map")
+                if isinstance(nm, dict):
+                    parsed_nm: Dict[str, Any] = {}
+                    for k, v in nm.items():
+                        if isinstance(v, dict) and v.get("node") and v.get("input"):
+                            parsed_nm[str(k)] = v
+                    entry["node_map"] = parsed_nm
+                parsed_presets[str(pid)] = entry
+            result["presets"] = parsed_presets
+
+        return result
+
+
 def _truthy_env_optional(name: str) -> Optional[bool]:
     raw = os.getenv(name)
     if raw is None:
@@ -735,6 +840,7 @@ class Settings(BaseModel):
     plugins: PluginsPlatformConfig = Field(default_factory=PluginsPlatformConfig)
     coding_agent: CodingAgentConfig = Field(default_factory=CodingAgentConfig)
     image_generation: ImageGenerationConfig = Field(default_factory=ImageGenerationConfig)
+    video_generation: VideoGenerationConfig = Field(default_factory=VideoGenerationConfig)
     class Config:
         """Настройки Pydantic"""
         extra = "allow"  # Разрешаем дополнительные поля из YAML

@@ -198,7 +198,7 @@ image_generation:
   workflow_path: "config/comfy_workflows/flux_schnell_fp8_txt2img_api.json"
   request_timeout_sec: 900
   poll_interval_sec: 1.0
-  chat_triggers_enabled: true
+  chat_triggers_enabled: false
   default_width: 1024
   default_height: 1024
   default_steps: 4
@@ -276,6 +276,28 @@ image_generation:
     seed:
       node: "3"
       input: "seed"
+
+# ========================================================
+# ГЕНЕРАЦИЯ ВИДЕО (ComfyUI)
+# Укажите workflow API JSON с нодой сохранения видео (VHS / SaveVideo и т.п.)
+# и node_map с ключами prompt, width, height, steps, seed, frames (по необходимости).
+# ========================================================
+video_generation:
+  enabled: true
+  comfyui_base_url: "http://127.0.0.1:8188"
+  comfyui_public_url: "http://localhost:8188"
+  workflow_path: ""
+  request_timeout_sec: 1800
+  poll_interval_sec: 1.0
+  chat_triggers_enabled: false
+  default_width: 512
+  default_height: 512
+  default_steps: 20
+  default_frames: 16
+  checkpoint_name: ""
+  default_preset_id: ""
+  presets: {}
+  node_map: {}
 
 # ========================================================
 # ПУТИ И СИСТЕМНЫЕ НАСТРОЙКИ

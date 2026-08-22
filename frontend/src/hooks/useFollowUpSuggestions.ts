@@ -11,7 +11,7 @@ function isFollowUpEligible(message: Message): boolean {
   if (message.role !== 'assistant') return false;
   if (message.isStreaming) return false;
   if (message.multiLLMResponses?.length) return false;
-  if (message.isImageGenerating) return false;
+  if (message.isImageGenerating || message.isVideoGenerating) return false;
   return Boolean((message.content || '').trim());
 }
 

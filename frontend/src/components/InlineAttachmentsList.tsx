@@ -7,9 +7,10 @@ import { formatFileSize } from '../utils/inlineImage';
 
 export interface InlineAttachmentDisplayItem {
   name: string;
-  contentType: 'text' | 'image';
-  /** Для изображений: data URL, blob URL или URL MinIO */
+  contentType: 'text' | 'image' | 'video';
+  /** Для изображений/видео: data URL, blob URL или URL MinIO */
   imageSrc?: string;
+  videoSrc?: string;
   size?: number;
 }
 
@@ -130,10 +131,34 @@ export default function InlineAttachmentsList({
 
   const indexedFiles = files.map((file, index) => ({ file, index }));
   const imageItems = indexedFiles.filter(({ file }) => file.contentType === 'image' && file.imageSrc);
-  const docItems = indexedFiles.filter(({ file }) => file.contentType !== 'image');
+  const videoItems = indexedFiles.filter(({ file }) => file.contentType === 'video' && (file.videoSrc || file.imageSrc));
+  const docItems = indexedFiles.filter(({ file }) => file.contentType === 'text');
 
   return (
     <Box sx={sx}>
+      {videoItems.length > 0 && (
+        <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, mb: imageItems.length > 0 || docItems.length > 0 ? 1 : 0 }}>
+          {videoItems.map(({ file, index }) => {
+            const src = file.videoSrc || file.imageSrc || '';
+            return (
+              <Box
+                key={`inline-vid-${file.name}-${index}`}
+                component="video"
+                src={src}
+                controls
+                sx={{
+                  maxHeight: 240,
+                  maxWidth: 360,
+                  borderRadius: '8px',
+                  display: 'block',
+                  border: isMessage ? '2px solid rgba(255,255,255,0.3)' : imageBorder,
+                }}
+              />
+            );
+          })}
+        </Box>
+      )}
+
       {imageItems.length > 0 && (
         <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, mb: docItems.length > 0 ? 1 : 0 }}>
           {imageItems.map(({ file, index }) => renderImageThumb(file, index))}

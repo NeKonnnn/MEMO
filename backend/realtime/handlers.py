@@ -81,6 +81,28 @@ from backend.mcp.resolvers import resolve_chat_tool_ids
 
 logger = get_logger(__name__)
 
+_PLACEHOLDER_MODEL_PATHS = frozenset({"llm-svc", "llm-svc://", "local", "default"})
+
+
+def _client_model_path_from_payload(data) -> Optional[str]:
+    """model_path из UI (localStorage селектора), если передан в socket payload."""
+    if not isinstance(data, dict):
+        return None
+    raw = str(data.get("model_path") or "").strip()
+    if not raw:
+        return None
+    lower = raw.lower()
+    if lower in _PLACEHOLDER_MODEL_PATHS:
+        return None
+    if lower.startswith("llm-svc://"):
+        rest = raw[len("llm-svc://") :].strip().lstrip("/")
+        return raw if rest else None
+    if lower.endswith(".gguf"):
+        return raw
+    if "/" in raw:
+        return raw
+    return None
+
 
 def _get_set_tool_context():
     from backend.tools.tool_context import set_tool_context
@@ -453,10 +475,11 @@ async def _handle_chat_image_generation_request(
     current_user: Optional[dict],
     streaming: bool,
     image_gen_preset_id: Optional[str] = None,
+    image_generation_mode: bool = False,
     regenerate: bool = False,
     assistant_message_id: Optional[str] = None,
 ):
-    """Генерация изображения по фразе «нарисуй …» без вызова LLM."""
+    """Генерация изображения (режим «генерация» или legacy-триггеры) без вызова LLM."""
     from backend.services.comfyui_image_generation import ComfyImageGenError
     from backend.services.image_generation_service import (
         handle_chat_image_generation,
@@ -464,7 +487,10 @@ async def _handle_chat_image_generation_request(
         save_image_generation_assistant_message,
     )
 
-    if not is_image_generation_chat_request(user_message):
+    if not is_image_generation_chat_request(
+        user_message,
+        mode_enabled=bool(image_generation_mode),
+    ):
         return False
 
     await sio.emit(
@@ -483,6 +509,7 @@ async def _handle_chat_image_generation_request(
         result = await handle_chat_image_generation(
             user_message,
             preset_id=image_gen_preset_id,
+            mode_enabled=bool(image_generation_mode),
         )
     except ComfyImageGenError as exc:
         err_text = f"Не удалось сгенерировать изображение: {exc}"
@@ -541,6 +568,114 @@ async def _handle_chat_image_generation_request(
         "was_streaming": streaming,
         "inline_attachments": inline_attachments,
         "image_generation": True,
+    })
+    await sio.emit("chat_complete", payload, room=sid)
+    return True
+
+
+async def _handle_chat_video_generation_request(
+    sio,
+    sid: str,
+    *,
+    user_message: str,
+    conversation_id: Optional[str],
+    project_id: Optional[str],
+    current_user: Optional[dict],
+    streaming: bool,
+    video_gen_preset_id: Optional[str] = None,
+    video_generation_mode: bool = False,
+    regenerate: bool = False,
+    assistant_message_id: Optional[str] = None,
+):
+    """Генерация видео (режим «генерация видео») без вызова LLM."""
+    from backend.services.comfyui_image_generation import ComfyImageGenError
+    from backend.services.video_generation_service import (
+        handle_chat_video_generation,
+        is_video_generation_chat_request,
+        save_video_generation_assistant_message,
+    )
+
+    if not is_video_generation_chat_request(
+        user_message,
+        mode_enabled=bool(video_generation_mode),
+    ):
+        return False
+
+    await sio.emit(
+        "chat_thinking",
+        _stream_ids_payload(
+            {
+                "status": "processing",
+                "message": "Генерирую видео в ComfyUI…",
+                "video_generation": True,
+            }
+        ),
+        room=sid,
+    )
+
+    try:
+        result = await handle_chat_video_generation(
+            user_message,
+            preset_id=video_gen_preset_id,
+            mode_enabled=bool(video_generation_mode),
+        )
+    except ComfyImageGenError as exc:
+        err_text = f"Не удалось сгенерировать видео: {exc}"
+        logger.warning("Chat video generation failed: %s", exc)
+        await sio.emit("chat_complete", _stream_ids_payload({
+            "response": err_text,
+            "timestamp": datetime.now().isoformat(),
+            "was_streaming": streaming,
+            "video_generation_error": True,
+        }), room=sid)
+        try:
+            meta = {"video_generation_error": True}
+            if project_id:
+                from backend.database.memory_service import save_dialog_entry_to_project
+                await save_dialog_entry_to_project(
+                    "assistant",
+                    err_text,
+                    project_id,
+                    conversation_id,
+                    metadata=meta,
+                    user_id=(current_user or {}).get("user_id"),
+                )
+            else:
+                await save_dialog_entry(
+                    "assistant",
+                    err_text,
+                    meta,
+                    None,
+                    conversation_id,
+                    user_id=(current_user or {}).get("user_id"),
+                )
+        except Exception as save_exc:
+            logger.warning("Не удалось сохранить ошибку video gen: %s", save_exc)
+        return True
+
+    response = result.get("response") or ""
+    meta = result.get("metadata") or {}
+    inline_attachments = result.get("inline_attachments") or []
+
+    try:
+        await save_video_generation_assistant_message(
+            content=response,
+            metadata=meta,
+            conversation_id=conversation_id,
+            project_id=project_id,
+            user_id=(current_user or {}).get("user_id"),
+            regenerate=regenerate,
+            assistant_message_id=assistant_message_id,
+        )
+    except Exception as save_exc:
+        logger.warning("Не удалось сохранить ответ video gen: %s", save_exc)
+
+    payload = _stream_ids_payload({
+        "response": response,
+        "timestamp": datetime.now().isoformat(),
+        "was_streaming": streaming,
+        "inline_attachments": inline_attachments,
+        "video_generation": True,
     })
     await sio.emit("chat_complete", payload, room=sid)
     return True
@@ -860,6 +995,21 @@ def register_handlers(sio):
                         return
                     raise
             if not bool(data.get("coding_mode")):
+                handled_video = await _handle_chat_video_generation_request(
+                    sio,
+                    sid,
+                    user_message=user_message,
+                    conversation_id=conversation_id,
+                    project_id=project_id,
+                    current_user=validated_user,
+                    streaming=streaming,
+                    video_gen_preset_id=(data.get("video_gen_preset_id") or None),
+                    video_generation_mode=bool(data.get("video_generation_mode")),
+                    regenerate=is_regenerate,
+                    assistant_message_id=str(data.get("assistant_message_id") or "").strip() or None,
+                )
+                if handled_video:
+                    return
                 handled_image = await _handle_chat_image_generation_request(
                     sio,
                     sid,
@@ -869,6 +1019,7 @@ def register_handlers(sio):
                     current_user=validated_user,
                     streaming=streaming,
                     image_gen_preset_id=(data.get("image_gen_preset_id") or None),
+                    image_generation_mode=bool(data.get("image_generation_mode")),
                     regenerate=is_regenerate,
                     assistant_message_id=str(data.get("assistant_message_id") or "").strip() or None,
                 )
@@ -2080,7 +2231,17 @@ async def _handle_direct(
     if (user_message or "").strip() != (rag_query or "").strip():
         if (user_message or "") not in (final_message or ""):
             final_message = f"{final_message}\n\n{user_message}"
-    eff_model_path = agent_profile["model_path"] or get_current_model_path()
+    client_model_path = _client_model_path_from_payload(data)
+    server_model_path = get_current_model_path()
+    eff_model_path = (
+        agent_profile.get("model_path") or client_model_path or server_model_path
+    )
+    if client_model_path and client_model_path != (server_model_path or ""):
+        logger.info(
+            "[chat] model_path из UI=%s (current на сервере=%s)",
+            client_model_path,
+            server_model_path or "(не задан)",
+        )
     base_system_prompt = agent_profile["system_prompt"] or ""
     user_cpm = await get_user_prompt_manager((current_user or {}).get("user_id"))
     if user_cpm is None:

@@ -114,9 +114,22 @@ def extract_image_prompt_from_chat(message: str) -> Optional[str]:
     return None
 
 
-def is_image_generation_chat_request(message: str) -> bool:
+def resolve_image_prompt_from_chat(message: str, *, mode_enabled: bool = False) -> Optional[str]:
+    text = (message or "").strip()
+    if not text:
+        return None
+    if mode_enabled:
+        return text
+    return extract_image_prompt_from_chat(message)
+
+
+def is_image_generation_chat_request(message: str, *, mode_enabled: bool = False) -> bool:
     cfg = get_image_generation_settings()
-    if not cfg or not cfg.enabled or not cfg.chat_triggers_enabled:
+    if not cfg or not cfg.enabled:
+        return False
+    if mode_enabled:
+        return bool((message or "").strip())
+    if not cfg.chat_triggers_enabled:
         return False
     return extract_image_prompt_from_chat(message) is not None
 
@@ -835,11 +848,12 @@ async def handle_chat_image_generation(
     user_message: str,
     *,
     preset_id: Optional[str] = None,
+    mode_enabled: bool = False,
 ) -> Dict[str, Any]:
     """
     Возвращает {response, metadata, inline_attachments} или бросает ComfyImageGenError.
     """
-    prompt = extract_image_prompt_from_chat(user_message)
+    prompt = resolve_image_prompt_from_chat(user_message, mode_enabled=mode_enabled)
     if not prompt:
         raise ComfyImageGenError("Не удалось извлечь промпт из сообщения")
 

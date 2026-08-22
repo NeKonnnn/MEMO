@@ -66,8 +66,8 @@ export interface Message {
   /** Inline-вложения (картинки/документы), прикреплённые к сообщению напрямую без RAG */
   inlineAttachments?: Array<{
     name: string;
-    contentType: 'text' | 'image';
-    /** base64 data URL для изображений; пустая строка для текстовых (контент уже в промпте) */
+    contentType: 'text' | 'image' | 'video';
+    /** base64 data URL для изображений/видео; пустая строка для текстовых (контент уже в промпте) */
     preview?: string;
     size?: number;
     tokenEstimate?: number;
@@ -76,6 +76,8 @@ export interface Message {
   inlineAttachmentVariants?: Array<NonNullable<Message['inlineAttachments']>>;
   /** Идёт генерация изображения (ComfyUI / image_generation) */
   isImageGenerating?: boolean;
+  /** Идёт генерация видео (ComfyUI / video_generation) */
+  isVideoGenerating?: boolean;
   /** MCP tool calls (B-22 / F-6) */
   mcpToolCalls?: Array<{
     type: 'mcp_tool_start' | 'mcp_tool_end';
@@ -248,7 +250,7 @@ type AppAction =
   | { type: 'DELETE_CHAT'; payload: string }
   | { type: 'DELETE_ALL_CHATS' }
   | { type: 'ADD_MESSAGE'; payload: { chatId: string; message: Message } }
-  | { type: 'UPDATE_MESSAGE'; payload: { chatId: string; messageId: string; content?: string; isStreaming?: boolean; multiLLMResponses?: Array<{ model: string; content: string; isStreaming?: boolean; error?: boolean; feedback?: MessageFeedback | null }>; alternativeResponses?: string[]; currentResponseIndex?: number; documentSearch?: Message['documentSearch']; reasoningContent?: string; mcpToolCalls?: Message['mcpToolCalls']; inlineAttachments?: Message['inlineAttachments']; isImageGenerating?: boolean; inlineAttachmentVariants?: Message['inlineAttachmentVariants']; feedback?: MessageFeedback | null } }
+  | { type: 'UPDATE_MESSAGE'; payload: { chatId: string; messageId: string; content?: string; isStreaming?: boolean; multiLLMResponses?: Array<{ model: string; content: string; isStreaming?: boolean; error?: boolean; feedback?: MessageFeedback | null }>; alternativeResponses?: string[]; currentResponseIndex?: number; documentSearch?: Message['documentSearch']; reasoningContent?: string; mcpToolCalls?: Message['mcpToolCalls']; inlineAttachments?: Message['inlineAttachments']; isImageGenerating?: boolean; isVideoGenerating?: boolean; inlineAttachmentVariants?: Message['inlineAttachmentVariants']; feedback?: MessageFeedback | null } }
   | { type: 'PATCH_MESSAGE_FIELDS'; payload: { chatId: string; messageId: string; fields: Partial<Pick<Message, 'followUpSuggestions' | 'followUpSuggestionsLoading' | 'generationStartedAtMs' | 'generationDurationSec' | 'chainCurrentAgent' | 'chainSteps' | 'hideSequentialOutputs'>> } }
   | { type: 'APPEND_CHUNK'; payload: { chatId: string; messageId: string; chunk: string; isStreaming?: boolean } }
   | { type: 'SET_LOADING'; payload: boolean }
@@ -453,7 +455,7 @@ function appReducer(state: AppState, action: AppAction): AppState {
     }
       
     case 'UPDATE_MESSAGE': {
-      const { chatId, messageId, content, isStreaming, multiLLMResponses, alternativeResponses, currentResponseIndex, documentSearch, reasoningContent, mcpToolCalls, inlineAttachments, isImageGenerating, inlineAttachmentVariants, feedback } = action.payload;
+      const { chatId, messageId, content, isStreaming, multiLLMResponses, alternativeResponses, currentResponseIndex, documentSearch, reasoningContent, mcpToolCalls, inlineAttachments, isImageGenerating, isVideoGenerating, inlineAttachmentVariants, feedback } = action.payload;
       
       const currentChat = state.chats.find(chat => chat.id === chatId);
       const updatedMessage = currentChat?.messages.find(msg => msg.id === messageId);
@@ -489,6 +491,7 @@ function appReducer(state: AppState, action: AppAction): AppState {
                         ...(mcpToolCalls !== undefined ? { mcpToolCalls } : {}),
                         ...(inlineAttachments !== undefined ? { inlineAttachments } : {}),
                         ...(isImageGenerating !== undefined ? { isImageGenerating } : {}),
+                        ...(isVideoGenerating !== undefined ? { isVideoGenerating } : {}),
                         ...(inlineAttachmentVariants !== undefined ? { inlineAttachmentVariants } : {}),
                         ...(feedback !== undefined ? { feedback } : {}),
                         ...(generationDurationSec !== undefined ? { generationDurationSec } : {}),
@@ -1217,8 +1220,8 @@ export function useAppActions() {
       return messageId;
     },
     
-    updateMessage: (chatId: string, messageId: string, content?: string, isStreaming?: boolean, multiLLMResponses?: Array<{ model: string; content: string; isStreaming?: boolean; error?: boolean; feedback?: MessageFeedback | null }>, alternativeResponses?: string[], currentResponseIndex?: number, documentSearch?: Message['documentSearch'], reasoningContent?: string, mcpToolCalls?: Message['mcpToolCalls'], inlineAttachments?: Message['inlineAttachments'], isImageGenerating?: boolean, inlineAttachmentVariants?: Message['inlineAttachmentVariants'], feedback?: MessageFeedback | null) => {
-      dispatch({ type: 'UPDATE_MESSAGE', payload: { chatId, messageId, content, isStreaming, multiLLMResponses, alternativeResponses, currentResponseIndex, documentSearch, reasoningContent, mcpToolCalls, inlineAttachments, isImageGenerating, inlineAttachmentVariants, feedback } });
+    updateMessage: (chatId: string, messageId: string, content?: string, isStreaming?: boolean, multiLLMResponses?: Array<{ model: string; content: string; isStreaming?: boolean; error?: boolean; feedback?: MessageFeedback | null }>, alternativeResponses?: string[], currentResponseIndex?: number, documentSearch?: Message['documentSearch'], reasoningContent?: string, mcpToolCalls?: Message['mcpToolCalls'], inlineAttachments?: Message['inlineAttachments'], isImageGenerating?: boolean, inlineAttachmentVariants?: Message['inlineAttachmentVariants'], feedback?: MessageFeedback | null, isVideoGenerating?: boolean) => {
+      dispatch({ type: 'UPDATE_MESSAGE', payload: { chatId, messageId, content, isStreaming, multiLLMResponses, alternativeResponses, currentResponseIndex, documentSearch, reasoningContent, mcpToolCalls, inlineAttachments, isImageGenerating, isVideoGenerating, inlineAttachmentVariants, feedback } });
     },
 
     patchMessageFields: (

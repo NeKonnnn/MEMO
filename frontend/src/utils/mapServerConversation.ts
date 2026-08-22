@@ -59,14 +59,16 @@ export function mapInlineAttachmentRecords(
   const items = raw
     .filter((a): a is Record<string, unknown> => Boolean(a) && typeof a === 'object')
     .map((a) => {
-      const contentType = a.contentType === 'image' ? ('image' as const) : ('text' as const);
+      const rawType = a.contentType;
+      const contentType =
+        rawType === 'video' ? ('video' as const) : rawType === 'image' ? ('image' as const) : ('text' as const);
       const dataUri = a.data_uri ? String(a.data_uri) : undefined;
       const minioObject = a.minio_object ? String(a.minio_object) : undefined;
       const minioBucket = a.minio_bucket ? String(a.minio_bucket) : undefined;
       let preview: string | undefined;
-      if (contentType === 'image' && dataUri) {
+      if ((contentType === 'image' || contentType === 'video') && dataUri) {
         preview = dataUri;
-      } else if (contentType === 'image' && minioObject && minioBucket) {
+      } else if ((contentType === 'image' || contentType === 'video') && minioObject && minioBucket) {
         preview = getApiUrl(
           `/api/documents/inline-file?bucket=${encodeURIComponent(minioBucket)}&object=${encodeURIComponent(minioObject)}`,
         );

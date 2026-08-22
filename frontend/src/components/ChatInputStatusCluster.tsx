@@ -3,6 +3,8 @@ import { Box, Tooltip, Typography } from '@mui/material';
 import { useTheme, alpha } from '@mui/material/styles';
 import {
   MenuBook as MenuBookIcon,
+  ImageOutlined as ImageGenIcon,
+  VideocamOutlined as VideoGenIcon,
   SmartToyOutlined as AgentStatusIcon,
   HubOutlined as HubIcon,
   HistoryEdu as SkillStatusIcon,
@@ -14,27 +16,24 @@ export interface ChatInputStatusClusterProps {
   isDarkMode: boolean;
   libraryActive: boolean;
   onLibraryToggle?: () => void;
-  /** Выбран пользовательский агент (Мои агенты) */
+  generationImageActive?: boolean;
+  generationVideoActive?: boolean;
+  onGenerationClick?: () => void;
   myAgentName: string | null;
-  /** Снять выбранного пользовательского агента (клик по иконке робота) */
   onAgentToggle?: () => void;
-  /** Включённые MCP-серверы для текущего чата */
   activeMcpServers?: ActiveMcpServerIndicator[];
   onMcpClick?: () => void;
-  /** Выбранные skills для чата */
   activeSkills?: ActiveSkillRef[];
-  /** Снять все выбранные skills (клик по сегменту) */
   onSkillsToggle?: () => void;
 }
 
-/**
- * Индикаторы у поля ввода: библиотека, агент, skills, MCP.
- * Несколько активных — одна «пилюля» с вертикальными разделителями.
- */
 export default function ChatInputStatusCluster({
   isDarkMode,
   libraryActive,
   onLibraryToggle,
+  generationImageActive = false,
+  generationVideoActive = false,
+  onGenerationClick,
   myAgentName,
   onAgentToggle,
   activeMcpServers = [],
@@ -46,6 +45,7 @@ export default function ChatInputStatusCluster({
   const agentActive = Boolean(myAgentName);
   const mcpActive = activeMcpServers.length > 0;
   const skillsActive = activeSkills.length > 0;
+  const generationActive = generationImageActive || generationVideoActive;
 
   const mcpLabel = useMemo(() => {
     if (activeMcpServers.length === 0) return '';
@@ -66,6 +66,20 @@ export default function ChatInputStatusCluster({
     if (libraryActive) {
       parts.push(
         'Общий RAG в ответах включён. Нажмите на книгу, чтобы отключить. Документы проекта и агента подключаются отдельно.',
+      );
+    }
+    if (generationImageActive) {
+      parts.push(
+        onGenerationClick
+          ? 'Генерация изображений включена. Нажмите, чтобы открыть настройки.'
+          : 'Генерация изображений включена.',
+      );
+    }
+    if (generationVideoActive) {
+      parts.push(
+        onGenerationClick
+          ? 'Генерация видео включена. Нажмите, чтобы открыть настройки.'
+          : 'Генерация видео включена.',
       );
     }
     if (myAgentName) {
@@ -91,6 +105,9 @@ export default function ChatInputStatusCluster({
     return parts.join(' ');
   }, [
     libraryActive,
+    generationImageActive,
+    generationVideoActive,
+    onGenerationClick,
     myAgentName,
     skillsActive,
     activeSkills,
@@ -100,14 +117,16 @@ export default function ChatInputStatusCluster({
     onSkillsToggle,
   ]);
 
-  if (!libraryActive && !agentActive && !skillsActive && !mcpActive) return null;
+  if (!libraryActive && !generationActive && !agentActive && !skillsActive && !mcpActive) return null;
 
   const borderC = alpha(theme.palette.primary.main, 0.4);
   const bg = alpha(theme.palette.primary.main, 0.12);
   const dividerColor = isDarkMode ? 'rgba(255,255,255,0.28)' : 'rgba(0,0,0,0.18)';
 
-  const segments: Array<'library' | 'agent' | 'skills' | 'mcp'> = [];
+  const segments: Array<'library' | 'genImage' | 'genVideo' | 'agent' | 'skills' | 'mcp'> = [];
   if (libraryActive) segments.push('library');
+  if (generationImageActive) segments.push('genImage');
+  if (generationVideoActive) segments.push('genVideo');
   if (agentActive) segments.push('agent');
   if (skillsActive) segments.push('skills');
   if (mcpActive) segments.push('mcp');
@@ -122,6 +141,31 @@ export default function ChatInputStatusCluster({
     bgcolor: 'transparent',
     color: 'primary.main',
   } as const;
+
+  const generationClickHandler = onGenerationClick
+    ? (e: React.MouseEvent) => {
+        e.stopPropagation();
+        e.preventDefault();
+        onGenerationClick();
+      }
+    : undefined;
+
+  const renderGenerationSegment = (seg: 'genImage' | 'genVideo', Icon: typeof ImageGenIcon) => (
+    <Box
+      component={generationClickHandler ? 'button' : 'div'}
+      type={generationClickHandler ? 'button' : undefined}
+      onClick={generationClickHandler}
+      sx={{
+        ...segmentButtonSx,
+        width: 36,
+        p: 0,
+        cursor: generationClickHandler ? 'pointer' : 'default',
+        '&:hover': generationClickHandler ? { bgcolor: alpha(theme.palette.primary.main, 0.12) } : {},
+      }}
+    >
+      <Icon sx={{ fontSize: '1.15rem' }} />
+    </Box>
+  );
 
   return (
     <Tooltip title={tooltipTitle}>
@@ -173,6 +217,8 @@ export default function ChatInputStatusCluster({
                 <MenuBookIcon sx={{ fontSize: '1.15rem' }} />
               </Box>
             ) : null}
+            {seg === 'genImage' ? renderGenerationSegment('genImage', ImageGenIcon) : null}
+            {seg === 'genVideo' ? renderGenerationSegment('genVideo', VideoGenIcon) : null}
             {seg === 'agent' ? (
               <Box
                 component={onAgentToggle && myAgentName ? 'button' : 'div'}

@@ -12,6 +12,7 @@ import {
   setCodingModeEnabled,
   setCodingPlanModeEnabled,
 } from '../coding/selectionStorage';
+import { disableAllGenerationModes } from '../imageGeneration/selectionStorage';
 import {
   clearApprovedPlan,
   getApprovedPlan,
@@ -88,6 +89,9 @@ export default function ChatGearCodingPanel({ isDarkMode, chatId, projectId }: C
     (_: React.ChangeEvent<HTMLInputElement>, checked: boolean) => {
       setCodingOn(checked);
       setCodingModeEnabled(chatId, checked);
+      if (checked) {
+        disableAllGenerationModes(chatId);
+      }
       window.dispatchEvent(new CustomEvent('astrachatCodingSelectionChanged'));
     },
     [chatId],

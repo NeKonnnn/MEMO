@@ -212,6 +212,17 @@ def inject_workflow_inputs(
         inputs[field] = raw_val
 
 
+_VIDEO_EXTENSIONS = (".mp4", ".webm", ".mov", ".avi", ".mkv", ".gif")
+
+
+def _media_spec(filename: str, subfolder: str, media_type: str) -> Dict[str, str]:
+    return {
+        "filename": filename,
+        "subfolder": subfolder,
+        "type": media_type,
+    }
+
+
 def _collect_output_images(history_entry: Dict[str, Any]) -> List[Dict[str, str]]:
     out: List[Dict[str, str]] = []
     outputs = history_entry.get("outputs") or {}
@@ -222,13 +233,48 @@ def _collect_output_images(history_entry: Dict[str, Any]) -> List[Dict[str, str]
             continue
         for im in nod.get("images") or []:
             if isinstance(im, dict) and im.get("filename"):
+                fn = str(im["filename"])
+                if fn.lower().endswith(_VIDEO_EXTENSIONS):
+                    continue
                 out.append(
-                    {
-                        "filename": str(im["filename"]),
-                        "subfolder": str(im.get("subfolder") or ""),
-                        "type": str(im.get("type") or "output"),
-                    }
+                    _media_spec(
+                        fn,
+                        str(im.get("subfolder") or ""),
+                        str(im.get("type") or "output"),
+                    )
                 )
+    return out
+
+
+def _collect_output_videos(history_entry: Dict[str, Any]) -> List[Dict[str, str]]:
+    out: List[Dict[str, str]] = []
+    outputs = history_entry.get("outputs") or {}
+    if not isinstance(outputs, dict):
+        return out
+    for _nid, nod in outputs.items():
+        if not isinstance(nod, dict):
+            continue
+        for key in ("videos", "gifs"):
+            for item in nod.get(key) or []:
+                if isinstance(item, dict) and item.get("filename"):
+                    out.append(
+                        _media_spec(
+                            str(item["filename"]),
+                            str(item.get("subfolder") or ""),
+                            str(item.get("type") or "output"),
+                        )
+                    )
+        for im in nod.get("images") or []:
+            if isinstance(im, dict) and im.get("filename"):
+                fn = str(im["filename"])
+                if fn.lower().endswith(_VIDEO_EXTENSIONS):
+                    out.append(
+                        _media_spec(
+                            fn,
+                            str(im.get("subfolder") or ""),
+                            str(im.get("type") or "output"),
+                        )
+                    )
     return out
 
 
@@ -251,6 +297,27 @@ async def _fetch_history_prompt(
     if isinstance(block, dict):
         return block
     return None
+
+
+def _mime_for_output_filename(filename: str) -> str:
+    fn = filename.lower()
+    if fn.endswith((".jpg", ".jpeg")):
+        return "image/jpeg"
+    if fn.endswith(".webp"):
+        return "image/webp"
+    if fn.endswith(".gif"):
+        return "image/gif"
+    if fn.endswith(".webm"):
+        return "video/webm"
+    if fn.endswith((".mp4", ".m4v")):
+        return "video/mp4"
+    if fn.endswith(".mov"):
+        return "video/quicktime"
+    if fn.endswith(".avi"):
+        return "video/x-msvideo"
+    if fn.endswith(".mkv"):
+        return "video/x-matroska"
+    return "image/png"
 
 
 async def _download_image_bytes(
@@ -322,17 +389,72 @@ async def generate_images_via_comfyui(
                 results: List[Tuple[bytes, str]] = []
                 for spec in imgs:
                     raw = await _download_image_bytes(client, base, spec)
-                    fn = spec["filename"].lower()
-                    mime = "image/png"
-                    if fn.endswith((".jpg", ".jpeg")):
-                        mime = "image/jpeg"
-                    elif fn.endswith(".webp"):
-                        mime = "image/webp"
-                    results.append((raw, mime))
+                    results.append((raw, _mime_for_output_filename(spec["filename"])))
                 return results
 
         raise ComfyImageGenError(
             f"Таймаут ожидания результата ComfyUI ({timeout_sec}s), prompt_id={prompt_id}"
+        )
+
+
+async def generate_videos_via_comfyui(
+    *,
+    comfyui_base_url: str,
+    workflow: Dict[str, Any],
+    timeout_sec: float,
+    poll_interval_sec: float,
+) -> List[Tuple[bytes, str]]:
+    """Возвращает список (bytes, mime) для каждого выходного видео из workflow."""
+    base = comfyui_base_url.rstrip("/")
+    client_id = str(uuid.uuid4())
+    wf = copy.deepcopy(workflow)
+
+    limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
+    timeout = httpx.Timeout(timeout_sec, connect=30.0)
+
+    async with httpx.AsyncClient(timeout=timeout, limits=limits) as client:
+        post = await client.post(
+            f"{base}/prompt",
+            json={"prompt": wf, "client_id": client_id},
+        )
+        if post.status_code >= 400:
+            try:
+                detail = post.json()
+            except Exception:
+                detail = post.text
+            raise ComfyImageGenError(f"ComfyUI /prompt: {post.status_code} {detail}")
+
+        body = post.json()
+        prompt_id = body.get("prompt_id")
+        if not prompt_id:
+            raise ComfyImageGenError(f"ComfyUI не вернул prompt_id: {body}")
+        node_errors = body.get("node_errors") or {}
+        if node_errors:
+            raise ComfyImageGenError(f"Ошибки нод ComfyUI: {node_errors}")
+
+        waited = 0.0
+        while waited < timeout_sec:
+            await asyncio.sleep(poll_interval_sec)
+            waited += poll_interval_sec
+            history_entry = await _fetch_history_prompt(client, base, str(prompt_id))
+            if not history_entry:
+                continue
+            status = history_entry.get("status")
+            if status and status.get("completed") is False and status.get("status_str") == "error":
+                messages = status.get("messages") or []
+                raise ComfyImageGenError(
+                    f"ComfyUI execution error: {_format_comfy_execution_error(messages)}"
+                )
+            videos = _collect_output_videos(history_entry)
+            if videos:
+                results: List[Tuple[bytes, str]] = []
+                for spec in videos:
+                    raw = await _download_image_bytes(client, base, spec)
+                    results.append((raw, _mime_for_output_filename(spec["filename"])))
+                return results
+
+        raise ComfyImageGenError(
+            f"Таймаут ожидания видео ComfyUI ({timeout_sec}s), prompt_id={prompt_id}"
         )
 
 

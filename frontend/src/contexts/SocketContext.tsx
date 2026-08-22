@@ -7,6 +7,7 @@ import { useRagReindexStatus } from '../hooks/useRagReindexStatus';
 import { isKnowledgeRagEnabled } from '../utils/knowledgeRagStorage';
 import { getSettings, initSettings } from '../settings';
 import {
+  isValidSelectedModelPath,
   LAST_SELECTED_MODEL_PATH_STORAGE_KEY,
   MODEL_THINKING_MODE_STORAGE_KEY,
   ModelThinkingMode,
@@ -28,8 +29,8 @@ import { getApprovedPlan, setApprovedPlan, setDraftPlan } from '../coding/planSt
 import { extractSkillIds } from '../utils/skillMentions';
 import { getActiveSkillIds } from '../utils/skillSelectionStorage';
 import { getApiUrl } from '../config/api';
-import { isLikelyImageGenerationPrompt } from '../utils/imageGenerationPrompt';
 import { readSelectedImageGenPresetId } from '../utils/imageGenerationPresets';
+import { isImageGenerationModeEnabled, isVideoGenerationModeEnabled } from '../imageGeneration/selectionStorage';
 
 function dispatchMcpToolActivity(record: McpToolCallRecord, phase: 'start' | 'end') {
   window.dispatchEvent(new CustomEvent('astrachatMcpToolActivity', { detail: { record, phase } }));
@@ -39,10 +40,15 @@ function clearMcpToolActivity() {
   window.dispatchEvent(new CustomEvent('astrachatMcpToolActivityClear'));
 }
 
-function isImageGenThinkingPayload(data: Record<string, unknown>): boolean {
-  if (data.image_generation === true) return true;
+function isMediaGenThinkingPayload(data: Record<string, unknown>): 'image' | 'video' | null {
+  if (data.video_generation === true) return 'video';
+  if (data.image_generation === true) return 'image';
   const msg = data.message;
-  return typeof msg === 'string' && /изображен|comfyui/i.test(msg);
+  if (typeof msg === 'string') {
+    if (/видео|video/i.test(msg)) return 'video';
+    if (/изображен|comfyui/i.test(msg)) return 'image';
+  }
+  return null;
 }
 
 function mapServerInlineAttachments(raw: unknown): Message['inlineAttachments'] | undefined {
@@ -50,14 +56,16 @@ function mapServerInlineAttachments(raw: unknown): Message['inlineAttachments'] 
   const items = raw
     .filter((a): a is Record<string, unknown> => Boolean(a) && typeof a === 'object')
     .map((a) => {
-      const contentType = a.contentType === 'image' ? ('image' as const) : ('text' as const);
+      const rawType = a.contentType;
+      const contentType =
+        rawType === 'video' ? ('video' as const) : rawType === 'image' ? ('image' as const) : ('text' as const);
       const dataUri = a.data_uri ? String(a.data_uri) : undefined;
       const minioObject = a.minio_object ? String(a.minio_object) : undefined;
       const minioBucket = a.minio_bucket ? String(a.minio_bucket) : undefined;
       let preview: string | undefined;
-      if (contentType === 'image' && dataUri) {
+      if ((contentType === 'image' || contentType === 'video') && dataUri) {
         preview = dataUri;
-      } else if (contentType === 'image' && minioObject && minioBucket) {
+      } else if ((contentType === 'image' || contentType === 'video') && minioObject && minioBucket) {
         preview = getApiUrl(
           `/api/documents/inline-file?bucket=${encodeURIComponent(minioBucket)}&object=${encodeURIComponent(minioObject)}`,
         );
@@ -364,6 +372,12 @@ export function SocketProvider({ children }: { children: ReactNode }) {
       rawMode === 'thinking' || rawMode === 'auto' || rawMode === 'fast' ? rawMode : 'fast';
     const modelPath = localStorage.getItem(LAST_SELECTED_MODEL_PATH_STORAGE_KEY);
     return resolveEnableThinkingByMode(mode, modelPath);
+  };
+
+  /** Модель из селектора UI — бэкенд не должен гадать по RAM llm-svc. */
+  const resolveChatModelPath = (): string | undefined => {
+    const path = (localStorage.getItem(LAST_SELECTED_MODEL_PATH_STORAGE_KEY) || '').trim();
+    return isValidSelectedModelPath(path) ? path : undefined;
   };
   
   // Ref для отслеживания режима перегенерации
@@ -790,8 +804,9 @@ export function SocketProvider({ children }: { children: ReactNode }) {
 
       case 'thinking':
         {
+          const mediaKind = isMediaGenThinkingPayload(data);
           if (
-            isImageGenThinkingPayload(data) &&
+            mediaKind &&
             currentChatIdRef.current &&
             !isStoppedRef.current &&
             !expectMultiLlmResponseRef.current
@@ -810,7 +825,10 @@ export function SocketProvider({ children }: { children: ReactNode }) {
                 undefined,
                 undefined,
                 undefined,
-                true,
+                mediaKind === 'image',
+                undefined,
+                undefined,
+                mediaKind === 'video',
               );
             } else {
               const messageId = addMessage(chatId, {
@@ -818,7 +836,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
                 content: '',
                 timestamp: new Date().toISOString(),
                 isStreaming: true,
-                isImageGenerating: true,
+                ...(mediaKind === 'image' ? { isImageGenerating: true } : { isVideoGenerating: true }),
                 generationStartedAtMs: Date.now(),
               });
               currentMessageRef.current = messageId;
@@ -1332,6 +1350,8 @@ export function SocketProvider({ children }: { children: ReactNode }) {
               genInlineAttachments ?? variants[regen.currentIndex] ?? existingMsg?.inlineAttachments,
               false,
               variants.length ? variants : undefined,
+              undefined,
+              false,
             );
             clearRegenerationUi();
           } else {
@@ -1350,6 +1370,8 @@ export function SocketProvider({ children }: { children: ReactNode }) {
               genInlineAttachments,
               false,
               attachmentVariants,
+              undefined,
+              false,
             );
           }
         } else {
@@ -1362,7 +1384,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
           if (streamingMsgs.length > 0) {
             const last = streamingMsgs[streamingMsgs.length - 1];
             completedMessageId = last.id;
-            updateMessage(chatId, last.id, responseWithReasoning, false, undefined, undefined, undefined, docSearch, undefined, undefined, genInlineAttachments, false);
+            updateMessage(chatId, last.id, responseWithReasoning, false, undefined, undefined, undefined, docSearch, undefined, undefined, genInlineAttachments, false, undefined, undefined, false);
           } else if (!isStoppedRef.current && response) {
             // Непотоковый режим: создаём сообщение только если его ещё нет
             const alreadyExists = currentChat?.messages.some(
@@ -1375,6 +1397,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
                 timestamp: data.timestamp || new Date().toISOString(),
                 isStreaming: false,
                 isImageGenerating: false,
+                isVideoGenerating: false,
                 generationStartedAtMs: Date.now(),
                 generationDurationSec: serverDurationSec ?? 1,
                 ...(docSearch ? { documentSearch: docSearch } : {}),
@@ -1398,7 +1421,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
           });
         }
 
-        if (data.image_generation === true || genInlineAttachments?.length) {
+        if (data.image_generation === true || data.video_generation === true || genInlineAttachments?.length) {
           window.dispatchEvent(new CustomEvent('astrachatCreationsUpdated'));
         }
 
@@ -1660,7 +1683,25 @@ export function SocketProvider({ children }: { children: ReactNode }) {
         });
         multiLLMMessageRef.current = assistantMessageId;
         currentMessageRef.current = null;
-      } else if (!isCodingModeEnabled(chatId) && isLikelyImageGenerationPrompt(message)) {
+      } else if (
+        !isCodingModeEnabled(chatId)
+        && isVideoGenerationModeEnabled(chatId)
+        && message.trim()
+      ) {
+        const placeholderId = addMessage(chatId, {
+          role: 'assistant',
+          content: '',
+          timestamp: new Date().toISOString(),
+          isStreaming: true,
+          isVideoGenerating: true,
+          generationStartedAtMs: Date.now(),
+        });
+        currentMessageRef.current = placeholderId;
+      } else if (
+        !isCodingModeEnabled(chatId)
+        && isImageGenerationModeEnabled(chatId)
+        && message.trim()
+      ) {
         const placeholderId = addMessage(chatId, {
           role: 'assistant',
           content: '',
@@ -1722,6 +1763,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
       project_memory: project?.memory || null,
       project_instructions: project?.instructions || null,
       model_comparison_enabled: Boolean(expectMultiLlm),
+      model_path: resolveChatModelPath(),
       enable_thinking: resolveEnableThinking(),
       skill_ids: skillIds.length ? skillIds : undefined,
       // Inline-вложения (без RAG/эмбединга)
@@ -1745,6 +1787,8 @@ export function SocketProvider({ children }: { children: ReactNode }) {
       plan_mode: isCodingPlanModeEnabled(chatId),
       workspace_path: resolveWorkspaceForChat(project?.workspacePath),
       approved_plan: getApprovedPlan(chatId) || undefined,
+      image_generation_mode: isImageGenerationModeEnabled(chatId),
+      video_generation_mode: isVideoGenerationModeEnabled(chatId),
       image_gen_preset_id: readSelectedImageGenPresetId() || undefined,
     };
 
@@ -1861,6 +1905,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
       project_memory: project?.memory || null,
       project_instructions: project?.instructions || null,
       model_comparison_enabled: true,
+      model_path: resolveChatModelPath(),
       enable_thinking: resolveEnableThinking(),
       skill_ids: (() => {
         const ids = resolveSkillIds(chatId, userMessage);
@@ -1963,6 +2008,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
       agent_id: agentIdForChat,
       agent_name: agentNameForChat,
       rag_strategy: ragStrategy,
+      model_path: resolveChatModelPath(),
       enable_thinking: resolveEnableThinking(),
       skill_ids: (() => {
         const ids = resolveSkillIds(chatId, userMessage);
@@ -1977,6 +2023,8 @@ export function SocketProvider({ children }: { children: ReactNode }) {
         const pid = chat?.projectId;
         return pid ? resolveWorkspaceForChat(getProjectById(pid)?.workspacePath) : resolveWorkspaceForChat(undefined);
       })(),
+      image_generation_mode: isImageGenerationModeEnabled(chatId),
+      video_generation_mode: isVideoGenerationModeEnabled(chatId),
       image_gen_preset_id: readSelectedImageGenPresetId() || undefined,
     };
 

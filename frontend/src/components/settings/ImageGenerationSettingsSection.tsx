@@ -464,7 +464,7 @@ export default function ImageGenerationSettingsSection() {
 
         <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
           Настройте pipeline как в ComfyUI: сохраните workflow (API format), привяжите node_map к промпту, шагам,
-          denoise, ControlNet/референсу. В чате: <strong>нарисуй кота</strong> или <code>/image закат</code>.
+          denoise, ControlNet/референсу. В чате: включите <strong>Инструменты → Режим генерации</strong>.
         </Typography>
 
         {loadingStatus ? (
@@ -486,7 +486,8 @@ export default function ImageGenerationSettingsSection() {
         {tab === 0 && (
           <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
             <Alert severity="warning">
-              Для чата выберите пресет в меню <strong>Модели → Изображения</strong> (это не LLM-модель).
+              Для чата включите <strong>Инструменты → Режим генерации</strong> и выберите пресет в
+              {' '}<strong>Модели → Изображения</strong> (это не LLM-модель).
               Активный пресет отображается под кнопкой «Модели» в чате.
             </Alert>
             <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', alignItems: 'center' }}>
