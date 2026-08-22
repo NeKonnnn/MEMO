@@ -8,32 +8,6 @@ import json
 from typing import Dict, List, Optional, Any
 from pathlib import Path
 
-def merge_context_prompt_into_system(
-    system_prompt: Optional[str],
-    model_path: Optional[str] = None,
-    custom_prompt_id: Optional[str] = None,
-    manager: Optional["ContextPromptManager"] = None,
-) -> Optional[str]:
-    """Добавляет глобальный/модельный промпт из Настройки → Модели к системным инструкциям."""
-    mgr = manager or context_prompt_manager
-    context_block = ""
-    if mgr:
-        try:
-            if model_path:
-                context_block = (mgr.get_effective_prompt(model_path, custom_prompt_id) or "").strip()
-            else:
-                context_block = (mgr.get_global_prompt() or "").strip()
-        except Exception:
-            context_block = ""
-
-    extra = (system_prompt or "").strip()
-    if context_block and extra:
-        return f"{context_block}\n\n{extra}"
-    if context_block:
-        return context_block
-    return extra or None
-
-
 class ContextPromptManager:
     """Менеджер контекстных промптов для моделей"""
     

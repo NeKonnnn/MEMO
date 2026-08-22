@@ -157,6 +157,10 @@ async def _resolve_agent_chat_params(agent_id_raw, user_id=None) -> dict:
         "artifacts_enabled": False,
         "shadcn_enabled": False,
         "user_prompt_mode": False,
+        "agent_id": None,
+        "agent_ids": [],
+        "hide_sequential_outputs": False,
+        "recursion_limit": None,
     }
     if agent_id_raw is None:
         return empty
@@ -178,7 +182,7 @@ async def _resolve_agent_chat_params(agent_id_raw, user_id=None) -> dict:
             return empty
         cfg = ag.config if isinstance(ag.config, dict) else {}
         mp = str(cfg.get("model") or cfg.get("model_path") or "").strip()
-        out = {**empty, "name": (ag.name or "").strip() or None}
+        out = {**empty, "name": (ag.name or "").strip() or None, "agent_id": aid}
         if mp:
             low = mp.lower()
             if low.startswith("1lm-svc://"):
@@ -241,6 +245,11 @@ async def _resolve_agent_chat_params(agent_id_raw, user_id=None) -> dict:
         out["artifacts_enabled"] = bool(cfg.get("artifacts_enabled", False))
         out["shadcn_enabled"] = bool(cfg.get("shadcn_enabled", False))
         out["user_prompt_mode"] = bool(cfg.get("user_prompt_mode", False))
+        from backend.agents.chain import parse_agent_ids, parse_recursion_limit
+
+        out["agent_ids"] = parse_agent_ids(cfg.get("agent_ids"), exclude_id=aid)
+        out["hide_sequential_outputs"] = bool(cfg.get("hide_sequential_outputs", False))
+        out["recursion_limit"] = parse_recursion_limit(cfg.get("recursion_limit"))
         logger.info(
             f"[chat] agent_id={aid} → model_path={out['model_path']}, "
             f"max_tokens={out['max_tokens']}, temperature={out['temperature']}, "
@@ -250,7 +259,9 @@ async def _resolve_agent_chat_params(agent_id_raw, user_id=None) -> dict:
             f"plugins_enabled={out['plugins_enabled']}, plugin_ids={out['plugin_ids']}, "
             f"artifacts_enabled={out['artifacts_enabled']}, "
             f"shadcn_enabled={out['shadcn_enabled']}, "
-            f"user_prompt_mode={out['user_prompt_mode']}"
+            f"user_prompt_mode={out['user_prompt_mode']}, "
+            f"agent_ids={out['agent_ids']}, hide_sequential={out['hide_sequential_outputs']}, "
+            f"recursion_limit={out['recursion_limit']}"
         )
         return out
     except Exception:

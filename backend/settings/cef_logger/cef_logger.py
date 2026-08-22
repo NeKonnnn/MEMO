@@ -221,6 +221,26 @@ EVENTS: Dict[str, CEFEventSpec] = {
         "Ошибка сохранения файла {fname} ({fsize} байт, scope: {cs1}) в PVC RAG "
         "пользователем {suser}. Причина: {reason} [{cat}]",
     ),
+    "FS011": CEFEventSpec(
+        "FS011",
+        "Rag Pvc File Delete",
+        3,
+        "/Storage/Pvc/Rag/Delete",
+        "delete",
+        "success",
+        "Файл {fname} (scope: {cs1}) удалён из PVC RAG ({cs2}) "
+        "пользователем {suser} [{cat}]",
+    ),
+    "FS012": CEFEventSpec(
+        "FS012",
+        "Rag Pvc File Delete Failed",
+        4,
+        "/Storage/Pvc/Rag/Delete",
+        "delete",
+        "failure",
+        "Ошибка удаления файла {fname} (scope: {cs1}) из PVC RAG "
+        "пользователем {suser}. Причина: {reason} [{cat}]",
+    ),
     "SEC001": CEFEventSpec(
         "SEC001",
         "User Login Success",
@@ -450,6 +470,15 @@ EVENTS: Dict[str, CEFEventSpec] = {
         "request",
         "failure",
         "Ошибка '{codeStatus} {textStatus}' обработки запроса '{methodName}' сервиса {serviceName} ({requestUuid})",
+    ),
+    "INT007": CEFEventSpec(
+        "INT007",
+        "SVC-RAG Model Error",
+        4,
+        "/Object/API/Request",
+        "request",
+        "failure",
+        "Сервис {serviceName} вернул ошибку моделей: '{codeStatus} {textStatus}' при обработке запроса '{methodName}' ({requestUuid})",
     ),
 }
 

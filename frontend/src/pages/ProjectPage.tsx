@@ -105,7 +105,7 @@ import { useTheme } from '@mui/material/styles';
 import ModelSelector from '../components/ModelSelector';
 import AgentSelector from '../components/AgentSelector';
 import { clearActiveAgent } from '../utils/clearActiveAgent';
-import { clearActiveSkills } from '../utils/skillSelectionStorage';
+import { clearActiveSkills, copyActiveSkills } from '../utils/skillSelectionStorage';
 import { useActiveSkillIndicators } from '../hooks/useActiveSkillIndicators';
 import {
   getProjectIconGlyphSx,
@@ -353,7 +353,7 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
 
   const mcpScopeChatId = projectId ? projectMcpChatKey(projectId) : null;
   const activeMcpServers = useChatInputMcpIndicators(mcpScopeChatId);
-  const activeSkills = useActiveSkillIndicators();
+  const activeSkills = useActiveSkillIndicators(mcpScopeChatId);
   const { activeMcpTools } = useMcpStreamingTools();
   const isDarkMode = theme.palette.mode === 'dark';
 
@@ -374,9 +374,9 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
   }, [showNotification]);
 
   const handleClearSkills = useCallback(() => {
-    clearActiveSkills();
+    clearActiveSkills(mcpScopeChatId);
     showNotification('info', 'Skills отключены');
-  }, [showNotification]);
+  }, [showNotification, mcpScopeChatId]);
 
   const libraryInputBadge = useMemo(
     () => (
@@ -598,6 +598,7 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
 
       if (projectId) {
         copyMcpToolIds(projectMcpChatKey(projectId), chatId);
+        copyActiveSkills(projectMcpChatKey(projectId), chatId);
       }
       
       // Отправляем сообщение; передаём projectId явно, так как state может не успеть обновиться
@@ -1410,7 +1411,7 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
                 {gearToolsPanel === 'agents' ? (
                   <ChatGearAgentsPanel isDarkMode={isDarkMode} />
                 ) : gearToolsPanel === 'skills' ? (
-                <ChatGearSkillsPanel isDarkMode={isDarkMode} />
+                <ChatGearSkillsPanel isDarkMode={isDarkMode} chatId={mcpScopeChatId} />
               ) : gearToolsPanel === 'mcp' ? (
                   <ChatGearMcpPanel isDarkMode={isDarkMode} chatId={mcpScopeChatId} />
                 ) : gearToolsPanel === 'coding' ? (

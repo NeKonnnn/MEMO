@@ -3,6 +3,7 @@ import { Box } from '@mui/material';
 import {
   isGpbPresentationHtml,
 } from '../../utils/presentationViewer';
+import { rewriteHtmlArtifactScriptsForOffline } from '../../utils/htmlArtifactScripts';
 import InlinePresentationViewer from '../InlinePresentationViewer';
 
 function escapeForSrcDoc(html: string): string {
@@ -10,7 +11,8 @@ function escapeForSrcDoc(html: string): string {
 }
 
 function buildGenericHtmlSrcDoc(rawHtml: string): string {
-  const html = escapeForSrcDoc(rawHtml);
+  const rewritten = rewriteHtmlArtifactScriptsForOffline(rawHtml || '');
+  const html = escapeForSrcDoc(rewritten);
   const looksComplete =
     /<!doctype/i.test(html) || /<html[\s>]/i.test(html);
   if (looksComplete) {
@@ -45,8 +47,8 @@ export default function ArtifactHtmlPreview({ content, isStreaming = false }: Pr
 
   if (isPresentation) {
     return (
-      <Box sx={{ height: '100%', minHeight: 280 }}>
-        <InlinePresentationViewer html={content} isStreaming={isStreaming} />
+      <Box sx={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}>
+        <InlinePresentationViewer html={content} isStreaming={isStreaming} embedded />
       </Box>
     );
   }
@@ -62,8 +64,9 @@ export default function ArtifactHtmlPreview({ content, isStreaming = false }: Pr
         height: '100%',
         minHeight: 320,
         border: 0,
-        borderRadius: 1,
+        borderRadius: 0,
         bgcolor: '#fff',
+        display: 'block',
       }}
     />
   );

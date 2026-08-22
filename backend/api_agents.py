@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from backend.auth.jwt_handler import get_current_user, get_optional_user
+from backend.auth.user_directory import enrich_items_author_full_names
 from backend.database.init_db import get_agent_repository
 from backend.database.postgresql.agent_models import (
     AgentCreate,
@@ -29,6 +30,17 @@ router = APIRouter(prefix="/api/agents", tags=["agents"])
 
 # Кэш ФИО по gpbu (логин один и тот же для LDAP и SSO), чтобы не дёргать LDAP на каждый запрос
 _full_name_cache: Dict[str, Optional[str]] = {}
+
+
+@router.get("/chain-config")
+async def get_agent_chain_config():
+    """Лимиты цепочки и шагов графа из ConfigMap (AGENT_CHAIN_MAX_AGENTS, AGENT_GRAPH_STEPS)."""
+    from backend.agents.chain import get_agent_graph_steps, get_max_chain_agents
+
+    return {
+        "max_agents": get_max_chain_agents(),
+        "graph_steps": get_agent_graph_steps(),
+    }
 
 
 async def _resolve_full_names(user_ids: List[str]) -> Dict[str, Optional[str]]:
@@ -122,7 +134,8 @@ async def _reject_foreign_kb_documents(
         )
 
 
-@router.post("/", response_model=dict, status_code=201)
+@router.post("", response_model=dict, status_code=201)
+@router.post("/", response_model=dict, status_code=201, include_in_schema=False)
 async def create_agent(
     request: Request, agent_data: AgentCreate, current_user: Annotated[dict, Depends(get_current_user)]
 ):
@@ -146,6 +159,8 @@ async def create_agent(
             return {"success": True, "agent_id": agent_id, "message": "Агент успешно создан"}
         else:
             raise HTTPException(status_code=500, detail="Ошибка при создании агента")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("Ошибка создания агента")
         raise HTTPException(status_code=500, detail=str(e)) from e
@@ -181,6 +196,7 @@ async def get_agent(agent_id: int, current_user: Annotated[Optional[dict], Depen
         if not can_access:
             raise HTTPException(status_code=403, detail="Нет доступа к этому агенту")
         await agent_repo.increment_views(agent_id)
+        await enrich_items_author_full_names([agent])
         return agent
     except HTTPException:
         raise
@@ -198,7 +214,8 @@ class AgentsResponse(BaseModel):
     pages: int
 
 
-@router.get("/", response_model=AgentsResponse)
+@router.get("", response_model=AgentsResponse)
+@router.get("/", response_model=AgentsResponse, include_in_schema=False)
 async def get_agents(
     current_user: Annotated[Optional[dict], Depends(get_optional_user)],
     search: Annotated[Optional[str], Query(description="Поисковый запрос")] = None,
@@ -212,7 +229,13 @@ async def get_agents(
 ):
     """Получение списка агентов с фильтрацией (публичный доступ)"""
     try:
-        logger.info(f"Запрос списка агентов: page={page}, limit={limit}, sort_by={sort_by}, sort_order={sort_order}")
+        logger.debug(
+            "Запрос списка агентов: page=%s, limit=%s, sort_by=%s, sort_order=%s",
+            page,
+            limit,
+            sort_by,
+            sort_order,
+        )
         agent_repo = get_agent_repository()
         tag_ids = None
         if tags:
@@ -232,7 +255,8 @@ async def get_agents(
         )
         user_id = current_user["user_id"] if current_user else None
         agents, total = await agent_repo.get_agents(filters, user_id)
-        logger.info(f"Получено агентов: {len(agents)}, всего: {total}")
+        await enrich_items_author_full_names(agents)
+        logger.debug("Получено агентов: %s, всего: %s", len(agents), total)
         pages = (total + limit - 1) // limit
         return AgentsResponse(agents=agents, total=total, page=page, pages=pages)
     except HTTPException:
@@ -323,16 +347,29 @@ async def delete_agent(request: Request, agent_id: int, current_user: Annotated[
                     orphans = await agent_repo.find_orphan_kb_document_ids(doc_ids)
                     if orphans:
                         from backend.settings.rag_client import get_rag_client
+                        from backend.routes.rag import _delete_rag_source_file
 
                         rag = get_rag_client()
                         for doc_id in orphans:
                             try:
-                                await rag.kb_delete_document(int(doc_id))
+                                out = await rag.kb_delete_document(int(doc_id))
                                 logger.info(
                                     "Удалён осиротевший KB-документ %s (агент %s)",
                                     doc_id,
                                     agent_id,
                                 )
+                                if isinstance(out, dict):
+                                    try:
+                                        _delete_rag_source_file(
+                                            out.get("minio_object"),
+                                            out.get("minio_bucket"),
+                                        )
+                                    except Exception:
+                                        logger.exception(
+                                            "Не удалось удалить файл KB-документа %s агента %s",
+                                            doc_id,
+                                            agent_id,
+                                        )
                             except Exception:
                                 logger.exception(
                                     "Не удалось удалить KB-документ %s агента %s",
@@ -576,6 +613,7 @@ async def get_my_bookmarks(
             agent = await agent_repo.get_agent(agent_id, current_user["user_id"])
             if agent:
                 agents.append(agent)
+        await enrich_items_author_full_names(agents)
         pages = (total + limit - 1) // limit
         logger.info(f"Возвращаем {len(agents)} агентов из закладок")
         return AgentsResponse(agents=agents, total=total, page=page, pages=pages)
@@ -602,6 +640,7 @@ async def get_my_agents(
             offset=(page - 1) * limit,
         )
         agents, total = await agent_repo.get_agents(filters, current_user["user_id"])
+        await enrich_items_author_full_names(agents)
         pages = (total + limit - 1) // limit
         return AgentsResponse(agents=agents, total=total, page=page, pages=pages)
     except Exception as e:
@@ -621,6 +660,7 @@ async def get_shared_with_me(
         agents, total = await agent_repo.get_shared_with_me(
             current_user["user_id"], limit=limit, offset=(page - 1) * limit
         )
+        await enrich_items_author_full_names(agents)
         pages = (total + limit - 1) // limit if total else 0
         return AgentsResponse(agents=agents, total=total, page=page, pages=pages)
     except Exception as e:

@@ -42,8 +42,10 @@ from backend.realtime.rag_evidence import build_reindex_status_message
 from backend.storage.rag_pvc import (
     RAG_PVC_BUCKET_MARKER,
     RAG_PVC_DIR_ENV,
+    RagPvcUnavailable,
     delete_rag_pvc_file,
     is_rag_pvc_bucket,
+    require_rag_pvc_available,
     save_rag_bytes_to_pvc,
     use_rag_pvc,
 )
@@ -117,6 +119,19 @@ async def _validate_local_model_path(model_type: str, model_path: str) -> None:
 
 def _rag_upload_username(current_user: dict) -> str:
     return current_user.get("username") or current_user.get("user_id") or "anonymous"
+
+
+def _require_storage_for_delete() -> None:
+    """503, если исходники в PVC, а том недоступен.
+
+    Зовётся ДО обращения к SVC-RAG: удаление записи о документе и удаление
+    самого файла — две разные системы.
+    """
+    try:
+        require_rag_pvc_available()
+    except RagPvcUnavailable as exc:
+        logger.error("Удаление отменено: %s", exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 def _delete_rag_source_file(object_name: Optional[str], bucket: Optional[str]) -> None:
@@ -2153,6 +2168,7 @@ async def kb_delete_document(document_id: int):
     require_service("rag")  # FEATURE-FLAG
     if not rag_client:
         raise HTTPException(status_code=503, detail="RAG service недоступен")
+    _require_storage_for_delete()
     try:
         out = await rag_client.kb_delete_document(document_id)
         if isinstance(out, dict) and out.get("ok") is False:
@@ -2179,6 +2195,7 @@ async def memory_rag_upload(
         require_service("minio")  # FEATURE-FLAG
     if not rag_client:
         raise HTTPException(status_code=503, detail="RAG service недоступен")
+    _require_storage_for_delete()
     username = _rag_upload_username(current_user)
     try:
         content = await file.read()
@@ -2266,6 +2283,7 @@ async def memory_rag_delete(document_id: int):
     require_service("rag")
     if not rag_client:
         raise HTTPException(status_code=503, detail="RAG service недоступен")
+    _require_storage_for_delete()
     try:
         out = await rag_client.memory_rag_delete_document(document_id)
         if not out.get("ok"):

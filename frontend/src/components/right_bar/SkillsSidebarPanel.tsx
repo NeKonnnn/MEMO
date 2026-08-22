@@ -33,7 +33,7 @@ import {
 } from '@mui/icons-material';
 import type { SxProps, Theme } from '@mui/material/styles';
 import { useAuth } from '../../contexts/AuthContext';
-import { useAppActions } from '../../contexts/AppContext';
+import { useAppActions, useAppContext } from '../../contexts/AppContext';
 import { getApiUrl, API_ENDPOINTS } from '../../config/api';
 import {
   getDropdownChevronSx,
@@ -51,7 +51,7 @@ import {
 } from '../../constants/sidebarPanelColor';
 import {
   getActiveSkillIds,
-  renameActiveSkillSlug,
+  renameSkillSlugInAllChats,
   SKILL_SELECTION_CHANGED_EVENT,
   toggleActiveSkill,
 } from '../../utils/skillSelectionStorage';
@@ -109,6 +109,11 @@ interface SkillsSidebarPanelProps {
   isOpen?: boolean;
 }
 
+/** Если skill был активен в чатах под старым slug — обновить упоминание. */
+function renameActiveSkillSlug(oldSlug: string, newSlug: string, name?: string): void {
+  renameSkillSlugInAllChats(oldSlug, newSlug, name);
+}
+
 /** Подпись поля + «?» со всплывающей подсказкой (как «Стратегия поиска» в RAG). */
 function FieldWithHelp({
   children,
@@ -147,6 +152,8 @@ export default function SkillsSidebarPanel({
   const theme = useTheme();
   const isDarkMode = theme.palette.mode === 'dark';
   const { token, user } = useAuth();
+  const { state: appState } = useAppContext();
+  const currentChatId = appState.currentChatId;
   const { showNotification } = useAppActions();
   const importRef = useRef<HTMLInputElement>(null);
 
@@ -254,7 +261,7 @@ export default function SkillsSidebarPanel({
   const [saveError, setSaveError] = useState<string | null>(null);
   const [shareDialogOpen, setShareDialogOpen] = useState(false);
   const [busyImportExport, setBusyImportExport] = useState(false);
-  const [activeIds, setActiveIds] = useState<string[]>(() => getActiveSkillIds());
+  const [activeIds, setActiveIds] = useState<string[]>(() => getActiveSkillIds(currentChatId));
   const [loadingDetail, setLoadingDetail] = useState(false);
   /** Slug на момент загрузки skill — чтобы обновить активный выбор при переименовании. */
   const loadedSlugRef = useRef<string>('');
@@ -288,10 +295,15 @@ export default function SkillsSidebarPanel({
   }, [isOpen, loadSkills]);
 
   useEffect(() => {
-    const onChange = () => setActiveIds(getActiveSkillIds());
-    window.addEventListener(SKILL_SELECTION_CHANGED_EVENT, onChange);
-    return () => window.removeEventListener(SKILL_SELECTION_CHANGED_EVENT, onChange);
-  }, []);
+    setActiveIds(getActiveSkillIds(currentChatId));
+    const onChange = (e: Event) => {
+      const detailChatId = (e as CustomEvent<{ chatId?: string }>).detail?.chatId;
+      if (detailChatId && currentChatId && detailChatId !== currentChatId) return;
+      setActiveIds(getActiveSkillIds(currentChatId));
+    };
+    window.addEventListener(SKILL_SELECTION_CHANGED_EVENT, onChange as EventListener);
+    return () => window.removeEventListener(SKILL_SELECTION_CHANGED_EVENT, onChange as EventListener);
+  }, [currentChatId]);
 
   const resetToNew = useCallback(() => {
     setSelectedSkillId('new');
@@ -532,12 +544,10 @@ export default function SkillsSidebarPanel({
       }));
       const finalSlug = saved.slug || slug;
       if (isEdit && loadedSlugRef.current && loadedSlugRef.current !== finalSlug) {
-        setActiveIds(
-          renameActiveSkillSlug(
-            loadedSlugRef.current,
-            finalSlug,
-            saved.display_title || saved.name || form.display_title || form.name,
-          ),
+        renameActiveSkillSlug(
+          loadedSlugRef.current,
+          finalSlug,
+          saved.display_title || saved.name || form.display_title || form.name,
         );
       }
       loadedSlugRef.current = finalSlug;
@@ -1087,6 +1097,7 @@ export default function SkillsSidebarPanel({
                       checked={chatActive}
                       onChange={() =>
                         toggleActiveSkill(
+                          currentChatId,
                           form.slug,
                           !chatActive,
                           form.display_title || form.name,

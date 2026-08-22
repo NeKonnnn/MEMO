@@ -22,14 +22,10 @@ interface Props {
 export default function ArtifactPreview({ artifact, isStreaming = false }: Props) {
   const { type, content, closed } = artifact;
 
+  // Пустой стрим: оверлей «Генерация…» рисует ArtifactCard (не здесь),
+  // чтобы текст не терялся из‑за наследования color из пузыря сообщения.
   if (!closed && isStreaming && !(content || '').trim()) {
-    return (
-      <Box sx={{ p: 2, display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 240 }}>
-        <Typography variant="body2" sx={{ color: '#374151', fontWeight: 500 }}>
-          Генерация артефакта…
-        </Typography>
-      </Box>
-    );
+    return <Box sx={{ height: '100%', minHeight: 240, bgcolor: '#e8eaed' }} />;
   }
 
   if (isHtmlArtifactType(type)) {
@@ -42,16 +38,6 @@ export default function ArtifactPreview({ artifact, isStreaming = false }: Props
     return <ArtifactMarkdownPreview content={content} />;
   }
   if (isMermaidArtifactType(type)) {
-    // Недописанный mermaid при стриме — не парсим (ошибки раньше утекали в body).
-    if (isStreaming && !closed) {
-      return (
-        <Box sx={{ p: 2, display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 240 }}>
-          <Typography variant="body2" sx={{ color: '#374151', fontWeight: 500 }}>
-            Диаграмма генерируется…
-          </Typography>
-        </Box>
-      );
-    }
     return <ArtifactMermaidPreview content={content} />;
   }
   if (isReactArtifactType(type)) {
@@ -59,8 +45,8 @@ export default function ArtifactPreview({ artifact, isStreaming = false }: Props
   }
 
   return (
-    <Box sx={{ p: 2 }}>
-      <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+    <Box sx={{ p: 2, color: '#1f2937' }}>
+      <Typography variant="body2" sx={{ mb: 1, color: '#4b5563' }}>
         Предпросмотр для типа «{type}» недоступен. Смотрите вкладку «Код».
       </Typography>
       <Box
@@ -69,10 +55,11 @@ export default function ArtifactPreview({ artifact, isStreaming = false }: Props
           m: 0,
           p: 1.5,
           borderRadius: 1,
-          bgcolor: 'rgba(0,0,0,0.04)',
+          bgcolor: 'rgba(255,255,255,0.85)',
           overflow: 'auto',
           fontSize: '0.8rem',
           whiteSpace: 'pre-wrap',
+          color: '#1f2937',
         }}
       >
         {content}

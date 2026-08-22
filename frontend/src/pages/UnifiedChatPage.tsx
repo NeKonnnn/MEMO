@@ -164,6 +164,8 @@ import {
   ModelThinkingMode,
 } from '../utils/modelThinking';
 import { applyAgentMcpToChat, applyStoredAgentMcpToChat } from '../utils/applyAgentMcp';
+import AgentChainUpdate from '../components/chat/AgentChainUpdate';
+import { resolveChainRenderSegments } from '../constants/agentChain';
 
 interface UnifiedChatPageProps {
   isDarkMode: boolean;
@@ -277,11 +279,13 @@ function ChatThinkingIndicator({
   leftAlignMessages,
   widescreenMode,
   startedAtMs,
+  agentName,
 }: {
   isDarkMode: boolean;
   leftAlignMessages: boolean;
   widescreenMode: boolean;
   startedAtMs?: number | null;
+  agentName?: string | null;
 }) {
   const elapsedSec = useElapsedSeconds(startedAtMs, true);
   const timerLabel =
@@ -345,7 +349,7 @@ function ChatThinkingIndicator({
                 }}
               />
               <Typography variant="caption" sx={{ opacity: 0.8, fontSize: '0.75rem', fontWeight: 500 }}>
-                AstraChat
+                {agentName?.trim() || 'AstraChat'}
               </Typography>
               <Typography variant="caption" sx={{ ml: 'auto', opacity: 0.6, fontSize: '0.7rem' }}>
                 {new Date().toLocaleTimeString('ru-RU', {
@@ -724,6 +728,7 @@ const MessageCardComponent = ({
   const [isHovered, setIsHovered] = useState(false);
   const [hoveredMultiLlmCol, setHoveredMultiLlmCol] = useState<number | null>(null);
   const [reasoningExpanded, setReasoningExpanded] = useState(false);
+  const [chainReasoningExpanded, setChainReasoningExpanded] = useState<Record<number, boolean>>({});
   const [multiReasoningExpanded, setMultiReasoningExpanded] = useState<Record<number, boolean>>({});
   const [lightboxSrc, setLightboxSrc] = useState<{ src: string; name: string } | null>(null);
   const thinkingStartRef = useRef<number | null>(null);
@@ -756,6 +761,19 @@ const MessageCardComponent = ({
   const parsedMessage = useMemo(
     () => extractReasoningBlock(visibleBody, message.isStreaming),
     [visibleBody, message.isStreaming],
+  );
+  const chainSegments = useMemo(
+    () =>
+      isUser
+        ? null
+        : resolveChainRenderSegments(
+            visibleBody,
+            message.chainSteps,
+            message.chainCurrentAgent,
+            message.isStreaming,
+            message.hideSequentialOutputs,
+          ),
+    [isUser, visibleBody, message.chainSteps, message.chainCurrentAgent, message.isStreaming, message.hideSequentialOutputs],
   );
   const assistantInlineAttachments = useMemo(
     () => (isUser ? undefined : getAssistantInlineAttachments(message)),
@@ -953,7 +971,11 @@ const MessageCardComponent = ({
           {isUser ? <PersonIcon /> : null}
         </Avatar>
         <Typography variant="caption" sx={{ opacity: 0.8, fontSize: '0.75rem', fontWeight: 500 }}>
-          {isUser ? (interfaceSettings.showUserName && username ? username : 'Вы') : 'AstraChat'}
+          {isUser
+            ? (interfaceSettings.showUserName && username ? username : 'Вы')
+            : (message.chainCurrentAgent?.agentName
+              || message.chainSteps?.[message.chainSteps.length - 1]?.agentName
+              || 'AstraChat')}
         </Typography>
         {!isUser && generationLabel ? (
           <Typography
@@ -1287,6 +1309,53 @@ const MessageCardComponent = ({
               );
             })}
           </Box>
+        ) : chainSegments ? (
+          <>
+            {chainSegments.map((seg, segIdx) => {
+              const parsedSeg = extractReasoningBlock(seg.content, Boolean(seg.running && message.isStreaming));
+              const segReasoning = (parsedSeg.reasoningContent || seg.reasoning || '').trim();
+              const segReasoningStreaming = Boolean(
+                parsedSeg.isThinkingStreaming ||
+                  (seg.running && message.isStreaming && parsedSeg.reasoningContent),
+              );
+              const segExpanded =
+                chainReasoningExpanded[segIdx] ?? (segReasoningStreaming || Boolean(segReasoning));
+              const waiting = Boolean(seg.running && !parsedSeg.visibleContent.trim() && !segReasoning);
+              return (
+                <Box key={`${seg.agentId}-${seg.agentName}-${segIdx}`}>
+                  <AgentChainUpdate
+                    name={seg.agentName}
+                    isDarkMode={isDarkMode}
+                    thinking={waiting}
+                  />
+                  {seg.documentSearch ? (
+                    <DocumentSearchPanel trace={seg.documentSearch} />
+                  ) : null}
+                  {segReasoning ? (
+                    <ReasoningBlock
+                      reasoningContent={segReasoning}
+                      isThinkingStreaming={segReasoningStreaming}
+                      isExpanded={segExpanded}
+                      onToggle={() =>
+                        setChainReasoningExpanded((p) => ({ ...p, [segIdx]: !segExpanded }))
+                      }
+                      durationSec={seg.running ? thinkingDurationSec : null}
+                      liveThinkingSec={seg.running ? liveThinkingSec : null}
+                      isDarkMode={isDarkMode}
+                    />
+                  ) : null}
+                  {parsedSeg.visibleContent.trim() ? (
+                    <MessageRenderer
+                      content={parsedSeg.visibleContent}
+                      isStreaming={Boolean(seg.running && message.isStreaming && !segReasoningStreaming)}
+                      onSendMessage={dataRef.current.handleSendMessageFromRenderer}
+                      messageId={`${message.id || `msg-${index}`}-chain-${segIdx}`}
+                    />
+                  ) : null}
+                </Box>
+              );
+            })}
+          </>
         ) : (
           <>
             {parsedMessage.reasoningContent ? (
@@ -1854,6 +1923,17 @@ export default function UnifiedChatPage({
     return null;
   }, [messages]);
 
+  const chainThinkingName = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      const message = messages[i];
+      if (message.role !== 'assistant') continue;
+      const name = message.chainCurrentAgent?.agentName?.trim();
+      if (name) return name;
+      break;
+    }
+    return null;
+  }, [messages]);
+
   const dropdownPanelSx = getDropdownPanelSx(isDarkMode);
   const dropdownItemSx = useMemo(() => getDropdownItemSx(isDarkMode), [isDarkMode]);
 
@@ -1975,7 +2055,7 @@ export default function UnifiedChatPage({
   
   // Состояние для режима multi-llm
   const activeMcpServers = useChatInputMcpIndicators(currentChat?.id);
-  const activeSkills = useActiveSkillIndicators();
+  const activeSkills = useActiveSkillIndicators(currentChat?.id);
   const { activeMcpTools } = useMcpStreamingTools();
 
   const mcpInputSuggestions = useMemo(() => {
@@ -2115,7 +2195,9 @@ export default function UnifiedChatPage({
       return 'Выберите модели для сравнения (до 4, хотя бы одну)';
     }
     if (lastStreamingAssistant?.isImageGenerating) return 'Генерация изображения…';
-    if (chatAwaitingTokens) return 'astrachat думает...';
+    if (chatAwaitingTokens) {
+      return chainThinkingName ? `${chainThinkingName} думает...` : 'astrachat думает...';
+    }
     return 'Чем я могу помочь вам сегодня?';
   }, [
     ragSendBlocked,
@@ -2126,6 +2208,7 @@ export default function UnifiedChatPage({
     multiLlmHasSelection,
     chatAwaitingTokens,
     lastStreamingAssistant?.isImageGenerating,
+    chainThinkingName,
   ]);
   const socketBlocksChatInput = !isConnected && !isConnecting && !token;
   const chatSendDisabled =
@@ -2155,9 +2238,9 @@ export default function UnifiedChatPage({
   }, [showNotification]);
 
   const handleClearSkills = useCallback(() => {
-    clearActiveSkills();
+    clearActiveSkills(currentChat?.id);
     showNotification('info', 'Skills отключены');
-  }, [showNotification]);
+  }, [showNotification, currentChat?.id]);
 
   const libraryInputBadge = useMemo(
     () => (
@@ -2257,7 +2340,7 @@ export default function UnifiedChatPage({
       showUserName: savedShowUserName !== null ? savedShowUserName === 'true' : false,
       enableNotification: savedEnableNotification !== null ? savedEnableNotification === 'true' : false,
       autoScrollWhileStreaming:
-        savedChatAutoscrollStreaming !== null ? savedChatAutoscrollStreaming === 'true' : true,
+        savedChatAutoscrollStreaming !== null ? savedChatAutoscrollStreaming === 'true' : false,
       chatInputStyle: (savedChatInputStyle as 'compact' | 'classic') || 'compact',
       followUpAutoGenerate: followUpSettings.followUpAutoGenerate,
       followUpShowScope: followUpSettings.followUpShowScope,
@@ -2356,7 +2439,7 @@ export default function UnifiedChatPage({
         showUserName: savedShowUserName !== null ? savedShowUserName === 'true' : false,
         enableNotification: savedEnableNotification !== null ? savedEnableNotification === 'true' : false,
         autoScrollWhileStreaming:
-          savedChatAutoscrollStreaming !== null ? savedChatAutoscrollStreaming === 'true' : true,
+          savedChatAutoscrollStreaming !== null ? savedChatAutoscrollStreaming === 'true' : false,
         chatInputStyle: (savedChatInputStyle as 'compact' | 'classic') || 'compact',
         followUpAutoGenerate: followUpSettings.followUpAutoGenerate,
         followUpShowScope: followUpSettings.followUpShowScope,
@@ -4290,7 +4373,9 @@ export default function UnifiedChatPage({
                   !message.multiLLMResponses?.length &&
                   !message.documentSearch &&
                   !message.isImageGenerating &&
-                  !message.inlineAttachments?.length;
+                  !message.inlineAttachments?.length &&
+                  !message.chainCurrentAgent &&
+                  !message.chainSteps?.length;
                 const parsedAssistant = isEmptyAssistantPlaceholder
                   ? extractReasoningBlock(message.content || '', message.isStreaming)
                   : null;
@@ -4329,12 +4414,13 @@ export default function UnifiedChatPage({
               })}
               
               {/* Индикатор размышления - показывается только до начала потоковой генерации, сразу после сообщений */}
-              {chatAwaitingTokens && (
+              {chatAwaitingTokens && !chainThinkingName && (
                 <ChatThinkingIndicator
                   isDarkMode={isDarkMode}
                   leftAlignMessages={interfaceSettings.leftAlignMessages}
                   widescreenMode={interfaceSettings.widescreenMode}
                   startedAtMs={chatAwaitingStartedAtMs}
+                  agentName={chainThinkingName}
                 />
               )}
             </Box>
@@ -4818,7 +4904,7 @@ export default function UnifiedChatPage({
               {gearToolsPanel === 'agents' ? (
                 <ChatGearAgentsPanel isDarkMode={isDarkMode} />
               ) : gearToolsPanel === 'skills' ? (
-                <ChatGearSkillsPanel isDarkMode={isDarkMode} />
+                <ChatGearSkillsPanel isDarkMode={isDarkMode} chatId={currentChat?.id} />
               ) : gearToolsPanel === 'mcp' ? (
                 <ChatGearMcpPanel isDarkMode={isDarkMode} chatId={currentChat?.id} />
               ) : gearToolsPanel === 'coding' ? (

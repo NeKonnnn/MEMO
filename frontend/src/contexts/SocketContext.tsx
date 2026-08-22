@@ -12,8 +12,9 @@ import {
   ModelThinkingMode,
   resolveEnableThinkingByMode,
 } from '../utils/modelThinking';
+import { mapChainStepsFromMeta } from '../constants/agentChain';
 import { 
-  showBrowserNotification, 
+  showBrowserNotification,
   areNotificationsEnabled, 
   isNotificationSupported,
   requestNotificationPermission 
@@ -208,12 +209,126 @@ export function SocketProvider({ children }: { children: ReactNode }) {
   const responseAccumulatedRef = useRef<string>('');
   const mcpToolCallsRef = useRef<McpToolCallRecord[]>([]);
 
+  type StreamSession = {
+    requestId: string;
+    chatId: string;
+    messageId: string | null;
+    multiLLMMessageId: string | null;
+    thinking: string;
+    responseAccumulated: string;
+    expectMultiLlm: boolean;
+    isStopped: boolean;
+    multiLLMResponses: Map<string, MultiLLMResponseSlot>;
+    expectedModelsCount: number;
+    mcpToolCalls: McpToolCallRecord[];
+    regeneration: {
+      isRegenerating: boolean;
+      assistantMessageId: string;
+      alternativeResponses: string[];
+      currentIndex: number;
+    } | null;
+  };
+
+  const streamSessionsRef = useRef<Map<string, StreamSession>>(new Map());
+
+  const persistActiveSession = (requestId: string | null | undefined) => {
+    if (!requestId) return;
+    const session = streamSessionsRef.current.get(requestId);
+    if (!session) return;
+    session.chatId = currentChatIdRef.current || session.chatId;
+    session.messageId = currentMessageRef.current;
+    session.multiLLMMessageId = multiLLMMessageRef.current;
+    session.thinking = thinkingTraceRef.current;
+    session.responseAccumulated = responseAccumulatedRef.current;
+    session.expectMultiLlm = expectMultiLlmResponseRef.current;
+    session.isStopped = isStoppedRef.current;
+    session.multiLLMResponses = multiLLMResponsesRef.current;
+    session.expectedModelsCount = expectedModelsCountRef.current;
+    session.mcpToolCalls = mcpToolCallsRef.current;
+    session.regeneration = regenerationStateRef.current;
+  };
+
+  const activateSession = (session: StreamSession) => {
+    currentChatIdRef.current = session.chatId;
+    currentMessageRef.current = session.messageId;
+    multiLLMMessageRef.current = session.multiLLMMessageId;
+    thinkingTraceRef.current = session.thinking;
+    responseAccumulatedRef.current = session.responseAccumulated;
+    expectMultiLlmResponseRef.current = session.expectMultiLlm;
+    isStoppedRef.current = session.isStopped;
+    multiLLMResponsesRef.current = session.multiLLMResponses;
+    expectedModelsCountRef.current = session.expectedModelsCount;
+    mcpToolCallsRef.current = session.mcpToolCalls;
+    regenerationStateRef.current = session.regeneration;
+    activeRequestIdRef.current = session.requestId;
+    if (session.regeneration?.isRegenerating) {
+      setRegeneratingAssistantId(session.regeneration.assistantMessageId);
+    }
+  };
+
+  const createStreamSession = (
+    requestId: string,
+    chatId: string,
+    partial?: Partial<Omit<StreamSession, 'requestId' | 'chatId'>>,
+  ): StreamSession => {
+    const session: StreamSession = {
+      requestId,
+      chatId,
+      messageId: partial?.messageId ?? null,
+      multiLLMMessageId: partial?.multiLLMMessageId ?? null,
+      thinking: partial?.thinking ?? '',
+      responseAccumulated: partial?.responseAccumulated ?? '',
+      expectMultiLlm: partial?.expectMultiLlm ?? false,
+      isStopped: partial?.isStopped ?? false,
+      multiLLMResponses: partial?.multiLLMResponses ?? new Map(),
+      expectedModelsCount: partial?.expectedModelsCount ?? 0,
+      mcpToolCalls: partial?.mcpToolCalls ?? [],
+      regeneration: partial?.regeneration ?? null,
+    };
+    streamSessionsRef.current.set(requestId, session);
+    return session;
+  };
+
+  const endStreamSession = (requestId: string | null | undefined) => {
+    if (!requestId) return;
+    streamSessionsRef.current.delete(requestId);
+  };
+
+  const resolveStreamSession = (data: any): StreamSession | null => {
+    const rid = typeof data?.request_id === 'string' ? data.request_id.trim() : '';
+    const cid = typeof data?.conversation_id === 'string' ? data.conversation_id.trim() : '';
+    if (rid) {
+      const byReq = streamSessionsRef.current.get(rid);
+      if (byReq) return byReq;
+    }
+    if (cid) {
+      let latest: StreamSession | null = null;
+      for (const session of Array.from(streamSessionsRef.current.values())) {
+        if (session.chatId === cid && !session.isStopped) latest = session;
+      }
+      if (latest) return latest;
+    }
+    // Старый сервер без id: только если нет конкурирующих сессий.
+    if (!rid && !cid && streamSessionsRef.current.size <= 1) {
+      const only = streamSessionsRef.current.values().next().value as StreamSession | undefined;
+      if (only) return only;
+      if (currentChatIdRef.current && activeRequestIdRef.current) {
+        return streamSessionsRef.current.get(activeRequestIdRef.current) || null;
+      }
+    }
+    // Событие с чужим request_id / conversation_id при живых сессиях — отбрасываем.
+    if ((rid || cid) && streamSessionsRef.current.size > 0) {
+      return null;
+    }
+    return null;
+  };
+
   const resolveMcpToolIds = (chatId: string): string[] => getMcpToolIdsForChat(chatId);
 
-  /** Mentions `$` + выбранные в меню «Инструменты → Skills». */
-  const resolveSkillIds = (message: string): string[] => {
+  /** Mentions `$` + выбранные в меню «Инструменты → Skills» для этого чата. */
+  const resolveSkillIds = (chatId: string, message: string): string[] => {
     const fromMention = extractSkillIds(message);
-    const fromMenu = getActiveSkillIds();
+    const fromMenu = getActiveSkillIds(chatId);
     if (!fromMention.length && !fromMenu.length) return [];
     const seen = new Set<string>();
     const out: string[] = [];
@@ -272,6 +387,10 @@ export function SocketProvider({ children }: { children: ReactNode }) {
     if (currentChatIdRef.current) {
       setChatLoading(currentChatIdRef.current, false);
     }
+    for (const session of Array.from(streamSessionsRef.current.values())) {
+      if (session.chatId) setChatLoading(session.chatId, false);
+    }
+    streamSessionsRef.current.clear();
     isStoppedRef.current = true;
     expectMultiLlmResponseRef.current = false;
     clearRegenerationUi();
@@ -452,6 +571,10 @@ export function SocketProvider({ children }: { children: ReactNode }) {
     });
 
     // Обработка событий Socket.IO
+    newSocket.on('chat_agent_update', (data) => {
+      handleServerMessage({ type: 'agent_update', ...data });
+    });
+
     newSocket.on('chat_thinking', (data) => {
       
       handleServerMessage({ type: 'thinking', ...data });
@@ -534,19 +657,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
 
   // Реф для хранения multi-llm сообщения
   const multiLLMMessageRef = useRef<string | null>(null);
-  const multiLLMResponsesRef = useRef<
-    Map<
-      string,
-      {
-        model: string;
-        content: string;
-        isStreaming: boolean;
-        error?: boolean;
-        generationStartedAtMs?: number;
-        generationDurationSec?: number;
-      }
-    >
-  >(new Map());
+  const multiLLMResponsesRef = useRef<Map<string, MultiLLMResponseSlot>>(new Map());
   const expectedModelsCountRef = useRef<number>(0); // Количество моделей, от которых ожидаем ответы
   /** Активен запрос multi-LLM с чата — блокирует обработку chat_chunk/chat_complete от старого tool-context и т.п. */
   const expectMultiLlmResponseRef = useRef<boolean>(false);
@@ -564,14 +675,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
   const mergeMultiLlmSocketPayload = (
     chatId: string,
     messageId: string,
-    incoming: Array<{
-      model: string;
-      content: string;
-      isStreaming: boolean;
-      error?: boolean;
-      generationStartedAtMs?: number;
-      generationDurationSec?: number;
-    }>,
+    incoming: MultiLLMResponseSlot[],
   ): MultiLLMResponseSlot[] => {
     const chat = getChatById(chatId) as Chat | undefined;
     const msg = chat?.messages.find((m) => m.id === messageId);
@@ -644,12 +748,46 @@ export function SocketProvider({ children }: { children: ReactNode }) {
   };
 
   const handleServerMessage = (data: any) => {
-    const incomingRequestId = typeof data?.request_id === 'string' ? data.request_id : '';
-    if (incomingRequestId && activeRequestIdRef.current && incomingRequestId !== activeRequestIdRef.current) {
+    const routedSession = resolveStreamSession(data);
+    const hasStreamIds =
+      (typeof data?.request_id === 'string' && data.request_id.trim()) ||
+      (typeof data?.conversation_id === 'string' && data.conversation_id.trim());
+    if (hasStreamIds && !routedSession && streamSessionsRef.current.size > 0) {
+      // Чанки другого чата/запроса — не пишем в активный UI.
       return;
+    }
+    if (routedSession) {
+      activateSession(routedSession);
     }
 
     switch (data.type) {
+      case 'agent_update':
+        {
+          if (!currentChatIdRef.current) break;
+          const agentName = typeof data.agent_name === 'string' && data.agent_name.trim()
+            ? data.agent_name.trim()
+            : 'Агент';
+          const current = {
+            agentId: Number.isFinite(Number(data.agent_id)) ? Number(data.agent_id) : null,
+            agentName,
+            index: Number(data.index) || 0,
+            total: Number(data.total) || 1,
+            hideSequential: Boolean(data.hide_sequential),
+            isLast: Boolean(data.is_last),
+          };
+          const targetId =
+            currentMessageRef.current
+            || getChatById(currentChatIdRef.current)?.messages.slice().reverse().find(
+              (m: Message) => m.role === 'assistant',
+            )?.id;
+          if (targetId) {
+            if (!currentMessageRef.current) currentMessageRef.current = targetId;
+            patchMessageFields(currentChatIdRef.current, targetId, { chainCurrentAgent: current });
+          }
+        }
+        persistActiveSession(activeRequestIdRef.current || routedSession?.requestId);
+        break;
+
       case 'thinking':
         {
           if (
@@ -685,6 +823,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
               });
               currentMessageRef.current = messageId;
             }
+            persistActiveSession(activeRequestIdRef.current || routedSession?.requestId);
             break;
           }
 
@@ -700,6 +839,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
           // Обновляем сообщение в реальном времени, чтобы блок рассуждений
           // отображался по мере поступления, а не только после chat_complete
           if (!currentChatIdRef.current || isStoppedRef.current || expectMultiLlmResponseRef.current) {
+            persistActiveSession(activeRequestIdRef.current || routedSession?.requestId);
             break;
           }
           const thinkingCombined = buildCombinedContent(
@@ -791,6 +931,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
             }
           }
         }
+        persistActiveSession(activeRequestIdRef.current || routedSession?.requestId);
         break;
 
       case 'multi_llm_start':
@@ -814,6 +955,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
           multiLLMMessageRef.current = messageId;
           multiLLMResponsesRef.current.clear();
         }
+        persistActiveSession(activeRequestIdRef.current || routedSession?.requestId);
         break;
 
       case 'multi_llm_chunk':
@@ -862,6 +1004,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
           );
           updateMessage(currentChatIdRef.current, multiLLMMessageRef.current, undefined, true, merged);
         }
+        persistActiveSession(activeRequestIdRef.current || routedSession?.requestId);
         break;
 
       case 'multi_llm_complete':
@@ -947,8 +1090,14 @@ export function SocketProvider({ children }: { children: ReactNode }) {
           multiLLMResponsesRef.current.clear();
           expectedModelsCountRef.current = 0;
           currentMessageRef.current = null;
-          activeRequestIdRef.current = null;
+          {
+            const doneId = activeRequestIdRef.current || routedSession?.requestId || null;
+            endStreamSession(doneId);
+            activeRequestIdRef.current = null;
+          }
           clearMcpToolActivity();
+        } else {
+          persistActiveSession(activeRequestIdRef.current || routedSession?.requestId);
         }
         
         break;
@@ -1044,6 +1193,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
           });
           currentMessageRef.current = messageId;
         }
+        persistActiveSession(activeRequestIdRef.current || routedSession?.requestId);
         break;
 
       case 'complete': {
@@ -1106,21 +1256,17 @@ export function SocketProvider({ children }: { children: ReactNode }) {
         incrementTabNotification();
 
         // КРИТИЧЕСКИ ВАЖНО: ВСЕГДА сбрасываем состояние загрузки В ПЕРВУЮ ОЧЕРЕДЬ
-        if (currentChatIdRef.current) {
-          setChatLoading(currentChatIdRef.current, false);
+        // Только для чата этой сессии — не трогаем другие параллельные генерации.
+        const chatId = currentChatIdRef.current || routedSession?.chatId || '';
+        if (chatId) {
+          setChatLoading(chatId, false);
         }
-        
-        
-        // ВАЖНО: Сначала пробуем получить chatId из ref, затем используем getCurrentChat
-        const chatId = currentChatIdRef.current || getCurrentChat()?.id;
-        
-        
+
         if (!chatId) {
-          
-          // Даже если нет chatId, пытаемся сбросить currentMessageRef
           if (currentMessageRef.current) {
             currentMessageRef.current = null;
           }
+          endStreamSession(activeRequestIdRef.current || routedSession?.requestId);
           return;
         }
         
@@ -1244,6 +1390,13 @@ export function SocketProvider({ children }: { children: ReactNode }) {
             generationDurationSec: serverDurationSec,
           });
         }
+        if (completedMessageId && Array.isArray(data.chain_steps) && data.chain_steps.length) {
+          patchMessageFields(chatId, completedMessageId, {
+            chainSteps: mapChainStepsFromMeta(data.chain_steps),
+            chainCurrentAgent: undefined,
+            hideSequentialOutputs: Boolean(data.hide_sequential_outputs),
+          });
+        }
 
         if (data.image_generation === true || genInlineAttachments?.length) {
           window.dispatchEvent(new CustomEvent('astrachatCreationsUpdated'));
@@ -1251,7 +1404,11 @@ export function SocketProvider({ children }: { children: ReactNode }) {
 
         thinkingTraceRef.current = '';
         responseAccumulatedRef.current = '';
-        activeRequestIdRef.current = null;
+        {
+          const doneId = activeRequestIdRef.current || routedSession?.requestId || null;
+          endStreamSession(doneId);
+          activeRequestIdRef.current = null;
+        }
         clearMcpToolActivity();
         break;
       }
@@ -1292,7 +1449,11 @@ export function SocketProvider({ children }: { children: ReactNode }) {
         multiLLMResponsesRef.current.clear();
         thinkingTraceRef.current = '';
         responseAccumulatedRef.current = '';
-        activeRequestIdRef.current = null;
+        {
+          const doneId = activeRequestIdRef.current || routedSession?.requestId || null;
+          endStreamSession(doneId);
+          activeRequestIdRef.current = null;
+        }
         break;
         
       case 'stopped':
@@ -1342,7 +1503,11 @@ export function SocketProvider({ children }: { children: ReactNode }) {
         expectedModelsCountRef.current = 0;
         thinkingTraceRef.current = '';
         responseAccumulatedRef.current = '';
-        activeRequestIdRef.current = null;
+        {
+          const doneId = activeRequestIdRef.current || routedSession?.requestId || null;
+          endStreamSession(doneId);
+          activeRequestIdRef.current = null;
+        }
         clearMcpToolActivity();
         break;
 
@@ -1382,6 +1547,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
             [...mcpToolCallsRef.current],
           );
         }
+        persistActiveSession(activeRequestIdRef.current || routedSession?.requestId);
         break;
       }
 
@@ -1454,15 +1620,19 @@ export function SocketProvider({ children }: { children: ReactNode }) {
     expectMultiLlmResponseRef.current = Boolean(expectMultiLlm);
     const requestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
     activeRequestIdRef.current = requestId;
-    
-    // Сбрасываем состояние для multi-llm режима
+
+    // Новая сессия стрима: не затираем другие чаты — у каждого request_id свой state.
     multiLLMMessageRef.current = null;
-    multiLLMResponsesRef.current.clear();
+    multiLLMResponsesRef.current = new Map();
     expectedModelsCountRef.current = 0;
     thinkingTraceRef.current = '';
     responseAccumulatedRef.current = '';
     mcpToolCallsRef.current = [];
     clearMcpToolActivity();
+    createStreamSession(requestId, chatId, {
+      expectMultiLlm: Boolean(expectMultiLlm),
+      multiLLMResponses: multiLLMResponsesRef.current,
+    });
     
     // Добавляем сообщение пользователя (с inline-вложениями для отображения в пузыре)
     const userMessageId = addMessage(chatId, {
@@ -1513,6 +1683,8 @@ export function SocketProvider({ children }: { children: ReactNode }) {
       }
     }
 
+    persistActiveSession(requestId);
+
     // Читаем флаг "Base знаний" из localStorage (устанавливается в UnifiedChatPage)
     const useKbRag = localStorage.getItem('use_kb_rag') === 'true';
     const useMemoryLibraryRag = localStorage.getItem('use_memory_library_rag') === 'true';
@@ -1532,7 +1704,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
     const project = projectId ? getProjectById(projectId) : null;
 
     // Отправляем сообщение через Socket.IO
-    const skillIds = resolveSkillIds(message);
+    const skillIds = resolveSkillIds(chatId, message);
     const messageData = {
       message,
       streaming: useStreaming,
@@ -1609,12 +1781,17 @@ export function SocketProvider({ children }: { children: ReactNode }) {
     }
     expectMultiLlmResponseRef.current = true;
     multiLLMMessageRef.current = assistantMessageId;
-    multiLLMResponsesRef.current.clear();
+    multiLLMResponsesRef.current = new Map();
     expectedModelsCountRef.current = 0;
     thinkingTraceRef.current = '';
     responseAccumulatedRef.current = '';
     const requestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
     activeRequestIdRef.current = requestId;
+    createStreamSession(requestId, chatId, {
+      expectMultiLlm: true,
+      multiLLMMessageId: assistantMessageId,
+      multiLLMResponses: multiLLMResponsesRef.current,
+    });
 
     const chat = getChatById(chatId);
     const msg = chat?.messages.find((m) => m.id === assistantMessageId);
@@ -1649,6 +1826,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
     }
 
     setChatLoading(chatId, true);
+    persistActiveSession(requestId);
 
     const useKbRag = localStorage.getItem('use_kb_rag') === 'true';
     const useMemoryLibraryRag = localStorage.getItem('use_memory_library_rag') === 'true';
@@ -1685,7 +1863,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
       model_comparison_enabled: true,
       enable_thinking: resolveEnableThinking(),
       skill_ids: (() => {
-        const ids = resolveSkillIds(userMessage);
+        const ids = resolveSkillIds(chatId, userMessage);
         return ids.length ? ids : undefined;
       })(),
       request_id: requestId,
@@ -1744,7 +1922,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
     
     // Сбрасываем состояние для multi-llm режима
     multiLLMMessageRef.current = null;
-    multiLLMResponsesRef.current.clear();
+    multiLLMResponsesRef.current = new Map();
     expectedModelsCountRef.current = 0;
     expectMultiLlmResponseRef.current = false;
     thinkingTraceRef.current = '';
@@ -1753,9 +1931,14 @@ export function SocketProvider({ children }: { children: ReactNode }) {
     clearMcpToolActivity();
     const requestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
     activeRequestIdRef.current = requestId;
+    createStreamSession(requestId, chatId, {
+      messageId: assistantMessageId,
+      regeneration: regenerationStateRef.current,
+    });
     
     // Устанавливаем состояние загрузки
     setChatLoading(chatId, true);
+    persistActiveSession(requestId);
 
     // Отправляем запрос на перегенерацию через Socket.IO
     // Используем тот же endpoint, но без создания нового сообщения пользователя
@@ -1782,7 +1965,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
       rag_strategy: ragStrategy,
       enable_thinking: resolveEnableThinking(),
       skill_ids: (() => {
-        const ids = resolveSkillIds(userMessage);
+        const ids = resolveSkillIds(chatId, userMessage);
         return ids.length ? ids : undefined;
       })(),
       request_id: requestId,
@@ -1805,58 +1988,63 @@ export function SocketProvider({ children }: { children: ReactNode }) {
       showNotification('error', 'Нет соединения с сервером');
       return;
     }
-    
+
+    const stopChatId = currentChatIdRef.current;
+    const stopRequestId = activeRequestIdRef.current;
+
     // Блокируем создание новых сообщений из in-flight событий (chunk/complete)
     isStoppedRef.current = true;
-    
-    // Отправляем команду остановки через Socket.IO
+    for (const session of Array.from(streamSessionsRef.current.values())) {
+      session.isStopped = true;
+      if (session.chatId) {
+        setChatLoading(session.chatId, false);
+        if (session.messageId) {
+          updateMessage(session.chatId, session.messageId, undefined, false);
+        }
+        if (session.multiLLMMessageId) {
+          const snap = Array.from(session.multiLLMResponses.values()).map((r) => ({
+            ...r,
+            isStreaming: false,
+          }));
+          updateMessage(
+            session.chatId,
+            session.multiLLMMessageId,
+            undefined,
+            false,
+            snap.length
+              ? mergeMultiLlmSocketPayload(session.chatId, session.multiLLMMessageId, snap)
+              : undefined,
+          );
+        }
+      }
+    }
+    streamSessionsRef.current.clear();
+
     socket.emit('stop_generation', {
       timestamp: new Date().toISOString(),
+      ...(stopChatId ? { conversation_id: stopChatId } : {}),
+      ...(stopRequestId ? { request_id: stopRequestId } : {}),
     });
-    
-    // Сразу останавливаем загрузку на фронтенде
-    if (currentChatIdRef.current) {
-      setChatLoading(currentChatIdRef.current, false);
+
+    if (stopChatId) {
+      setChatLoading(stopChatId, false);
     }
     expectMultiLlmResponseRef.current = false;
     clearRegenerationUi();
     clearMcpToolActivity();
-    
-    // Очищаем текущее сообщение и убираем флаг стриминга у всех сообщений
-    if (currentChatIdRef.current && currentMessageRef.current) {
-      updateMessage(currentChatIdRef.current, currentMessageRef.current, undefined, false);
+
+    if (stopChatId && currentMessageRef.current) {
+      updateMessage(stopChatId, currentMessageRef.current, undefined, false);
       currentMessageRef.current = null;
     }
 
-    // Multi-LLM: снять стриминг и полностью очистить refs
-    if (multiLLMMessageRef.current && currentChatIdRef.current) {
-      const snap = Array.from(multiLLMResponsesRef.current.values()).map((r) => ({
-        ...r,
-        isStreaming: false,
-      }));
-      const merged =
-        snap.length > 0
-          ? mergeMultiLlmSocketPayload(
-              currentChatIdRef.current,
-              multiLLMMessageRef.current,
-              snap,
-            )
-          : undefined;
-      updateMessage(
-        currentChatIdRef.current,
-        multiLLMMessageRef.current,
-        undefined,
-        false,
-        merged,
-      );
-    }
     multiLLMMessageRef.current = null;
     multiLLMResponsesRef.current.clear();
     expectedModelsCountRef.current = 0;
     thinkingTraceRef.current = '';
     responseAccumulatedRef.current = '';
     activeRequestIdRef.current = null;
-    
+
     showNotification('info', 'Генерация остановлена');
   };
 

@@ -306,6 +306,11 @@ interface InlinePresentationViewerProps {
   sourceSlot?: React.ReactNode;
   /** Пока модель стримит HTML — не пересоздаём iframe на каждый токен. */
   isStreaming?: boolean;
+  /**
+   * Внутри ArtifactCard: без своей рамки/шапки («Презентация»),
+   * иначе двойной chrome поверх заголовка артефакта.
+   */
+  embedded?: boolean;
 }
 
 /**
@@ -316,6 +321,7 @@ export default function InlinePresentationViewer({
   html,
   sourceSlot,
   isStreaming = false,
+  embedded = false,
 }: InlinePresentationViewerProps) {
   const [showSource, setShowSource] = useState(false);
   const [committedHtml, setCommittedHtml] = useState<string | null>(null);
@@ -356,8 +362,10 @@ export default function InlinePresentationViewer({
 
   const showLoader = pending && !srcDoc;
   const showGeneratingBadge = pending && !!srcDoc;
+  const showMissingSlides = !pending && !srcDoc;
 
   const statusLabel = (() => {
+    if (showMissingSlides) return 'Презентация · нет слайдов';
     if (!pending) return 'Презентация';
     if (readyCount > 0) {
       return `Презентация · готово ${readyCount}${startedCount > readyCount ? ` · слайд ${readyCount + 1}…` : '…'}`;
@@ -373,6 +381,128 @@ export default function InlinePresentationViewer({
       console.error('Failed to open presentation viewer:', e);
     }
   };
+
+  const stage = (
+    <Box
+      sx={
+        embedded
+          ? {
+              position: 'absolute',
+              inset: 0,
+              width: '100%',
+              height: '100%',
+              bgcolor: '#e8eaed',
+              overflow: 'hidden',
+            }
+          : {
+              width: '100%',
+              maxHeight: 'min(88vh, 880px)',
+              minHeight: 320,
+              position: 'relative',
+              bgcolor: '#e8eaed',
+              pt: `calc(100% / ${SLIDE_ASPECT})`,
+              pb: '48px',
+              overflow: 'hidden',
+            }
+      }
+    >
+      {srcDoc ? (
+        <Box
+          component="iframe"
+          key={`pptx-ready-${readyCount}-${pending ? 's' : 'done'}`}
+          title="Просмотр презентации"
+          srcDoc={srcDoc}
+          sandbox="allow-scripts allow-same-origin allow-downloads"
+          sx={{
+            position: 'absolute',
+            inset: 0,
+            width: '100%',
+            height: '100%',
+            border: 0,
+            display: 'block',
+          }}
+        />
+      ) : null}
+
+      {showLoader ? (
+        <Box
+          sx={{
+            position: 'absolute',
+            inset: 0,
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 1.5,
+            bgcolor: '#e8eaed',
+          }}
+        >
+          <CircularProgress size={36} thickness={4} sx={{ color: '#2355D7' }} />
+          <Typography variant="body2" sx={{ color: '#111', fontSize: 13 }}>
+            {startedCount > 0
+              ? `Генерируется слайд ${startedCount}…`
+              : 'Генерируется презентация…'}
+          </Typography>
+        </Box>
+      ) : null}
+
+      {showMissingSlides ? (
+        <Box
+          sx={{
+            position: 'absolute',
+            inset: 0,
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 1,
+            px: 2,
+            bgcolor: '#e8eaed',
+          }}
+        >
+          <Typography variant="body2" sx={{ color: '#991b1b', fontSize: 13, textAlign: 'center' }}>
+            В HTML нет элементов с классом <code>.slide</code>
+          </Typography>
+          <Typography variant="caption" sx={{ color: 'text.secondary', textAlign: 'center', maxWidth: 420 }}>
+            Каждый слайд должен быть обёрнут в <code>{'<div class="slide">'}</code> — не путать с{' '}
+            <code>slide-title</code> / <code>content-zone</code>.
+          </Typography>
+        </Box>
+      ) : null}
+
+      {showGeneratingBadge ? (
+        <Box
+          sx={{
+            position: 'absolute',
+            left: 12,
+            bottom: embedded ? 12 : 56,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 1,
+            px: 1.25,
+            py: 0.75,
+            borderRadius: 1.5,
+            bgcolor: 'rgba(255,255,255,0.92)',
+            boxShadow: '0 1px 4px rgba(0,0,0,0.12)',
+            pointerEvents: 'none',
+          }}
+        >
+          <CircularProgress size={14} thickness={5} sx={{ color: '#2355D7' }} />
+          <Typography variant="caption" sx={{ color: '#111', fontWeight: 500 }}>
+            Генерируется слайд {Math.max(startedCount, readyCount + 1)}…
+          </Typography>
+        </Box>
+      ) : null}
+    </Box>
+  );
+
+  if (embedded) {
+    return (
+      <Box sx={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}>
+        {stage}
+      </Box>
+    );
+  }
 
   return (
     <Box
@@ -427,82 +557,7 @@ export default function InlinePresentationViewer({
         </Box>
       </Box>
 
-      <Box
-        sx={{
-          width: '100%',
-          maxHeight: 'min(88vh, 880px)',
-          minHeight: 320,
-          position: 'relative',
-          bgcolor: '#e8eaed',
-          pt: `calc(100% / ${SLIDE_ASPECT})`,
-          pb: '48px',
-          overflow: 'hidden',
-        }}
-      >
-        {srcDoc ? (
-          <Box
-            component="iframe"
-            key={`pptx-ready-${readyCount}-${pending ? 's' : 'done'}`}
-            title="Просмотр презентации"
-            srcDoc={srcDoc}
-            sandbox="allow-scripts allow-same-origin allow-downloads"
-            sx={{
-              position: 'absolute',
-              inset: 0,
-              width: '100%',
-              height: '100%',
-              border: 0,
-              display: 'block',
-            }}
-          />
-        ) : null}
-
-        {showLoader ? (
-          <Box
-            sx={{
-              position: 'absolute',
-              inset: 0,
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: 1.5,
-              bgcolor: '#e8eaed',
-            }}
-          >
-            <CircularProgress size={36} thickness={4} sx={{ color: '#2355D7' }} />
-            <Typography variant="body2" sx={{ color: 'text.secondary', fontSize: 13 }}>
-              {startedCount > 0
-                ? `Генерируется слайд ${startedCount}…`
-                : 'Генерируется презентация…'}
-            </Typography>
-          </Box>
-        ) : null}
-
-        {showGeneratingBadge ? (
-          <Box
-            sx={{
-              position: 'absolute',
-              left: 12,
-              bottom: 56,
-              display: 'flex',
-              alignItems: 'center',
-              gap: 1,
-              px: 1.25,
-              py: 0.75,
-              borderRadius: 1.5,
-              bgcolor: 'rgba(255,255,255,0.92)',
-              boxShadow: '0 1px 4px rgba(0,0,0,0.12)',
-              pointerEvents: 'none',
-            }}
-          >
-            <CircularProgress size={14} thickness={5} sx={{ color: '#2355D7' }} />
-            <Typography variant="caption" sx={{ color: 'text.secondary', fontWeight: 500 }}>
-              Генерируется слайд {Math.max(startedCount, readyCount + 1)}…
-            </Typography>
-          </Box>
-        ) : null}
-      </Box>
+      {stage}
 
       {sourceSlot && !pending ? (
         <Collapse in={showSource} unmountOnExit timeout={180}>

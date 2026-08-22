@@ -1,247 +1,16 @@
-/** Открытие артефакта в отдельной вкладке (как presentation-viewer). */
+/** Открытие артефакта в отдельной вкладке — показываем уже отрисованную схему/диаграмму. */
 
 import {
+  isHtmlArtifactType,
+  isMarkdownArtifactType,
+  isMermaidArtifactType,
+  isSvgArtifactType,
+  prepareMermaidSourceForRender,
   repairMermaidSource,
   sanitizeMermaidSource,
   stripMermaidStyling,
 } from './artifacts';
-
-export interface ArtifactViewerPayload {
-  type: string;
-  content: string;
-  title?: string;
-}
-
-function escHtml(s: string): string {
-  return String(s)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
-function looksLikeMermaid(content: string): boolean {
-  return /^\s*(graph|flowchart|sequenceDiagram|classDiagram|stateDiagram|erDiagram|journey|gantt|pie|mindmap|timeline|gitGraph|xychart-beta|xychart)\b/m.test(
-    content || '',
-  );
-}
-
-function looksLikeSvg(content: string): boolean {
-  return /^\s*<svg[\s>]/i.test(content || '');
-}
-
-function shellPage(title: string, bodyInner: string, meta = ''): string {
-  const svgStage = meta === 'Mermaid' || meta === 'SVG';
-  return `<!DOCTYPE html>
-<html lang="ru">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>${escHtml(title)} — AstraChat</title>
-  <style>
-    * { box-sizing: border-box; }
-    html, body {
-      margin: 0;
-      min-height: 100%;
-      background: #e8eaed;
-      font-family: 'Segoe UI', system-ui, sans-serif;
-      color: #1f2937;
-    }
-    .wrap {
-      max-width: 1100px;
-      margin: 0 auto;
-      padding: 20px 16px 40px;
-    }
-    h1 { margin: 0 0 4px; font-size: 1.25rem; font-weight: 650; }
-    .meta { margin: 0 0 16px; font-size: 0.8rem; color: #6b7280; }
-    #stage {
-      background: #fff;
-      border-radius: 10px;
-      box-shadow: 0 2px 12px rgba(0,0,0,0.08);
-      padding: 20px;
-      min-height: 280px;
-      overflow: auto;
-      display: flex;
-      justify-content: center;
-      align-items: ${svgStage ? 'center' : 'flex-start'};
-      ${svgStage ? 'min-height: 60vh;' : ''}
-    }
-    #stage svg { max-width: 100%; height: auto; display: block; }
-    #stage iframe {
-      width: 100%;
-      min-height: 70vh;
-      border: 0;
-      border-radius: 8px;
-      background: #fff;
-    }
-    #stage pre {
-      margin: 0;
-      width: 100%;
-      white-space: pre-wrap;
-      font-family: Consolas, monospace;
-      font-size: 13px;
-      color: #111827;
-    }
-    .error {
-      margin: 0 0 16px;
-      padding: 12px 14px;
-      background: #fee2e2;
-      color: #991b1b;
-      border-radius: 8px;
-      font-size: 14px;
-      white-space: pre-wrap;
-      width: 100%;
-    }
-  </style>
-</head>
-<body>
-  <div class="wrap">
-    <h1>${escHtml(title)}</h1>
-    ${meta ? `<p class="meta">${escHtml(meta)}</p>` : ''}
-    <div id="stage">${bodyInner}</div>
-  </div>
-</body>
-</html>`;
-}
-
-/** Надёжнее document.write: blob URL не ломается после async. */
-function navigatePopup(win: Window, html: string) {
-  const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  try {
-    win.location.replace(url);
-  } catch {
-    try {
-      win.location.href = url;
-    } catch {
-      /* ignore */
-    }
-  }
-  window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
-}
-
-let mermaidInitDone = false;
-
-async function renderMermaidToSvg(raw: string): Promise<string> {
-  const mermaid = (await import('mermaid')).default;
-  if (!mermaidInitDone) {
-    mermaid.initialize({
-      startOnLoad: false,
-      suppressErrorRendering: true,
-      securityLevel: 'loose',
-      theme: 'neutral',
-    });
-    mermaidInitDone = true;
-  }
-
-  // Нормализуем переносы: модель иногда отдаёт всё в одну строку
-  const normalized = String(raw || '')
-    .replace(/\r\n/g, '\n')
-    .replace(/([;\]])\s+(?=[A-Za-zА-Яа-я])/g, '$1\n');
-
-  const variants = [
-    sanitizeMermaidSource(normalized),
-    repairMermaidSource(normalized),
-    stripMermaidStyling(normalized),
-  ].filter((v, i, arr) => v && arr.indexOf(v) === i);
-
-  let lastErr: unknown = null;
-  for (let i = 0; i < variants.length; i++) {
-    const id = `artifact-ext-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 7)}`;
-    try {
-      await mermaid.parse(variants[i]);
-      const { svg } = await mermaid.render(id, variants[i]);
-      try {
-        document.getElementById(id)?.remove();
-        document.getElementById(`d${id}`)?.remove();
-      } catch {
-        /* ignore */
-      }
-      if (svg && /<svg[\s>]/i.test(svg)) return svg;
-    } catch (e) {
-      lastErr = e;
-      try {
-        document.getElementById(id)?.remove();
-        document.getElementById(`d${id}`)?.remove();
-      } catch {
-        /* ignore */
-      }
-    }
-  }
-  throw lastErr || new Error('Не удалось отрисовать Mermaid');
-}
-
-/**
- * Открывает артефакт в новой вкладке.
- * Mermaid: предпочитаем уже готовый SVG (из чата) или рендерим локальным mermaid → blob HTML.
- */
-export async function openArtifactViewer(payload: ArtifactViewerPayload): Promise<void> {
-  const title = (payload.title || 'Артефакт').trim() || 'Артефакт';
-  const type = (payload.type || '').toLowerCase();
-  const content = payload.content || '';
-
-  const win = window.open('about:blank', '_blank');
-  if (!win) {
-    throw new Error('Всплывающее окно заблокировано браузером');
-  }
-  navigatePopup(win, shellPage(title, '<p style="margin:0;color:#6b7280">Загрузка…</p>', '…'));
-
-  try {
-    // Уже SVG (из DOM-превью чата)
-    if (type === 'image/svg+xml' || looksLikeSvg(content)) {
-      navigatePopup(win, shellPage(title, content, 'SVG'));
-      return;
-    }
-
-    const isMermaid = type === 'application/vnd.mermaid' || looksLikeMermaid(content);
-    if (isMermaid) {
-      const svg = await renderMermaidToSvg(content);
-      navigatePopup(win, shellPage(title, svg, 'Mermaid'));
-      return;
-    }
-
-    if (type === 'text/html' || type === 'application/vnd.code-html') {
-      let html = content;
-      if (!/<!doctype/i.test(html) && !/<html[\s>]/i.test(html)) {
-        html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><style>body{font-family:system-ui,sans-serif;padding:16px;color:#111}</style></head><body>${content}</body></html>`;
-      }
-      const srcdocAttr = html.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
-      navigatePopup(
-        win,
-        shellPage(
-          title,
-          `<iframe style="width:100%;min-height:70vh;border:0;border-radius:8px" sandbox="allow-scripts allow-same-origin allow-forms" srcdoc="${srcdocAttr}"></iframe>`,
-          'HTML',
-        ),
-      );
-      return;
-    }
-
-    if (type === 'text/markdown' || type === 'text/md') {
-      navigatePopup(win, shellPage(title, `<pre>${escHtml(content)}</pre>`, 'Markdown'));
-      return;
-    }
-
-    navigatePopup(
-      win,
-      shellPage(
-        title,
-        `<p style="margin:0 0 12px;color:#6b7280;font-size:14px;width:100%">Интерактивный preview в отдельной вкладке ограничен. Исходный код:</p><pre>${escHtml(content)}</pre>`,
-        type || 'unknown',
-      ),
-    );
-  } catch (e: any) {
-    const msg = e?.message || String(e) || 'Ошибка открытия';
-    navigatePopup(
-      win,
-      shellPage(
-        title,
-        `<div class="error">${escHtml(msg)}</div><pre>${escHtml(content)}</pre>`,
-        'Ошибка',
-      ),
-    );
-  }
-}
+import { rewriteHtmlArtifactScriptsForOffline } from './htmlArtifactScripts';
 
 export function sourceLabelForArtifactType(type: string): string {
   const t = (type || '').toLowerCase();
@@ -251,4 +20,224 @@ export function sourceLabelForArtifactType(type: string): string {
   if (t === 'image/svg+xml') return 'SVG';
   if (t === 'application/vnd.react' || t === 'application/vnd.ant.react') return 'React';
   return 'код';
+}
+
+function wrapCenteredSvg(svg: string, title: string): string {
+  return `<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>${escapeHtml(title)} — AstraChat</title>
+  <style>
+    html, body {
+      margin: 0; min-height: 100%;
+      background: #e8eaed;
+      display: flex; align-items: center; justify-content: center;
+      padding: 24px; font-family: 'Segoe UI', system-ui, sans-serif;
+    }
+    .card {
+      background: #fff; border-radius: 10px;
+      box-shadow: 0 2px 12px rgba(0,0,0,.08);
+      padding: 24px; max-width: 96vw; overflow: auto;
+    }
+    .card h1 { margin: 0 0 16px; font-size: 1.15rem; font-weight: 650; color: #1f2937; }
+    svg { max-width: 100%; height: auto; display: block; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>${escapeHtml(title)}</h1>
+    ${svg}
+  </div>
+</body>
+</html>`;
+}
+
+function wrapHtmlDocument(html: string, title: string): string {
+  const body = rewriteHtmlArtifactScriptsForOffline(html || '');
+  if (/<!doctype/i.test(body) || /<html[\s>]/i.test(body)) {
+    return body;
+  }
+  return `<!DOCTYPE html>
+<html lang="ru"><head><meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>${escapeHtml(title)} — AstraChat</title>
+<style>body{margin:0;padding:16px;font-family:system-ui,sans-serif}</style>
+</head><body>${body}</body></html>`;
+}
+
+function escapeHtml(s: string): string {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function pickMermaidSource(raw: string): string {
+  // Сначала исходник со стилями/цветами; strip — только fallback при битом синтаксисе.
+  return (
+    prepareMermaidSourceForRender(raw) ||
+    sanitizeMermaidSource(raw) ||
+    repairMermaidSource(raw) ||
+    stripMermaidStyling(raw) ||
+    (raw || '').trim()
+  );
+}
+
+/** SVG из DOM inline-viewer, если уже отрисован. */
+export function captureSvgFromPreviewRoot(root: HTMLElement | null): string | null {
+  if (!root) return null;
+  const svg = root.querySelector('svg');
+  return svg ? svg.outerHTML : null;
+}
+
+export function captureHtmlFromPreviewRoot(root: HTMLElement | null): string | null {
+  if (!root) return null;
+  const iframe = root.querySelector('iframe') as HTMLIFrameElement | null;
+  if (iframe) {
+    const srcdoc = iframe.getAttribute('srcdoc') || (iframe as any).srcdoc;
+    if (typeof srcdoc === 'string' && srcdoc.trim()) return srcdoc;
+    try {
+      const doc = iframe.contentDocument;
+      if (doc?.documentElement) return '<!DOCTYPE html>\n' + doc.documentElement.outerHTML;
+    } catch {
+      /* ignore */
+    }
+  }
+  return null;
+}
+
+async function renderMermaidToSvg(source: string): Promise<string> {
+  const code = pickMermaidSource(source);
+  const mermaid = (await import('mermaid')).default;
+  mermaid.initialize({
+    startOnLoad: false,
+    securityLevel: 'loose',
+    // Как в ArtifactMermaidPreview: base — чтобы themeVariables/цвета пользователя работали.
+    theme: 'base',
+    suppressErrorRendering: true,
+  });
+  const id = `artifact-ext-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+  const variants = [
+    code,
+    prepareMermaidSourceForRender(source),
+    sanitizeMermaidSource(source),
+    repairMermaidSource(source),
+    stripMermaidStyling(source),
+  ].filter((v, i, a) => v && a.indexOf(v) === i);
+  let lastErr: unknown = null;
+  for (const variant of variants) {
+    try {
+      const { svg } = await mermaid.render(`${id}-${variants.indexOf(variant)}`, variant);
+      return svg;
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error('Не удалось отрисовать Mermaid');
+}
+
+function simpleMarkdownToHtml(md: string): string {
+  return escapeHtml(md)
+    .replace(/^### (.*)$/gm, '<h3>$1</h3>')
+    .replace(/^## (.*)$/gm, '<h2>$1</h2>')
+    .replace(/^# (.*)$/gm, '<h1>$1</h1>')
+    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+    .replace(/`(.*?)`/g, '<code>$1</code>')
+    .replace(/\n/g, '<br/>');
+}
+
+/**
+ * Собирает полный HTML-документ для новой вкладки (схема/диаграмма, не сырой код).
+ */
+export async function buildArtifactViewerDocument(opts: {
+  type: string;
+  content: string;
+  title?: string;
+  previewRoot?: HTMLElement | null;
+}): Promise<string> {
+  const title = opts.title || sourceLabelForArtifactType(opts.type) || 'Артефакт';
+  const type = opts.type || '';
+
+  if (isMermaidArtifactType(type)) {
+    const fromDom = captureSvgFromPreviewRoot(opts.previewRoot || null);
+    const svg = fromDom || (await renderMermaidToSvg(opts.content));
+    return wrapCenteredSvg(svg, title);
+  }
+
+  if (isHtmlArtifactType(type)) {
+    const fromDom = captureHtmlFromPreviewRoot(opts.previewRoot || null);
+    return wrapHtmlDocument(fromDom || opts.content, title);
+  }
+
+  if (isSvgArtifactType(type)) {
+    const fromDom = captureSvgFromPreviewRoot(opts.previewRoot || null);
+    const svg = fromDom || opts.content;
+    return wrapCenteredSvg(svg.includes('<svg') ? svg : `<svg xmlns="http://www.w3.org/2000/svg">${svg}</svg>`, title);
+  }
+
+  if (isMarkdownArtifactType(type)) {
+    return wrapHtmlDocument(
+      `<div style="max-width:900px;margin:24px auto;padding:24px;background:#fff;border-radius:10px;box-shadow:0 2px 12px rgba(0,0,0,.08)">${simpleMarkdownToHtml(opts.content)}</div>`,
+      title,
+    );
+  }
+
+  // React и прочее — хотя бы не пустая страница; но пользователь просил схемы
+  return wrapHtmlDocument(
+    `<div style="max-width:900px;margin:24px auto;padding:24px;background:#fff;border-radius:10px">
+      <h1>${escapeHtml(title)}</h1>
+      <p style="color:#6b7280">Интерактивный preview этого типа в новой вкладке ограничен.</p>
+      <pre style="white-space:pre-wrap;font-size:13px">${escapeHtml(opts.content)}</pre>
+    </div>`,
+    title,
+  );
+}
+
+/** Открывает новую вкладку с готовым preview (localStorage + artifact-viewer.html). */
+export async function openArtifactViewer(opts: {
+  type: string;
+  content: string;
+  title?: string;
+  previewRoot?: HTMLElement | null;
+}): Promise<void> {
+  const STORAGE_PREFIX = 'astrachat:artifact:';
+  const key = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
+  let previewHtml = '';
+  try {
+    previewHtml = await buildArtifactViewerDocument(opts);
+  } catch (e) {
+    console.warn('artifact preview build failed, opening raw content fallback', e);
+  }
+
+  const payload = {
+    type: opts.type,
+    content: opts.content,
+    title: opts.title || sourceLabelForArtifactType(opts.type) || 'Артефакт',
+    previewHtml,
+  };
+
+  try {
+    localStorage.setItem(STORAGE_PREFIX + key, JSON.stringify(payload));
+  } catch {
+    throw new Error('Не удалось сохранить артефакт (слишком большой объём?)');
+  }
+
+  const base = (process.env.PUBLIC_URL || '').replace(/\/$/, '');
+  // Без noopener — иначе в части браузеров localStorage не успевает подхватиться новой вкладкой.
+  const win = window.open(
+    `${base}/artifact-viewer.html?key=${encodeURIComponent(key)}`,
+    '_blank',
+  );
+  if (!win) {
+    try {
+      localStorage.removeItem(STORAGE_PREFIX + key);
+    } catch {
+      /* ignore */
+    }
+    throw new Error('Всплывающее окно заблокировано браузером');
+  }
 }

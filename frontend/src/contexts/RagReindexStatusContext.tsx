@@ -4,6 +4,7 @@ import React, {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from 'react';
@@ -77,9 +78,19 @@ export function RagReindexStatusProvider({ children }: { children: ReactNode }) 
 
   const pollAgentId = useMemo(() => readActiveAgentId(), [location.pathname, state.currentChatId]);
 
+  // Актуальные значения для poll без перезапуска интервала на каждый апдейт chats (стрим).
+  const pathnameRef = useRef(location.pathname);
+  const chatsRef = useRef(state.chats);
+  const currentChatIdRef = useRef(state.currentChatId);
+  pathnameRef.current = location.pathname;
+  chatsRef.current = state.chats;
+  currentChatIdRef.current = state.currentChatId;
+
   useEffect(() => {
     let interval: ReturnType<typeof setInterval> | undefined;
     let cancelled = false;
+    let inFlight = false;
+    let abortController: AbortController | null = null;
 
     const startPolling = async () => {
       let settings;
@@ -94,12 +105,16 @@ export function RagReindexStatusProvider({ children }: { children: ReactNode }) 
       }
       if (cancelled) return;
 
-      const pollIntervalSeconds = settings.app.ragReindexStatusPollSeconds;
+      const pollIntervalSeconds = Math.max(1, settings.app.ragReindexStatusPollSeconds);
 
       const poll = async () => {
+        if (cancelled || inFlight) return;
+        inFlight = true;
+        abortController?.abort();
+        abortController = new AbortController();
         const activeAgentId = readActiveAgentId();
-        const routeProjectId = projectIdFromPathname(location.pathname);
-        const chat = state.chats.find((c) => c.id === state.currentChatId);
+        const routeProjectId = projectIdFromPathname(pathnameRef.current);
+        const chat = chatsRef.current.find((c) => c.id === currentChatIdRef.current);
         const activeProjectId = routeProjectId ?? chat?.projectId ?? null;
         const params = new URLSearchParams();
         if (activeAgentId != null) {
@@ -112,9 +127,11 @@ export function RagReindexStatusProvider({ children }: { children: ReactNode }) 
         try {
           const res = await fetch(getApiUrl(`/api/rag/reindex-status${qs}`), {
             headers: getAuthFetchHeaders(),
+            signal: abortController.signal,
           });
-          if (!res.ok) return;
+          if (!res.ok || cancelled) return;
           const data = (await res.json()) as RagReindexStatusPayload;
+          if (cancelled) return;
           setStatus({
             memory: { reindexing: Boolean(data.memory?.reindexing) },
             project: { reindexing: Boolean(data.project?.reindexing) },
@@ -126,8 +143,11 @@ export function RagReindexStatusProvider({ children }: { children: ReactNode }) 
             message: typeof data.message === 'string' ? data.message : '',
             active: Array.isArray(data.active) ? data.active : [],
           });
-        } catch {
+        } catch (err) {
+          if ((err as { name?: string })?.name === 'AbortError') return;
           /* ignore transient network errors */
+        } finally {
+          inFlight = false;
         }
       };
 
@@ -138,9 +158,12 @@ export function RagReindexStatusProvider({ children }: { children: ReactNode }) 
     void startPolling();
     return () => {
       cancelled = true;
+      abortController?.abort();
       if (interval) clearInterval(interval);
     };
-  }, [location.pathname, state.chats, state.currentChatId, pollProjectId, pollAgentId]);
+    // Не зависеть от state.chats: иначе каждый стрим-апдейт чата рвёт интервал
+    // и спамит GET /api/rag/reindex-status → ERR_INSUFFICIENT_RESOURCES.
+  }, [pollProjectId, pollAgentId]);
 
   const effectiveStatus = status ?? defaultStatus;
   const bannerCtx = useMemo(

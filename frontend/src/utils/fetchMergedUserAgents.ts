@@ -8,6 +8,7 @@ export interface UserAgentListItem {
   config?: Record<string, unknown>;
   author_id?: string;
   author_name?: string;
+  author_full_name?: string | null;
   my_permission?: 'owner' | 'editor' | 'viewer' | null;
   is_shared_with_me?: boolean;
   is_bookmarked?: boolean;

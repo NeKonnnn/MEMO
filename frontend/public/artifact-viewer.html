@@ -4,9 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Просмотр артефакта — AstraChat</title>
-  <!-- Fallback-страница (markdown и пр.). Mermaid обычно уже SVG из chat-приложения. -->
-  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <!-- Локальный mermaid (копируется prebuild), без внешнего CDN -->
+  <script src="/static/mermaid.min.js"></script>
   <style>
     * { box-sizing: border-box; }
     html, body {
@@ -39,11 +38,13 @@
       min-height: 280px;
       overflow: auto;
     }
-    #stage.svg-stage {
+    #stage.svg-only {
       display: flex;
-      justify-content: center;
       align-items: center;
-      min-height: 60vh;
+      justify-content: center;
+      background: transparent;
+      box-shadow: none;
+      padding: 0;
     }
     #stage svg { max-width: 100%; height: auto; }
     #stage pre {
@@ -68,11 +69,20 @@
       border: 0;
       border-radius: 8px;
       background: #fff;
+      display: block;
+    }
+    iframe.fullpage {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      border: 0;
+      background: #fff;
     }
   </style>
 </head>
 <body>
-  <div class="wrap">
+  <div class="wrap" id="chrome">
     <h1 id="title">Артефакт</h1>
     <p class="meta" id="meta"></p>
     <div id="error"></div>
@@ -87,6 +97,7 @@
       var stage = document.getElementById('stage');
       var titleEl = document.getElementById('title');
       var metaEl = document.getElementById('meta');
+      var chrome = document.getElementById('chrome');
 
       function showError(msg) {
         errorEl.style.display = 'block';
@@ -100,58 +111,23 @@
           .replace(/>/g, '&gt;');
       }
 
-      function stripStyleLines(code) {
-        return code
+      function stripMermaidJunk(code) {
+        code = String(code || '').replace(/\r\n/g, '\n').trim();
+        code = code.replace(/^```(?:mermaid)?\s*/i, '').replace(/\s*```$/i, '');
+        code = code
           .split('\n')
           .filter(function (line) {
-            return !/^\s*(style|classDef|class|linkStyle|click)\s+/i.test(line);
+            var t = line.trim();
+            if (/^`{3,}/.test(t)) return false;
+            // CSS-style в mermaid ломает парсер
+            if (/^style\s+/i.test(t) && /(text-align|font-weight|font-size|font-family)/i.test(t)) {
+              return false;
+            }
+            return true;
           })
           .join('\n')
           .trim();
-      }
-
-      function sanitizeMermaid(raw) {
-        var code = String(raw || '').replace(/\r\n/g, '\n').trim();
-        code = code.replace(/^```(?:mermaid)?\s*/i, '').replace(/\s*```$/i, '').trim();
-        var start = code.search(
-          /^\s*(graph|flowchart|sequenceDiagram|classDiagram|stateDiagram(?:-v2)?|erDiagram|journey|gantt|pie|mindmap|timeline|gitGraph|xychart-beta|xychart)\b/im
-        );
-        if (start > 0) code = code.slice(start);
-        return code.trim();
-      }
-
-      function renderMermaid(code) {
-        stage.classList.add('svg-stage');
-        var variants = [code, stripStyleLines(code)].filter(function (v, i, a) {
-          return v && a.indexOf(v) === i;
-        });
-
-        function tryOne(i) {
-          if (i >= variants.length) {
-            showError('Не удалось отрисовать Mermaid.');
-            stage.classList.remove('svg-stage');
-            stage.innerHTML = '<pre>' + esc(code) + '</pre>';
-            return;
-          }
-          var id = 'mmd-' + Date.now() + '-' + i;
-          stage.innerHTML = '<div class="mermaid" id="' + id + '">' + esc(variants[i]) + '</div>';
-          mermaid
-            .run({ nodes: [document.getElementById(id)] })
-            .then(function () {
-              /* ok */
-            })
-            .catch(function () {
-              tryOne(i + 1);
-            });
-        }
-
-        if (!window.mermaid) {
-          showError('Библиотека Mermaid не загрузилась (CDN). Откройте диаграмму снова из чата.');
-          stage.innerHTML = '<pre>' + esc(code) + '</pre>';
-          return;
-        }
-        mermaid.initialize({ startOnLoad: false, securityLevel: 'loose', theme: 'neutral', suppressErrorRendering: true });
-        tryOne(0);
+        return code;
       }
 
       if (!key) {
@@ -186,45 +162,93 @@
       var type = (payload.type || '').toLowerCase();
       var content = payload.content || '';
       var title = payload.title || 'Артефакт';
+      var previewHtml = payload.previewHtml || '';
       titleEl.textContent = title;
       metaEl.textContent = type || 'unknown';
       document.title = title + ' — AstraChat';
 
+      // 1) Уже отрисованный preview из чата — показываем как есть
+      if (previewHtml && previewHtml.trim()) {
+        var ph = previewHtml.trim();
+        if (/^<!doctype/i.test(ph) || /<html[\s>]/i.test(ph)) {
+          // Полноценный HTML-документ → fullscreen iframe
+          chrome.style.display = 'none';
+          var iframe = document.createElement('iframe');
+          iframe.className = 'fullpage';
+          iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-downloads');
+          iframe.srcdoc = ph;
+          document.body.appendChild(iframe);
+          return;
+        }
+        // Фрагмент (SVG / markdown html)
+        if (/^<svg[\s>]/i.test(ph)) {
+          stage.className = 'svg-only';
+          stage.innerHTML = ph;
+          return;
+        }
+        stage.innerHTML = ph;
+        return;
+      }
+
+      // 2) Fallback: рендер по типу
       if (type === 'text/html' || type === 'application/vnd.code-html') {
-        var iframe = document.createElement('iframe');
-        iframe.className = 'fill';
-        iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms');
+        chrome.style.display = 'none';
+        var iframe2 = document.createElement('iframe');
+        iframe2.className = 'fullpage';
+        iframe2.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-downloads');
         var html = content;
         if (!/<!doctype/i.test(html) && !/<html[\s>]/i.test(html)) {
           html = '<!DOCTYPE html><html><head><meta charset="UTF-8"><style>body{font-family:system-ui,sans-serif;padding:16px}</style></head><body>' + content + '</body></html>';
         }
-        iframe.srcdoc = html;
-        stage.innerHTML = '';
-        stage.appendChild(iframe);
+        iframe2.srcdoc = html;
+        document.body.appendChild(iframe2);
         return;
       }
 
       if (type === 'image/svg+xml') {
-        stage.classList.add('svg-stage');
+        stage.className = 'svg-only';
         stage.innerHTML = content;
         return;
       }
 
       if (type === 'text/markdown' || type === 'text/md') {
-        if (window.marked) {
-          stage.innerHTML = marked.parse(content);
-        } else {
-          stage.innerHTML = '<pre>' + esc(content) + '</pre>';
+        // Простой markdown fallback без CDN
+        var md = esc(content)
+          .replace(/^### (.*)$/gm, '<h3>$1</h3>')
+          .replace(/^## (.*)$/gm, '<h2>$1</h2>')
+          .replace(/^# (.*)$/gm, '<h1>$1</h1>')
+          .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+          .replace(/\n/g, '<br/>');
+        stage.innerHTML = md;
+        return;
+      }
+
+      if (type === 'application/vnd.mermaid') {
+        var code = stripMermaidJunk(content);
+        if (!window.mermaid) {
+          showError('Mermaid не загрузился (/static/mermaid.min.js). Показан исходник.');
+          stage.innerHTML = '<pre>' + esc(code) + '</pre>';
+          return;
         }
+        var id = 'mmd-' + Date.now();
+        mermaid.initialize({ startOnLoad: false, securityLevel: 'loose', theme: 'neutral', suppressErrorRendering: true });
+        mermaid
+          .render(id, code)
+          .then(function (res) {
+            stage.className = 'svg-only';
+            stage.innerHTML = res.svg;
+          })
+          .catch(function (e) {
+            showError('Не удалось отрисовать Mermaid: ' + (e && e.message ? e.message : e));
+            stage.innerHTML = '<pre>' + esc(code) + '</pre>';
+          });
         return;
       }
 
-      if (type === 'application/vnd.mermaid' || /^\s*(graph|flowchart|sequenceDiagram|pie|xychart)/m.test(content)) {
-        renderMermaid(sanitizeMermaid(content));
-        return;
-      }
-
-      stage.innerHTML = '<p style="margin-top:0;color:#6b7280;font-size:14px">Интерактивный preview React в отдельной вкладке ограничен. Исходный код:</p><pre>' + esc(content) + '</pre>';
+      stage.innerHTML =
+        '<p style="margin-top:0;color:#6b7280;font-size:14px">Для этого типа нет отдельного preview. Исходный код:</p><pre>' +
+        esc(content) +
+        '</pre>';
     })();
   </script>
 </body>

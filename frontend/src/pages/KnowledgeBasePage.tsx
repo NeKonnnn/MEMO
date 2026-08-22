@@ -188,13 +188,17 @@ export default function KnowledgeBasePage({ isDarkMode }: KnowledgeBasePageProps
     try {
       const url = `${getApiUrl(API_ENDPOINTS.KB_DOCUMENTS_DELETE)}/${docToDelete.id}`;
       const resp = await fetch(url, { method: 'DELETE' });
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      if (!resp.ok) {
+        const detail = await resp.json().then(d => d?.detail).catch(() => null);
+        throw new Error(detail || `HTTP ${resp.status}`);
+      }
       setSnackbar({ open: true, message: `Документ «${docToDelete.filename}» удалён из Базы Знаний`, severity: 'success' });
       setDeleteDialogOpen(false);
       setDocToDelete(null);
       await loadDocuments();
     } catch (e) {
-      setSnackbar({ open: true, message: `Ошибка удаления: ${e}`, severity: 'error' });
+      const msg = e instanceof Error ? e.message : String(e);
+      setSnackbar({ open: true, message: `Ошибка удаления: ${msg}`, severity: 'error' });
     }
   };
 

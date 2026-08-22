@@ -17,7 +17,6 @@ from backend.coding_agent.tools import (
     format_tool_result_for_llm,
     openai_tool_schemas,
 )
-from backend.context_prompts import merge_context_prompt_into_system
 from backend.llm_providers import get_registry
 from backend.mcp.resolvers import build_chat_messages
 from backend.settings.config import get_settings
@@ -567,8 +566,15 @@ class CodingAgentLoop:
         max_tokens: int = 4096,
         request_extra: Optional[Dict[str, Any]] = None,
         event_callback: Optional[CodingEventCallback] = None,
+        max_rounds: Optional[int] = None,
     ) -> CodingLoopResult:
-        max_rounds, max_tool_calls = _coding_limits()
+        cfg_rounds, max_tool_calls = _coding_limits()
+        if max_rounds is not None:
+            try:
+                cfg_rounds = max(1, int(max_rounds))
+            except (TypeError, ValueError):
+                pass
+        max_rounds = cfg_rounds
         registry = await get_registry()
         provider, model_id = registry.resolve(model_path)
         provider_id = getattr(provider, "id", provider.__class__.__name__)
@@ -1182,5 +1188,4 @@ def build_coding_system_prompt(
         parts.append(build_active_plan_note(approved_plan))
     if base_system and str(base_system).strip():
         parts.append(str(base_system).strip())
-    merged = "\n\n".join(parts)
-    return merge_context_prompt_into_system(merged, model_path=model_path)
+    return "\n\n".join(parts)

@@ -9,6 +9,12 @@ import logging.config
 
 from app.core.config import settings
 from app.api import router as api_router
+from app.core.cef_logger import (
+    CefAuditMiddleware,
+    CefAuthMiddleware,
+    configure_cef_logging,
+    log_cef_event,
+)
 from app.dependencies.rag_models_handler import (
     get_rag_models_handler,
     cleanup_rag_models_handler,
@@ -32,6 +38,8 @@ logging.config.dictConfig(
 )
 logger = logging.getLogger(__name__)
 
+configure_cef_logging()
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -44,10 +52,12 @@ async def lifespan(app: FastAPI):
                 logger.error("RAG-модели не поднялись%s", f": {err}" if err else "")
             else:
                 logger.info("Сервис RAG-моделей готов")
+        log_cef_event("SYS001")
     except Exception as e:
         logger.error(f"Ошибка при старте: {e}", exc_info=True)
         raise
     yield
+    log_cef_event("SYS002")
     await cleanup_rag_models_handler()
     logger.info("Сервис RAG-моделей остановлен")
 
@@ -68,6 +78,9 @@ def create_application() -> FastAPI:
         allow_methods=settings.cors.allow_methods,
         allow_headers=settings.cors.allow_headers,
     )
+    # CEF: auth (SEC001/SEC003) снаружи, затем OBJ001/OBJ002.
+    app.add_middleware(CefAuditMiddleware)
+    app.add_middleware(CefAuthMiddleware)
     app.include_router(api_router, prefix="/v1")
     return app
 

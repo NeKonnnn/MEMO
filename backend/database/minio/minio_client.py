@@ -213,13 +213,14 @@ class MinIOClient:
             logger.error(f"Ошибка получения пути к файлу: {e}")
             raise
     
-    def delete_file(self, object_name: str, bucket_name: str = None) -> bool:
+    def delete_file(self, object_name: str, bucket_name: str = None, *, cef_audit: bool = True) -> bool:
         """
         Удаляет файл из MinIO
         
         Args:
             object_name: Имя объекта в MinIO
             bucket_name: Имя bucket (если None, используется self.bucket_name)
+            cef_audit: писать CEF INT005/INT006 на remove
             
         Returns:
             bool: True если файл удален, False если не найден
@@ -227,13 +228,21 @@ class MinIOClient:
         bucket = bucket_name or self.bucket_name
         try:
             self.client.remove_object(bucket, object_name)
-            logger.debug(f"Файл удален из MinIO: {bucket}/{object_name}")
+            logger.debug("Файл удален из MinIO: %s/%s", bucket, object_name)
+            if cef_audit:
+                from backend.settings.cef_logger.storage_audit import log_minio_remove_success
+
+                log_minio_remove_success(object_name, bucket)
             return True
         except S3Error as e:
-            if e.code == 'NoSuchKey':
-                logger.warning(f"Файл не найден в MinIO: {bucket}/{object_name}")
+            if e.code == "NoSuchKey":
+                logger.warning("Файл не найден в MinIO: %s/%s", bucket, object_name)
                 return False
-            logger.error(f"Ошибка удаления файла из MinIO: {e}")
+            if cef_audit:
+                from backend.settings.cef_logger.storage_audit import log_minio_remove_failure
+
+                log_minio_remove_failure(object_name, bucket, str(e))
+            logger.exception("Ошибка удаления файла из MinIO")
             raise
     
     def file_exists(self, object_name: str, bucket_name: str = None) -> bool:

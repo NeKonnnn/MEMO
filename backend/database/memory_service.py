@@ -3,6 +3,7 @@
 Файловый режим отключен - используется только MongoDB
 """
 
+import contextvars
 import re
 import uuid
 from datetime import datetime
@@ -20,6 +21,44 @@ def _strip_reasoning_from_history_content(text: str) -> str:
     cleaned = re.sub("<think>[\\s\\S]*?</think>", "", text, flags=re.IGNORECASE)
     cleaned = re.sub("<think>[\\s\\S]*$", "", cleaned, flags=re.IGNORECASE)
     return cleaned.strip()
+
+
+def _history_content_with_inline_attach(role: str, content: str, metadata: Optional[Dict[str, Any]]) -> str:
+    """Для LLM: к user-сообщению из истории подмешиваем сохранённый inline_context.
+
+    В Mongo content хранит только вопрос (для UI), текст файла — в metadata.inline_context.
+    Без этого follow-up «по тому же файлу» не видит вложение.
+    """
+    cleaned = _strip_reasoning_from_history_content(content)
+    if (role or "").strip().lower() != "user":
+        return cleaned
+    meta = metadata if isinstance(metadata, dict) else {}
+    ctx = str(meta.get("inline_context") or "").strip()
+    if not ctx:
+        return cleaned
+    if "[Прикреплённый документ]" in (cleaned or ""):
+        return cleaned
+    question = (cleaned or "").strip()
+    if question:
+        return f"[Прикреплённый документ]\n{ctx}\n\n[Вопрос пользователя]\n{question}"
+    return f"[Прикреплённый документ]\n{ctx}"
+
+
+def _message_to_history_entry(message: Any) -> Dict[str, Any]:
+    meta = getattr(message, "metadata", None)
+    if not isinstance(meta, dict):
+        meta = {}
+    from backend.services.inline_images import image_refs_from_metadata
+
+    entry: Dict[str, Any] = {
+        "role": message.role,
+        "content": _history_content_with_inline_attach(message.role, message.content, meta),
+        "timestamp": message.timestamp.isoformat() if getattr(message, "timestamp", None) else None,
+    }
+    refs = image_refs_from_metadata(meta)
+    if refs:
+        entry["image_refs"] = refs
+    return entry
 
 
 mongodb_available = False
@@ -68,21 +107,82 @@ def _check_mongodb_available() -> bool:
         return False
 
 
-current_conversation_id = None
+# ВАЖНО (изоляция пользователей): раньше "текущий диалог" хранился в
+# module-global `current_conversation_id`, общий на весь процесс. При
+# конкурентных запросах разных пользователей значение перезаписывалось, и любой
+# код, читавший/сохранявший историю без явного conversation_id, получал ЧУЖОЙ
+# диалог — пользователи видели сообщения и инструкции друг друга.
+#
+# Теперь это ContextVar: значение изолировано в рамках одной asyncio-задачи
+# (один HTTP-запрос / одно событие Socket.IO / одно WS-соединение). Утечки между
+# параллельными пользователями больше невозможны через этот механизм.
+_current_conversation_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "current_conversation_id", default=None
+)
+
+
+def set_current_conversation_id(conversation_id: Optional[str]) -> None:
+    """Устанавливает ID текущего диалога ТОЛЬКО в контексте текущей задачи."""
+    _current_conversation_id.set(conversation_id or None)
 
 
 def get_or_create_conversation_id() -> str:
-    """Получение или создание ID текущего диалога"""
-    global current_conversation_id
-    if current_conversation_id is None:
-        current_conversation_id = f"conv_{uuid.uuid4().hex[:12]}"
-    return current_conversation_id
+    """Получение или создание ID текущего диалога (в пределах текущей задачи)."""
+    cid = _current_conversation_id.get()
+    if not cid:
+        cid = f"conv_{uuid.uuid4().hex[:12]}"
+        _current_conversation_id.set(cid)
+    return cid
 
 
 def reset_conversation():
-    """Сброс текущего диалога (начало нового)"""
-    global current_conversation_id
-    current_conversation_id = None
+    """Сброс текущего диалога (начало нового) в контексте текущей задачи."""
+    _current_conversation_id.set(None)
+
+
+def __getattr__(name: str):
+    """Совместимость для legacy-обращений к `memory_service.current_conversation_id`.
+
+    Возвращает значение из ContextVar, чтобы старый код не читал/писал общий на
+    процесс атрибут. Прямое присваивание модулю не должно использоваться —
+    вместо него есть set_current_conversation_id().
+    """
+    if name == "current_conversation_id":
+        return _current_conversation_id.get()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+async def verify_conversation_owner(conversation_id: Optional[str], user_id: Optional[str]) -> bool:
+    """Проверяет, что диалог можно читать/писать текущему пользователю.
+
+    Возвращает True, если:
+      - conversation_id/user_id не заданы (нечего проверять);
+      - диалога ещё нет (новый диалог создаётся при первом сообщении);
+      - диалог "ничей"/legacy (owner пустой или "default_user");
+      - владелец диалога совпадает с user_id.
+
+    Возвращает False только когда диалог принадлежит ДРУГОМУ пользователю —
+    это защита от чтения/записи чужой истории по угаданному conversation_id.
+    При недоступности БД делаем fail-open (True), чтобы не ронять чат.
+    """
+    if not conversation_id or not user_id:
+        return True
+    try:
+        global conversation_repo
+        if not _check_mongodb_available():
+            return True
+        if conversation_repo is None:
+            conversation_repo = get_conversation_repository()
+        conv = await conversation_repo.get_conversation(conversation_id)
+        if conv is None:
+            return True
+        owner = getattr(conv, "user_id", None)
+        if owner in (None, "", "default_user"):
+            return True
+        return owner == user_id
+    except Exception:
+        logger.exception("Ошибка проверки владельца диалога %s", conversation_id)
+        return True
 
 
 async def save_dialog_entry_mongodb(
@@ -363,14 +463,7 @@ async def load_dialog_history_mongodb(conversation_id: Optional[str] = None) -> 
             return []
         history = []
         for message in conversation.messages:
-            cleaned_content = _strip_reasoning_from_history_content(message.content)
-            history.append(
-                {
-                    "role": message.role,
-                    "content": cleaned_content,
-                    "timestamp": message.timestamp.isoformat() if message.timestamp else None,
-                }
-            )
+            history.append(_message_to_history_entry(message))
         return history
     except RuntimeError as e:
         logger.warning(f"MongoDB не инициализирован: {e}")
@@ -646,14 +739,7 @@ async def get_project_memory_history(project_id: str, max_entries: Optional[int]
         history: List[Dict[str, Any]] = []
         for conv in conversations:
             for msg in conv.messages:
-                cleaned_content = _strip_reasoning_from_history_content(msg.content)
-                history.append(
-                    {
-                        "role": msg.role,
-                        "content": cleaned_content,
-                        "timestamp": msg.timestamp.isoformat() if msg.timestamp else None,
-                    }
-                )
+                history.append(_message_to_history_entry(msg))
         if max_entries and len(history) > max_entries:
             history = history[-max_entries:]
         return history
@@ -677,14 +763,7 @@ async def get_default_memory_history(max_entries: Optional[int] = None) -> List[
         history: List[Dict[str, Any]] = []
         for conv in conversations:
             for msg in conv.messages:
-                cleaned_content = _strip_reasoning_from_history_content(msg.content)
-                history.append(
-                    {
-                        "role": msg.role,
-                        "content": cleaned_content,
-                        "timestamp": msg.timestamp.isoformat() if msg.timestamp else None,
-                    }
-                )
+                history.append(_message_to_history_entry(msg))
         if max_entries and len(history) > max_entries:
             history = history[-max_entries:]
         return history

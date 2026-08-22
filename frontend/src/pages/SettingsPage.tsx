@@ -678,7 +678,7 @@ export default function SettingsPage() {
               />
               
               <TextField
-                label="Максимум токенов ответа"
+                label="Лимит токенов ответа"
                 type="number"
                 value={modelSettings.output_tokens}
                 onChange={(e) => setModelSettings(prev => ({ 
@@ -714,7 +714,7 @@ export default function SettingsPage() {
               />
               
               <TextField
-                label="Штраф за повторения"
+                label="Штраф за повторы"
                 type="number"
                 value={modelSettings.repeat_penalty}
                 onChange={(e) => setModelSettings(prev => ({ 

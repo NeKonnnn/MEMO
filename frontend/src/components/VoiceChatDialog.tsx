@@ -26,7 +26,7 @@ import {
 } from '@mui/icons-material';
 import { useAppActions, useAppContext } from '../contexts/AppContext';
 import { useSocket } from '../contexts/SocketContext';
-import { getApiUrl, getWsUrl, API_ENDPOINTS } from '../config/api';
+import { getApiUrl, getAuthFetchHeaders, getAuthWsUrl, API_ENDPOINTS } from '../config/api';
 import VoiceVisualization3D from './VoiceVisualization3D';
 
 export interface VoiceChatDialogProps {
@@ -182,7 +182,7 @@ export default function VoiceChatDialog({ open, onClose }: VoiceChatDialogProps)
   const connectVoiceWebSocket = () => {
     if (voiceSocket && voiceSocket.readyState === WebSocket.OPEN) return;
 
-    const ws = new WebSocket(getWsUrl('/ws/voice'));
+    const ws = new WebSocket(getAuthWsUrl('/ws/voice'));
     setVoiceSocket(ws);
 
     ws.onopen = () => {
@@ -373,7 +373,7 @@ export default function VoiceChatDialog({ open, onClose }: VoiceChatDialogProps)
     try {
       const response = await fetch(getApiUrl(API_ENDPOINTS.CHAT), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthFetchHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ message: text, streaming: false }),
       });
       const result = await response.json();

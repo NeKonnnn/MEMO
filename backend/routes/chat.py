@@ -22,8 +22,9 @@ from backend.app_state import (
     recognize_speech_from_file,
     save_dialog_entry,
     speak_text,
+    verify_conversation_owner,
 )
-from backend.auth.jwt_handler import get_current_user
+from backend.auth.jwt_handler import decode_token_signature_only, get_current_user
 from backend.mcp.resolvers import resolve_chat_tool_ids
 from backend.database.mongodb.models import Conversation, Message as DbMessage
 from backend.llm_providers import get_registry
@@ -43,6 +44,31 @@ from backend.settings.logging.errors import logged_suppress
 logger = get_logger(__name__)
 
 router = APIRouter(tags=["chat"])
+
+
+async def _authenticate_ws(websocket: WebSocket) -> Optional[dict]:
+    """Аутентифицирует WebSocket-подключение по JWT.
+
+    Токен берём из query (?token=/?access_token=) или заголовка Authorization.
+    Возвращает данные пользователя либо None (в этом случае соединение уже
+    закрыто с кодом 1008). Раньше legacy /ws/chat был открыт всем без проверки.
+    """
+    token = websocket.query_params.get("token") or websocket.query_params.get("access_token")
+    if not token:
+        auth = websocket.headers.get("authorization") or ""
+        if auth.lower().startswith("bearer "):
+            token = auth[7:].strip()
+    if not token:
+        with logged_suppress(logger):
+            await websocket.close(code=1008, reason="Unauthorized")
+        return None
+    try:
+        return decode_token_signature_only(token)
+    except Exception:
+        logger.warning("WS: отклонено подключение с невалидным токеном")
+        with logged_suppress(logger):
+            await websocket.close(code=1008, reason="Unauthorized")
+        return None
 
 
 class ConnectionManager:
@@ -117,8 +143,18 @@ async def chat_with_ai(
 
     _audit_tok = cef_audit_set(request=request, user=current_user, socket_remote=None)
     try:
+        # Изоляция по пользователю: не полагаемся на общий на процесс "текущий
+        # диалог". Если клиент прислал conversation_id — проверяем владельца,
+        # иначе используем стабильный персональный диалог этого пользователя.
+        if message.conversation_id and not await verify_conversation_owner(
+            message.conversation_id, current_user["user_id"]
+        ):
+            raise HTTPException(status_code=403, detail="Нет доступа к этому диалогу")
+        conv_id = (message.conversation_id or "").strip() or f"voice_{current_user['user_id']}"
         history = (
-            await get_recent_dialog_history(max_entries=state.memory_max_messages) if get_recent_dialog_history else []
+            await get_recent_dialog_history(max_entries=state.memory_max_messages, conversation_id=conv_id)
+            if get_recent_dialog_history
+            else []
         )
         from backend.services.user_feedback_context import (
             build_user_feedback_system_block,
@@ -170,11 +206,17 @@ async def chat_with_ai(
                 mode_label="REST /api/chat — прямой LLM (без RAG)",
                 model_path_for_call=current_model_path,
             )
-            response = ask_agent(message.message, history=history, streaming=False, model_path=current_model_path)
+            response = ask_agent(
+                message.message,
+                history=history,
+                streaming=False,
+                model_path=current_model_path,
+                system_prompt=rest_system_prompt,
+            )
         else:
             logger.info(f"ПРЯМОЙ РЕЖИМ: ответ готов, длина: {len(response)} символов")
-        await save_dialog_entry("user", message.message, user_id=current_user["user_id"])
-        await save_dialog_entry("assistant", response, user_id=current_user["user_id"])
+        await save_dialog_entry("user", message.message, conversation_id=conv_id, user_id=current_user["user_id"])
+        await save_dialog_entry("assistant", response, conversation_id=conv_id, user_id=current_user["user_id"])
         return {"response": response, "timestamp": datetime.now().isoformat(), "success": True}
     except Exception as e:
         logger.exception("Ошибка операции")
@@ -616,6 +658,12 @@ async def websocket_chat(websocket: WebSocket):
     if not ask_agent or not save_dialog_entry:
         await websocket.close(code=1008, reason="AI services not available")
         return
+    ws_user = await _authenticate_ws(websocket)
+    if ws_user is None:
+        return
+    ws_user_id = ws_user.get("user_id")
+    # Диалог привязан к пользователю, а не к общему на процесс стейту.
+    ws_conv_id = f"wschat_{ws_user_id}"
     await manager.connect(websocket)
     try:
         while True:
@@ -623,11 +671,11 @@ async def websocket_chat(websocket: WebSocket):
             user_message = data.get("message", "")
             streaming = data.get("streaming", True)
             history = (
-                await get_recent_dialog_history(max_entries=state.memory_max_messages)
+                await get_recent_dialog_history(max_entries=state.memory_max_messages, conversation_id=ws_conv_id)
                 if get_recent_dialog_history
                 else []
             )
-            await save_dialog_entry("user", user_message)
+            await save_dialog_entry("user", user_message, conversation_id=ws_conv_id, user_id=ws_user_id)
             use_multi_llm = bool(data.get("model_comparison_enabled", False))
 
             def stream_cb(chunk, acc):
@@ -754,7 +802,7 @@ async def websocket_chat(websocket: WebSocket):
                     model_path=get_current_model_path(),
                 )
                 logger.info(f"WebSocket: получен ответ от AI agent, длина: {len(response)} символов")
-                await save_dialog_entry("assistant", response)
+                await save_dialog_entry("assistant", response, conversation_id=ws_conv_id, user_id=ws_user_id)
                 await websocket.send_text(
                     json.dumps({"type": "complete", "response": response, "timestamp": datetime.now().isoformat()})
                 )
@@ -772,6 +820,12 @@ async def websocket_chat(websocket: WebSocket):
 
 @router.websocket("/ws/voice")
 async def websocket_voice(websocket: WebSocket):
+    ws_user = await _authenticate_ws(websocket)
+    if ws_user is None:
+        return
+    ws_user_id = ws_user.get("user_id")
+    # Голосовой чат привязан к персональному диалогу пользователя.
+    ws_conv_id = f"voice_{ws_user_id}"
     await manager.connect(websocket)
     if not ask_agent or not save_dialog_entry:
         with logged_suppress(logger):
@@ -797,7 +851,9 @@ async def websocket_voice(websocket: WebSocket):
                     pass
             elif "bytes" in raw:
                 try:
-                    await _process_audio(websocket, raw["bytes"])
+                    await _process_audio(
+                        websocket, raw["bytes"], user_id=ws_user_id, conversation_id=ws_conv_id
+                    )
                 except Exception as e:
                     logger.exception("Ошибка операции")
                     with logged_suppress(logger):
@@ -908,7 +964,13 @@ async def websocket_dictation(websocket: WebSocket):
             manager.disconnect(websocket)
 
 
-async def _process_audio(websocket: WebSocket, data: bytes):
+async def _process_audio(
+    websocket: WebSocket,
+    data: bytes,
+    *,
+    user_id: Optional[str] = None,
+    conversation_id: Optional[str] = None,
+):
     import tempfile
 
     if state.voice_chat_stop_flag:
@@ -950,7 +1012,9 @@ async def _process_audio(websocket: WebSocket, data: bytes):
             return
         await websocket.send_text(json.dumps({"type": "speech_recognized", "text": text}))
         history = (
-            await get_recent_dialog_history(max_entries=state.memory_max_messages) if get_recent_dialog_history else []
+            await get_recent_dialog_history(max_entries=state.memory_max_messages, conversation_id=conversation_id)
+            if get_recent_dialog_history
+            else []
         )
         voice_prompt = "Ты — голосовой AI-ассистент AstraChat. Отвечай кратко, без markdown и emoji."
         ai_resp = await loop.run_in_executor(
@@ -959,8 +1023,8 @@ async def _process_audio(websocket: WebSocket, data: bytes):
                 text, history=history, streaming=False, model_path=get_current_model_path(), system_prompt=voice_prompt
             ),
         )
-        await save_dialog_entry("user", text)
-        await save_dialog_entry("assistant", ai_resp)
+        await save_dialog_entry("user", text, conversation_id=conversation_id, user_id=user_id)
+        await save_dialog_entry("assistant", ai_resp, conversation_id=conversation_id, user_id=user_id)
         await websocket.send_text(json.dumps({"type": "ai_response", "text": ai_resp}))
         speech_file = os.path.join(temp_dir, f"speech_{datetime.now().timestamp()}.wav")
         try:

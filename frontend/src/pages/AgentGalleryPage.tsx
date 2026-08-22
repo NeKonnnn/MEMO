@@ -16,12 +16,14 @@ import { useAuth } from '../contexts/AuthContext';
 import { useAppActions } from '../contexts/AppContext';
 import { loadAgentModelOnly } from '../utils/applyAgentServer';
 import { persistAgentMcpConfig } from '../utils/applyAgentMcp';
+import { persistAgentArtifactsEnabled } from '../utils/agentArtifactsEnabled';
 import { openAgentInConstructor } from '../utils/openAgentConstructorNav';
 import {
   GalleryEntityCard,
   GallerySearchBookmarksBar,
   type GalleryCardItem,
 } from '../components/galleryCards';
+import { formatAuthorLabel } from '../utils/formatAuthorLabel';
 
 interface GalleryAgent {
   id: number;
@@ -32,6 +34,7 @@ interface GalleryAgent {
   tools?: string[];
   author_id: string;
   author_name: string;
+  author_full_name?: string | null;
   is_public: boolean;
   usage_count: number;
   views_count: number;
@@ -54,7 +57,7 @@ function toCardItem(agent: GalleryAgent): GalleryCardItem {
   return {
     id: agent.id,
     title: agent.name,
-    authorName: agent.author_name,
+    authorName: formatAuthorLabel(agent.author_name, agent.author_full_name, agent.author_id),
     preview,
     viewsCount: agent.views_count,
     usageCount: agent.usage_count,
@@ -249,12 +252,18 @@ export function AgentGalleryContent({ embedded = false }: { embedded?: boolean }
       localStorage.setItem(STORAGE_AGENT_NAME, full.name);
       localStorage.setItem(STORAGE_AGENT_PROMPT, full.system_prompt || '');
       persistAgentMcpConfig(cfg);
+      persistAgentArtifactsEnabled(cfg);
       window.dispatchEvent(new CustomEvent('agentSelected', { detail: full }));
 
       if (!applied.ok) {
         showNotification(
           'warning',
           `Агент «${full.name}» добавлен в «Агенты из галереи», но настройки не применились: ${applied.message}`,
+        );
+      } else if ('pending' in applied && applied.pending) {
+        showNotification(
+          'info',
+          `Агент «${full.name}» добавлен. Модель подтянется при первом сообщении. Переходим…`,
         );
       } else {
         showNotification(

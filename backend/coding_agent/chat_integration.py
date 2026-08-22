@@ -40,6 +40,7 @@ async def run_coding_for_chat(
     max_tokens: int = 4096,
     enable_thinking: bool = False,
     emit_event: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+    max_rounds: Optional[int] = None,
 ) -> Optional[CodingLoopResult]:
     """
     Точка входа coding agent для Socket.IO / REST.
@@ -92,4 +93,5 @@ async def run_coding_for_chat(
         max_tokens=max(max_tokens, 4096),
         request_extra=request_extra,
         event_callback=emit_event,
+        max_rounds=max_rounds,
     )

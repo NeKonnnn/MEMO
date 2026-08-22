@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
-from backend.context_prompts import merge_context_prompt_into_system
 from backend.llm_providers.routing import thinking_request_extra
 from backend.mcp.agent_loop import get_mcp_agent_loop
 from backend.mcp.events import McpEventCallback
@@ -64,6 +63,7 @@ async def maybe_run_mcp_agent(
     max_tokens: int = 1024,
     enable_thinking: bool = False,
     event_callback: Optional[McpEventCallback] = None,
+    max_iterations: Optional[int] = None,
 ) -> Optional[AgentLoopResult]:
     platform = get_mcp_platform()
     if not platform.enabled or not platform.initialized:
@@ -107,6 +107,9 @@ async def maybe_run_mcp_agent(
     # UI «Быстрый»/«Мышление»: явно вкл/выкл (раньше при False флаг не слался).
     request_extra = thinking_request_extra(bool(enable_thinking))
     loop = get_mcp_agent_loop()
+    from backend.agents.chain import get_agent_graph_steps
+
+    iterations = max_iterations if max_iterations is not None else get_agent_graph_steps()
     return await loop.run(
         messages=messages,
         model_path=model_path,
@@ -117,6 +120,7 @@ async def maybe_run_mcp_agent(
         max_tokens=max_tokens,
         request_extra=request_extra,
         event_callback=event_callback,
+        max_iterations=iterations,
     )
 
 
@@ -134,6 +138,7 @@ async def run_mcp_for_chat(
     max_tokens: int = 1024,
     enable_thinking: bool = False,
     emit_event: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+    max_iterations: Optional[int] = None,
 ) -> Optional[AgentLoopResult]:
     """
     Единая точка входа MCP для socket и REST chat (B-40).
@@ -143,16 +148,16 @@ async def run_mcp_for_chat(
     ``model`` в ``emit_event`` callback на стороне handler.
     """
     mcp_ctx = build_mcp_context_from_user(user, chat_id=chat_id, message_id=message_id)
-    eff_system_prompt = merge_context_prompt_into_system(system_prompt, model_path=model_path)
     return await maybe_run_mcp_agent(
         tool_ids=tool_ids,
         user_message=user_message,
         history=history,
-        system_prompt=eff_system_prompt,
+        system_prompt=system_prompt,
         model_path=model_path,
         mcp_context=mcp_ctx,
         temperature=temperature,
         max_tokens=max_tokens,
         enable_thinking=enable_thinking,
         event_callback=emit_event,
+        max_iterations=max_iterations,
     )

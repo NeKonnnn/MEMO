@@ -103,6 +103,24 @@ export interface Message {
   generationStartedAtMs?: number;
   /** Длительность генерации в секундах (фиксируется по завершении). */
   generationDurationSec?: number;
+  /** Текущий агент последовательной цепочки (стрим). */
+  chainCurrentAgent?: {
+    agentId?: number | null;
+    agentName: string;
+    index: number;
+    total: number;
+    hideSequential?: boolean;
+    isLast?: boolean;
+  };
+  /** Шаги Mixture-of-Agents (сохраняются в metadata). */
+  chainSteps?: Array<{
+    agentId: number;
+    agentName: string;
+    content: string;
+    reasoning?: string;
+    documentSearch?: Message['documentSearch'];
+  }>;
+  hideSequentialOutputs?: boolean;
 }
 
 export interface Chat {
@@ -231,7 +249,7 @@ type AppAction =
   | { type: 'DELETE_ALL_CHATS' }
   | { type: 'ADD_MESSAGE'; payload: { chatId: string; message: Message } }
   | { type: 'UPDATE_MESSAGE'; payload: { chatId: string; messageId: string; content?: string; isStreaming?: boolean; multiLLMResponses?: Array<{ model: string; content: string; isStreaming?: boolean; error?: boolean; feedback?: MessageFeedback | null }>; alternativeResponses?: string[]; currentResponseIndex?: number; documentSearch?: Message['documentSearch']; reasoningContent?: string; mcpToolCalls?: Message['mcpToolCalls']; inlineAttachments?: Message['inlineAttachments']; isImageGenerating?: boolean; inlineAttachmentVariants?: Message['inlineAttachmentVariants']; feedback?: MessageFeedback | null } }
-  | { type: 'PATCH_MESSAGE_FIELDS'; payload: { chatId: string; messageId: string; fields: Partial<Pick<Message, 'followUpSuggestions' | 'followUpSuggestionsLoading' | 'generationStartedAtMs' | 'generationDurationSec'>> } }
+  | { type: 'PATCH_MESSAGE_FIELDS'; payload: { chatId: string; messageId: string; fields: Partial<Pick<Message, 'followUpSuggestions' | 'followUpSuggestionsLoading' | 'generationStartedAtMs' | 'generationDurationSec' | 'chainCurrentAgent' | 'chainSteps' | 'hideSequentialOutputs'>> } }
   | { type: 'APPEND_CHUNK'; payload: { chatId: string; messageId: string; chunk: string; isStreaming?: boolean } }
   | { type: 'SET_LOADING'; payload: boolean }
   | { type: 'SET_CHAT_LOADING'; payload: { chatId: string; loading: boolean } }
@@ -1213,6 +1231,9 @@ export function useAppActions() {
           | 'followUpSuggestionsLoading'
           | 'generationStartedAtMs'
           | 'generationDurationSec'
+          | 'chainCurrentAgent'
+          | 'chainSteps'
+          | 'hideSequentialOutputs'
         >
       >,
     ) => {

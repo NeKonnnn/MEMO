@@ -43,19 +43,25 @@ try:
         load_dialog_history,
         remove_last_user_message,
         reset_conversation,
+        save_assistant_response,
         save_dialog_entry,
+        set_current_conversation_id,
+        verify_conversation_owner,
     )
 
     logger.info("memory_service импортирован успешно")
 except Exception:
     logger.exception("Ошибка импорта memory_service")
     save_dialog_entry = None
+    save_assistant_response = None
     load_dialog_history = None
     clear_dialog_history = None
     get_recent_dialog_history = None
     reset_conversation = None
     get_or_create_conversation_id = None
     remove_last_user_message = None
+    set_current_conversation_id = None
+    verify_conversation_owner = None
 try:
     from backend.transcription.voice import (
         check_stt_available,
@@ -183,7 +189,7 @@ except ValueError:
 rag_rerank_top_n: int = max(1, min(_rtn, 64))
 rag_embedding_model_path: str = ""
 rag_reranker_model_path: str = ""
-rag_system_prompt: str = "Используй только предоставленный контекст. Если ответа нет в тексте, скажи «Не знаю». Не придумывай факты."
+rag_system_prompt: str = ""
 try:
     _rk = int(os.getenv("RAG_CHAT_TOP_K", "12"))
 except ValueError:
@@ -378,9 +384,7 @@ def load_app_settings() -> dict:
                 except (TypeError, ValueError):
                     pass
             if "rag_system_prompt" in data:
-                prompt = str(data.get("rag_system_prompt") or "").strip()
-                if prompt:
-                    rag_system_prompt = prompt
+                rag_system_prompt = str(data.get("rag_system_prompt") or "").strip()
             if "rag_embedding_model_path" in data:
                 rag_embedding_model_path = str(data.get("rag_embedding_model_path") or "").strip()
             if "rag_reranker_model_path" in data:

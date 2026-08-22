@@ -1,6 +1,7 @@
 import React, { useEffect, useId, useRef, useState } from 'react';
 import { Box, CircularProgress, Typography } from '@mui/material';
 import {
+  prepareMermaidSourceForRender,
   repairMermaidSource,
   sanitizeMermaidSource,
   stripMermaidStyling,
@@ -10,20 +11,22 @@ interface Props {
   content: string;
 }
 
-let mermaidInitDone = false;
+const MERMAID_INIT = {
+  startOnLoad: false,
+  suppressErrorRendering: true,
+  securityLevel: 'loose' as const,
+  // Только theme base уважает themeVariables (pie1..N, plotColorPalette).
+  // default/neutral подставляют свою палитру и игнорируют цвета пользователя.
+  theme: 'base' as const,
+};
+
+let mermaidInitTheme: string | null = null;
 
 async function getMermaid() {
   const mermaid = (await import('mermaid')).default;
-  if (!mermaidInitDone) {
-    mermaid.initialize({
-      startOnLoad: false,
-      // Иначе при Syntax error SVG «error in text / version X» уезжает в <body>
-      // и ломает прокрутку всей рабочей зоны чата.
-      suppressErrorRendering: true,
-      securityLevel: 'loose',
-      theme: 'neutral',
-    });
-    mermaidInitDone = true;
+  if (mermaidInitTheme !== MERMAID_INIT.theme) {
+    mermaid.initialize(MERMAID_INIT);
+    mermaidInitTheme = MERMAID_INIT.theme;
   }
   return mermaid;
 }
@@ -54,7 +57,11 @@ function errorMessage(e: any): string {
   return typeof msg === 'string' ? msg : 'Ошибка синтаксиса Mermaid';
 }
 
-async function tryRender(mermaid: any, renderId: string, code: string): Promise<string> {
+async function tryRender(
+  mermaid: any,
+  renderId: string,
+  code: string,
+): Promise<string> {
   await mermaid.parse(code);
   const { svg } = await mermaid.render(renderId, code);
   return svg;
@@ -79,8 +86,8 @@ export default function ArtifactMermaidPreview({ content }: Props) {
         if (!el) return;
         el.innerHTML = '';
 
-        // Три попытки: как есть → починка битых style → без style/class вовсе
         const variants = [
+          prepareMermaidSourceForRender(content),
           sanitizeMermaidSource(content),
           repairMermaidSource(content),
           stripMermaidStyling(content),
@@ -146,14 +153,64 @@ export default function ArtifactMermaidPreview({ content }: Props) {
   }, [reactId]);
 
   return (
-    <Box sx={{ p: 2, height: '100%', minHeight: '100%', overflow: 'auto', position: 'relative', boxSizing: 'border-box' }}>
+    <Box
+      sx={{
+        p: 2,
+        height: '100%',
+        minHeight: '100%',
+        overflow: 'auto',
+        position: 'relative',
+        boxSizing: 'border-box',
+        bgcolor: '#e8eaed',
+        color: '#1f2937',
+      }}
+    >
       {loading ? (
-        <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: 240, py: 4 }}>
-          <CircularProgress size={28} />
+        <Box
+          sx={{
+            display: 'flex',
+            flexDirection: 'column',
+            justifyContent: 'center',
+            alignItems: 'center',
+            gap: 1.5,
+            minHeight: 240,
+            height: '100%',
+            py: 4,
+          }}
+        >
+          <CircularProgress size={36} thickness={4} sx={{ color: '#2355D7 !important' }} />
+          <Box
+            component="span"
+            sx={{
+              display: 'inline-block',
+              fontSize: 13,
+              fontWeight: 600,
+              lineHeight: 1.4,
+              px: 2,
+              py: 0.75,
+              borderRadius: 1.5,
+              bgcolor: '#ffffff',
+              color: '#111827 !important',
+              boxShadow: '0 1px 4px rgba(0,0,0,0.14)',
+              border: '1px solid rgba(0,0,0,0.08)',
+            }}
+          >
+            Генерация схемы…
+          </Box>
         </Box>
       ) : null}
       {error ? (
-        <Typography color="error" variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>
+        <Typography
+          variant="body2"
+          sx={{
+            whiteSpace: 'pre-wrap',
+            color: '#991b1b',
+            bgcolor: 'rgba(255,255,255,0.95)',
+            borderRadius: 1.5,
+            p: 1.5,
+            boxShadow: '0 1px 4px rgba(0,0,0,0.08)',
+          }}
+        >
           {error}
         </Typography>
       ) : null}

@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { getApiUrl, getWsUrl, API_ENDPOINTS } from '../config/api';
+import { getApiUrl, getAuthFetchHeaders, getAuthWsUrl, API_ENDPOINTS } from '../config/api';
 import { useLocation } from 'react-router-dom';
 import {
   Box,
@@ -154,7 +154,7 @@ export default function VoicePage() {
       return; // Уже подключен
     }
     
-            const ws = new WebSocket(getWsUrl('/ws/voice'));
+            const ws = new WebSocket(getAuthWsUrl('/ws/voice'));
     setVoiceSocket(ws);
     
     ws.onopen = () => {
@@ -765,9 +765,7 @@ export default function VoicePage() {
       // Отправляем текст в чат
       const response = await fetch(getApiUrl(API_ENDPOINTS.CHAT), {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: getAuthFetchHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({
           message: text,
           streaming: false,

@@ -73,11 +73,11 @@ export default function RightBar({
 
   useEffect(() => {
     const sync = () => setPanelBg(getSidebarPanelBackground());
+    window.addEventListener('sidebarColorChanged', sync);
     window.addEventListener('storage', sync);
-    window.addEventListener('astra-sidebar-panel-bg', sync);
     return () => {
+      window.removeEventListener('sidebarColorChanged', sync);
       window.removeEventListener('storage', sync);
-      window.removeEventListener('astra-sidebar-panel-bg', sync);
     };
   }, []);
 

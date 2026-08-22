@@ -247,11 +247,17 @@ export default function MemoryRagLibraryModal({ open, onClose }: Props) {
     try {
       const url = `${getApiUrl(API_ENDPOINTS.MEMORY_RAG_DELETE)}/${doc.id}`;
       const resp = await fetch(url, { method: 'DELETE' });
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      if (!resp.ok) {
+        // Текст из detail объясняет причину («хранилище недоступно»),
+        // голый код ответа пользователю ничего не говорит.
+        const detail = await resp.json().then(d => d?.detail).catch(() => null);
+        throw new Error(detail || `HTTP ${resp.status}`);
+      }
       setBanner({ message: `«${doc.filename}» удалён`, severity: 'success' });
       setDocuments(await fetchDocumentList());
     } catch (e) {
-      setBanner({ message: `Ошибка удаления: ${e}`, severity: 'error' });
+      const msg = e instanceof Error ? e.message : String(e);
+      setBanner({ message: `Ошибка удаления: ${msg}`, severity: 'error' });
     }
   };
 

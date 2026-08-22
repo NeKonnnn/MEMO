@@ -344,14 +344,14 @@ export default function Sidebar({ open, onToggle, isDarkMode, onToggleTheme, onH
   // Загружаем настройку использования папок/проектов
   const [useFoldersMode, setUseFoldersMode] = React.useState(() => {
     const saved = localStorage.getItem('use_folders_mode');
-    return saved !== null ? saved === 'true' : true; // По умолчанию папки
+    return saved !== null ? saved === 'true' : false; // По умолчанию проекты (как в InterfaceSettings)
   });
 
   // Слушаем изменения настроек интерфейса
   React.useEffect(() => {
     const handleSettingsChange = () => {
       const saved = localStorage.getItem('use_folders_mode');
-      setUseFoldersMode(saved !== null ? saved === 'true' : true);
+      setUseFoldersMode(saved !== null ? saved === 'true' : false);
     };
     
     window.addEventListener('interfaceSettingsChanged', handleSettingsChange);

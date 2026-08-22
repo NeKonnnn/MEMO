@@ -1,5 +1,6 @@
 import { getApiUrl } from '../config/api';
 import type { Chat, Message, MessageFeedback, MultiLLMResponseSlot } from '../contexts/AppContext';
+import { mapChainStepsFromMeta } from '../constants/agentChain';
 import { normalizeMcpToolCallList } from '../mcp/utils/normalizeToolCall';
 
 function mapFeedbackFromMeta(raw: unknown): MessageFeedback | undefined {
@@ -184,6 +185,8 @@ export function mapServerConversationToChat(conversation: any): Chat {
               )
             : multiLLMResponses;
 
+        const chainSteps = mapChainStepsFromMeta(metadata?.chain_steps ?? metadata?.chainSteps);
+
         return {
           id: String(msg?.message_id || `msg_${Math.random().toString(36).slice(2, 14)}`),
           role: msg?.role === 'assistant' ? 'assistant' : 'user',
@@ -208,6 +211,10 @@ export function mapServerConversationToChat(conversation: any): Chat {
           ...(messageFeedback ? { feedback: messageFeedback } : {}),
           ...(documentSearch ? { documentSearch } : {}),
           ...(generationDurationSec ? { generationDurationSec } : {}),
+          ...(chainSteps ? { chainSteps } : {}),
+          ...(metadata?.hide_sequential_outputs || metadata?.hideSequentialOutputs
+            ? { hideSequentialOutputs: true }
+            : {}),
         } as Message;
       })
     : [];

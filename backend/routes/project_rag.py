@@ -17,8 +17,10 @@ from backend.settings.service_toggles import is_service_enabled, require_service
 from backend.storage.rag_pvc import (
     RAG_PVC_BUCKET_MARKER,
     RAG_PVC_DIR_ENV,
+    RagPvcUnavailable,
     delete_rag_pvc_file,
     is_rag_pvc_bucket,
+    require_rag_pvc_available,
     save_rag_bytes_to_pvc,
     use_rag_pvc,
 )
@@ -30,6 +32,19 @@ router = APIRouter(tags=["project-rag"])
 
 def _rag_upload_username(current_user: dict) -> str:
     return current_user.get("username") or current_user.get("user_id") or "anonymous"
+
+
+def _require_storage_for_delete() -> None:
+    """503, если исходники в PVC, а том недоступен.
+
+    Зовётся ДО обращения к SVC-RAG: удаление записи о документе и удаление
+    самого файла — две разные системы.
+    """
+    try:
+        require_rag_pvc_available()
+    except RagPvcUnavailable as exc:
+        logger.error("Удаление отменено: %s", exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 def _delete_rag_source_file(object_name: Optional[str], bucket: Optional[str]) -> None:
@@ -182,6 +197,7 @@ async def project_rag_delete_document(project_id: str, document_id: int):
     require_service("rag")
     if not rag_client:
         raise HTTPException(status_code=503, detail="RAG service недоступен")
+    _require_storage_for_delete()
     try:
         out = await rag_client.project_rag_delete_document(project_id, document_id)
         if not out.get("ok"):
@@ -233,6 +249,9 @@ async def delete_project(
     2. Удаляет все диалоги проекта из MongoDB
     3. Удаляет метаданные проекта (инструкции и т.д.) из PostgreSQL
     """
+    # Удаление проекта сносит и его файлы. Если тома нет — не начинаем: иначе
+    # проект исчезнет, а файлы останутся на диске уже без всякой ссылки на них.
+    _require_storage_for_delete()
     errors = []
     if rag_client and is_service_enabled("rag"):
         try:
@@ -241,7 +260,11 @@ async def delete_project(
             if minio_keys:
                 for key_info in minio_keys:
                     _delete_rag_source_file(key_info.get("minio_object"), key_info.get("minio_bucket"))
-            logger.info(f"project_id={project_id}: удалено RAG-документов: {rag_out.get('deleted_count', 0)}")
+            logger.debug(
+                "project_id=%s: удалено RAG-документов: %s",
+                project_id,
+                rag_out.get("deleted_count", 0),
+            )
             bump_rag_semantic_cache()
         except Exception as e:
             logger.exception("Ошибка удаления RAG проекта")

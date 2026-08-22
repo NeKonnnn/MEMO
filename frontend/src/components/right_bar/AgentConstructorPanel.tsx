@@ -78,6 +78,8 @@ import {
   getCategoryFieldSx,
   flattenSx,
   AGENT_CONSTRUCTOR_OUTLINED_INPUT_SX,
+  AGENT_CONSTRUCTOR_FIELD_PADDING_X_PX,
+  AGENT_CONSTRUCTOR_FIELD_PADDING_Y_PX,
   SIDEBAR_HIDE_SCROLLBAR_SX,
 } from '../../constants/menuStyles';
 import ModelParametersModal, { type ModelParamsState } from '../ModelParametersModal';
@@ -88,11 +90,14 @@ import type { McpServerConfigPublic } from '../../mcp/types';
 import { fetchPlugins } from '../../plugins/api';
 import type { PluginPublic } from '../../plugins/types';
 import { applyAgentMcpToChat, persistAgentMcpConfig } from '../../utils/applyAgentMcp';
+import { persistAgentArtifactsEnabled } from '../../utils/agentArtifactsEnabled';
 import RAGSettings from '../settings/RAGSettings';
 import { useRagEntityReadyMessage } from '../../hooks/useRagEntityReadyMessage';
 import { fetchMergedUserAgents } from '../../utils/fetchMergedUserAgents';
 import { getSidebarPanelBackground, getSidebarPanelChrome, getSidebarSecondaryButtonSx } from '../../constants/sidebarPanelColor';
 import RagUploadingFileThumb from '../RagUploadingFileThumb';
+import AgentChainEditor from './AgentChainEditor';
+import { fetchAgentChainConfig, parseAgentIds } from '../../constants/agentChain';
 import {
   createRagPendingUploads,
   commitRagUploadUiUpdate,
@@ -184,6 +189,25 @@ function shortFileName(name: string, max = 22): string {
   if (name.length <= max) return name;
   const ext = name.includes('.') ? '.' + name.split('.').pop() : '';
   return name.slice(0, max - ext.length - 3) + '...' + ext;
+}
+
+const INSTRUCTIONS_MIN_LENGTH = 10;
+
+function formatApiDetail(detail: unknown, fallback: string): string {
+  if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail)) {
+    return detail
+      .map((item) =>
+        typeof item === 'object' && item && 'msg' in item
+          ? String((item as { msg: unknown }).msg)
+          : String(item),
+      )
+      .join('; ');
+  }
+  if (detail && typeof detail === 'object' && 'msg' in detail) {
+    return String((detail as { msg: unknown }).msg);
+  }
+  return fallback;
 }
 
 // ─── Label with tooltip ───────────────────────────────────────────────────────
@@ -306,6 +330,23 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
     [formFieldInputSx],
   );
 
+  /** Multiline: убираем двойной отступ (padding на root + на textarea). */
+  const instructionsFieldSx = useMemo(
+    () =>
+      [
+        formFieldInputSx,
+        {
+          '& .MuiOutlinedInput-root.MuiInputBase-multiline': {
+            padding: 0,
+          },
+          '& .MuiOutlinedInput-root.MuiInputBase-multiline .MuiOutlinedInput-input': {
+            padding: `${AGENT_CONSTRUCTOR_FIELD_PADDING_Y_PX}px ${AGENT_CONSTRUCTOR_FIELD_PADDING_X_PX}px !important`,
+          },
+        },
+      ] as SxProps<Theme>,
+    [formFieldInputSx],
+  );
+
   /** Категория / MCP / Skills: outlined без синей обводки при фокусе (открытии списка). */
   const categoryFieldSx = useMemo(
     () =>
@@ -327,6 +368,8 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
   const [description, setDescription] = useState('');
   const [category, setCategory] = useState('Общий');
   const [instructions, setInstructions] = useState('');
+  const instructionsTooShort =
+    instructions.length > 0 && instructions.trim().length < INSTRUCTIONS_MIN_LENGTH;
   const [model, setModel] = useState('');
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   /** Каталог моделей с провайдером (CORSUR / Phoenix …) для выбора провайдер→модель. */
@@ -377,6 +420,11 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
   const [availablePlugins, setAvailablePlugins] = useState<PluginPublic[]>([]);
   const [pluginsPopoverAnchor, setPluginsPopoverAnchor] = useState<HTMLElement | null>(null);
   const pluginsTriggerRef = useRef<HTMLDivElement>(null);
+
+  // Sequential agent chain (config.agent_ids — LibreChat Mixture-of-Agents)
+  const [chainAgentIds, setChainAgentIds] = useState<number[]>([]);
+  const [hideSequentialOutputs, setHideSequentialOutputs] = useState(false);
+  const [chainMaxAgents, setChainMaxAgents] = useState(10);
 
   // Support contacts
   const [supportName, setSupportName] = useState('');
@@ -591,6 +639,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
     void loadModels();
     void loadUserModelSettings();
     void loadKbDocuments();
+    void fetchAgentChainConfig().then((cfg) => setChainMaxAgents(cfg.maxAgents));
     void (async () => {
       try {
         const srv = await fetchMcpServers();
@@ -731,6 +780,14 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
     );
     setSupportName(cfg.support_name || '');
     setSupportEmail(cfg.support_email || '');
+    setChainAgentIds(
+      parseAgentIds(
+        cfg.agent_ids,
+        typeof selectedAgentId === 'number' ? selectedAgentId : null,
+        chainMaxAgents,
+      ),
+    );
+    setHideSequentialOutputs(!!cfg.hide_sequential_outputs);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- только смена агента; agents читаем из ref
   }, [selectedAgentId]);
 
@@ -757,6 +814,8 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
     setMcpServerIds([]);
     setPluginsEnabled(false);
     setPluginIds([]);
+    setChainAgentIds([]);
+    setHideSequentialOutputs(false);
     setSupportName('');
     setSupportEmail('');
   }
@@ -979,7 +1038,12 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
   const handleKbDelete = async (docId: number) => {
     try {
       const url = `${getApiUrl(API_ENDPOINTS.KB_DOCUMENTS_DELETE)}/${docId}`;
-      await fetch(url, { method: 'DELETE' });
+      const resp = await fetch(url, { method: 'DELETE' });
+      // Ответ проверяем до правки списков и до persist.
+      if (!resp.ok) {
+        const detail = await resp.json().then(d => d?.detail).catch(() => null);
+        throw new Error(detail || `HTTP ${resp.status}`);
+      }
       setKbDocuments(prev => prev.filter(d => d.id !== docId));
       let nextIds: number[] = [];
       setKbDocumentIds(prev => {
@@ -989,7 +1053,10 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
       if (typeof selectedAgentId === 'number') {
         await persistAgentKbDocumentIds(selectedAgentId, nextIds);
       }
-    } catch (e) { /* silent */ }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      showNotification('error', `Не удалось удалить файл: ${msg}`);
+    }
   };
 
   // ─── Save agent ──────────────────────────────────────────────────────────────
@@ -997,6 +1064,11 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
   const handleSave = async () => {
     if (!name.trim()) {
       setSaveError('Заполните обязательное поле: Имя');
+      return;
+    }
+    const trimmedInstructions = instructions.trim();
+    if (trimmedInstructions.length > 0 && trimmedInstructions.length < INSTRUCTIONS_MIN_LENGTH) {
+      setSaveError('Длина инструкции не может быть меньше 10 символов');
       return;
     }
     setSaveError('');
@@ -1034,6 +1106,12 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
         plugin_ids: pluginIds,
         support_name: supportName,
         support_email: supportEmail,
+        agent_ids: parseAgentIds(
+          chainAgentIds,
+          typeof selectedAgentId === 'number' ? selectedAgentId : null,
+          chainMaxAgents,
+        ),
+        hide_sequential_outputs: hideSequentialOutputs,
       },
       tag_ids: [],
       new_tags: [],
@@ -1043,7 +1121,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
       const isEdit = selectedAgentId !== 'new';
       const url = isEdit
         ? getApiUrl(`/api/agents/${selectedAgentId}`)
-        : getApiUrl('/api/agents/');
+        : getApiUrl('/api/agents');
       const method = isEdit ? 'PUT' : 'POST';
       const resp = await fetch(url, {
         method,
@@ -1055,7 +1133,14 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
       });
       if (!resp.ok) {
         const err = await resp.json().catch(() => ({ detail: resp.statusText }));
-        throw new Error(err.detail || resp.statusText);
+        const fallback = `${resp.status} ${resp.statusText}`.trim();
+        const detail = formatApiDetail(err.detail, fallback);
+        if (resp.status === 404) {
+          throw new Error(
+            'Не найден API создания агентов (404). Обычно это POST /api/agents не дошёл до backend — проверьте деплой и Network.',
+          );
+        }
+        throw new Error(detail || fallback);
       }
       const result = await resp.json();
       if (!isEdit && result.agent_id) {
@@ -1071,6 +1156,11 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
             mcp_enabled: mcpEnabled,
             mcp_server_ids: mcpServerIds,
           });
+          persistAgentArtifactsEnabled({
+            artifacts_enabled: artifactsEnabled,
+            shadcn_enabled: shadcnEnabled,
+            user_prompt_mode: userPromptMode,
+          });
         } catch {
           /* */
         }
@@ -1083,6 +1173,9 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
               config: {
                 mcp_enabled: mcpEnabled,
                 mcp_server_ids: mcpServerIds,
+                artifacts_enabled: artifactsEnabled,
+                shadcn_enabled: shadcnEnabled,
+                user_prompt_mode: userPromptMode,
               },
             },
           }),
@@ -1094,9 +1187,14 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
 
       if (token && model.trim()) {
         const loaded = await loadAgentModelOnly(token, model.trim());
-        if (loaded.ok) {
+        if (loaded.ok && !('pending' in loaded && loaded.pending)) {
           showNotification('success', 'Модель агента загружена на сервер');
-        } else {
+        } else if (loaded.ok && 'pending' in loaded && loaded.pending) {
+          showNotification(
+            'info',
+            'Агент сохранён; модель подтянется, когда сервис моделей будет готов',
+          );
+        } else if (!loaded.ok) {
           showNotification('warning', `Агент сохранён; не удалось загрузить модель: ${loaded.message}`);
         }
       }
@@ -1150,7 +1248,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
       });
       if (!resp.ok) {
         const err = await resp.json().catch(() => ({ detail: resp.statusText }));
-        throw new Error(err.detail || resp.statusText);
+        throw new Error(formatApiDetail(err.detail, resp.statusText));
       }
       await loadAgents();
       showNotification(
@@ -1174,14 +1272,22 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
     if (!window.confirm(`Удалить агента «${name}»?`)) return;
     try {
       const url = getApiUrl(`/api/agents/${selectedAgentId}`);
-      await fetch(url, {
+      const resp = await fetch(url, {
         method: 'DELETE',
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       });
+      // Сброс формы — только после успеха.
+      if (!resp.ok) {
+        const detail = await resp.json().then(d => d?.detail).catch(() => null);
+        throw new Error(detail || `HTTP ${resp.status}`);
+      }
       setSelectedAgentId('new');
       resetForm();
       await loadAgents();
-    } catch (e) { /* silent */ }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      showNotification('error', `Не удалось удалить агента: ${msg}`);
+    }
   };
 
   // ─── "Use agent" — sets system prompt as context ─────────────────────────────
@@ -1195,6 +1301,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
     localStorage.setItem('active_agent_prompt', agent.system_prompt);
     localStorage.setItem('active_agent_name', agent.name);
     persistAgentMcpConfig(agent.config || {});
+    persistAgentArtifactsEnabled((agent.config || {}) as Record<string, unknown>);
     window.dispatchEvent(new CustomEvent('agentSelected', { detail: agent }));
   };
 
@@ -1249,7 +1356,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
   // ─── Роль текущего пользователя для выбранного агента ────────────────────────
   const selectedAgent = selectedAgentId !== 'new' ? agents.find(a => a.id === selectedAgentId) : null;
   const selectedRole: 'owner' | 'editor' | 'viewer' =
-    selectedAgentId === 'new' ? 'owner' : (selectedAgent?.my_permission || 'owner');
+    selectedAgentId === 'new' ? 'owner' : (selectedAgent?.my_permission ?? 'viewer');
   const readOnly = selectedRole === 'viewer';
   const canEdit = selectedRole === 'owner' || selectedRole === 'editor';
   const isOwner = selectedRole === 'owner';
@@ -1554,8 +1661,29 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
             minRows={3}
             maxRows={8}
             disabled={readOnly}
-            sx={formFieldInputSx}
+            sx={instructionsFieldSx}
           />
+          {instructionsTooShort && (
+            <Box
+              role="alert"
+              sx={{
+                mt: 1,
+                px: 1.5,
+                py: 1,
+                borderRadius: 1,
+                border: '2px solid',
+                borderColor: 'error.main',
+                bgcolor: (theme) =>
+                  theme.palette.mode === 'dark'
+                    ? 'rgba(183, 28, 28, 0.25)'
+                    : 'rgba(211, 47, 47, 0.08)',
+              }}
+            >
+              <Typography variant="body2" color="error" sx={{ fontWeight: 600, fontSize: '0.78rem' }}>
+                Длина инструкции не может быть меньше 10 символов
+              </Typography>
+            </Box>
+          )}
         </Box>
 
         {/* Model — outlined с «плавающей» подписью; без синей подсветки при фокусе */}
@@ -1688,9 +1816,9 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
           <SectionHeader>Артефакты</SectionHeader>
           <Box sx={{ mt: 1, display: 'flex', flexDirection: 'column', gap: 0.5 }}>
             {[
-              { label: 'Включить артефакты', help: 'Отдельная панель для HTML, Markdown, Mermaid, SVG и React. Промпт подмешивается к инструкциям агента.', val: artifactsEnabled, set: setArtifactsEnabled, disabled: false },
-              { label: 'Включить компоненты shadcn/ui', help: 'Доп. инструкции: модель может использовать shadcn/ui в React-артефактах (нужны включённые артефакты)', val: shadcnEnabled, set: setShadcnEnabled, disabled: !artifactsEnabled },
-              { label: 'Режим пользовательского промта', help: 'ВНИМАНИЕ: отключает стандартный промпт артефактов. Для теста оставьте ВЫКЛ. Включайте только если формат :::artifact описан вручную в инструкциях агента.', val: userPromptMode, set: setUserPromptMode, disabled: !artifactsEnabled },
+              { label: 'Включить артефакты', help: 'Промпт артефактов + HTML/Mermaid/SVG/presentation viewer. Также viewer включается presentation-skill’ом. Уже показанные сообщения сохраняют viewer.', val: artifactsEnabled, set: setArtifactsEnabled, disabled: readOnly },
+              { label: 'Включить компоненты shadcn/ui', help: 'Доп. инструкции: модель может использовать shadcn/ui в React-артефактах (нужны включённые артефакты)', val: shadcnEnabled, set: setShadcnEnabled, disabled: readOnly || !artifactsEnabled },
+              { label: 'Режим пользовательского промта', help: 'ВНИМАНИЕ: отключает стандартный промпт артефактов. Для теста оставьте ВЫКЛ. Включайте только если формат :::artifact описан вручную в инструкциях агента.', val: userPromptMode, set: setUserPromptMode, disabled: readOnly || !artifactsEnabled },
             ].map(({ label, help, val, set, disabled }) => (
               <Box key={label} sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
@@ -2061,6 +2189,21 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
             )}
           </Box>
         </Box>
+
+        {/* ── Agent chain (LibreChat Mixture-of-Agents) ─────────────────────── */}
+        <AgentChainEditor
+          currentAgentId={selectedAgentId}
+          currentAgentName={name}
+          agentIds={chainAgentIds}
+          onChange={setChainAgentIds}
+          hideSequential={hideSequentialOutputs}
+          onHideSequentialChange={setHideSequentialOutputs}
+          agents={agents}
+          readOnly={readOnly}
+          maxAgents={chainMaxAgents}
+          panelChrome={panelChrome}
+          categoryFieldSx={categoryFieldSx}
+        />
 
         {/* ── File Search (KB) ─────────────────────────────────────────────── */}
         <Box sx={{ minWidth: 0 }}>

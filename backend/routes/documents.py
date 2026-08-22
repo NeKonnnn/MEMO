@@ -88,6 +88,24 @@ def _inline_attach_supported_extensions_label() -> str:
     return ", ".join(_INLINE_ATTACH_SUPPORTED_EXTENSIONS)
 
 
+def read_inline_attachment_bytes(bucket: str, object_name: str) -> tuple[bytes, str] | None:
+    """Байты + MIME inline-вложения из MinIO. None если нет файла."""
+    bucket_s = str(bucket or "").strip()
+    object_s = str(object_name or "").strip()
+    if not bucket_s or not object_s:
+        return None
+    if not minio_client:
+        return None
+    ext = os.path.splitext(object_s)[1].lower()
+    mime = _CONTENT_TYPE_BY_EXT.get(ext, "application/octet-stream")
+    try:
+        data = minio_client.download_file(object_s, bucket_name=bucket_s)
+        return (data, mime) if data is not None else None
+    except Exception:
+        logger.exception("read_inline_attachment_bytes minio bucket=%s object=%s", bucket_s, object_s)
+        return None
+
+
 def _unsupported_inline_attach_extension_detail(filename: str) -> str:
     ext = os.path.splitext(filename or "")[1].lower()
     supported = _inline_attach_supported_extensions_label()
@@ -1173,11 +1191,8 @@ async def get_inline_attachment_file(
     """Отдаёт файл вложения из MinIO для превью в UI (после перезагрузки страницы)."""
     if not minio_client:
         raise HTTPException(status_code=503, detail="MinIO недоступен")
-    try:
-        data = minio_client.download_file(object_name, bucket_name=bucket)
-    except Exception as e:
-        logger.exception("inline-file download /")
-        raise HTTPException(status_code=404, detail="Файл не найден") from e
-    ext = os.path.splitext(object_name)[1].lower()
-    mime = _CONTENT_TYPE_BY_EXT.get(ext, "application/octet-stream")
+    loaded = read_inline_attachment_bytes(bucket, object_name)
+    if not loaded:
+        raise HTTPException(status_code=404, detail="Файл не найден")
+    data, mime = loaded
     return Response(content=data, media_type=mime)

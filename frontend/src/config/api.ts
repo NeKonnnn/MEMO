@@ -136,6 +136,21 @@ export const getWsUrl = (endpoint: string): string => {
   return settings.websocket.getWsUrl(endpoint);
 };
 
+/**
+ * WebSocket URL с JWT-токеном в query (?token=) — для защищённых WS-роутов,
+ * где заголовки авторизации недоступны (браузерный WebSocket их не передаёт).
+ */
+export const getAuthWsUrl = (endpoint: string): string => {
+  const base = getWsUrl(endpoint);
+  const token =
+    typeof window !== 'undefined'
+      ? localStorage.getItem('auth_token') || localStorage.getItem('token')
+      : null;
+  if (!token) return base;
+  const sep = base.includes('?') ? '&' : '?';
+  return `${base}${sep}token=${encodeURIComponent(token)}`;
+};
+
 /** Политика блокировки входа с backend (без дублирования в поде frontend). */
 export async function fetchLoginLockoutPolicy(): Promise<LoginLockoutConfig> {
   const { data } = await axios.get(getApiUrl(API_ENDPOINTS.AUTH_LOGIN_LOCKOUT_POLICY));

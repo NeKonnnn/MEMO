@@ -24,6 +24,11 @@ import {
   Refresh as RefreshIcon,
 } from '@mui/icons-material';
 import { getApiUrl, API_ENDPOINTS, getAuthFetchHeaders } from '../config/api';
+import {
+  fetchRagEntityDefaults,
+  resolveRagEmbeddingModelPath,
+  resolveRagRerankerModelPath,
+} from '../constants/ragEntityDefaults';
 import { useRagEntityReadyMessage } from '../hooks/useRagEntityReadyMessage';
 import { ragDocumentDisplayIndex } from '../utils/ragDocumentDisplayIndex';
 import RagUploadingFileThumb from './RagUploadingFileThumb';
@@ -87,11 +92,11 @@ export default function ProjectRagLibraryInline({
   const [documents, setDocuments] = useState<ProjectRagDoc[]>([]);
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [pendingUploads, setPendingUploads] = useState<RagPendingUpload[]>([]);
   const [banner, setBanner] = useState<{
     message: string;
     severity: 'success' | 'error' | 'info' | 'warning';
   } | null>(null);
-  const [pendingUploads, setPendingUploads] = useState<RagPendingUpload[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [resolvedId, setResolvedId] = useState<string | null>(projectId);
 
@@ -123,19 +128,36 @@ export default function ProjectRagLibraryInline({
           { headers: getAuthFetchHeaders() },
         );
         if (!resp.ok) {
-          return { embeddingPath: '', rerankerPath: '', rerankingEnabled: true };
+          const envDefaults = await fetchRagEntityDefaults('project');
+          return {
+            embeddingPath: envDefaults.embeddingPath,
+            rerankerPath: envDefaults.rerankerPath,
+            rerankingEnabled: true,
+          };
         }
         const data = (await resp.json()) as Record<string, unknown>;
+        const envDefaults = await fetchRagEntityDefaults('project');
         return {
-          embeddingPath: String(data.rag_embedding_model_path || '').trim(),
-          rerankerPath: String(data.rag_reranker_model_path || '').trim(),
+          embeddingPath: resolveRagEmbeddingModelPath(
+            String(data.rag_embedding_model_path || ''),
+            envDefaults.embeddingPath,
+          ),
+          rerankerPath: resolveRagRerankerModelPath(
+            String(data.rag_reranker_model_path || ''),
+            envDefaults.rerankerPath,
+          ),
           rerankingEnabled:
             typeof data.rag_reranking_enabled === 'boolean'
               ? data.rag_reranking_enabled
               : true,
         };
       } catch {
-        return { embeddingPath: '', rerankerPath: '', rerankingEnabled: true };
+        const envDefaults = await fetchRagEntityDefaults('project');
+        return {
+          embeddingPath: envDefaults.embeddingPath,
+          rerankerPath: envDefaults.rerankerPath,
+          rerankingEnabled: true,
+        };
       }
     },
     [],
@@ -297,6 +319,7 @@ export default function ProjectRagLibraryInline({
                     )
                     .join('; ')
                 : JSON.stringify(detail);
+          // Сообщения про модели — оранжевая табличка, остальное error.
           if (
             typeof msg === 'string' &&
             (msg.includes('эмбеддинг') || msg.includes('реранкер'))
@@ -388,11 +411,17 @@ export default function ProjectRagLibraryInline({
         (API_ENDPOINTS.PROJECT_RAG_DELETE_DOC as (pid: string, did: number) => string)(effectiveId, doc.id)
       );
       const resp = await fetch(url, { method: 'DELETE' });
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      if (!resp.ok) {
+        // Текст из detail объясняет причину («хранилище недоступно»),
+        // голый код ответа пользователю ничего не говорит.
+        const detail = await resp.json().then(d => d?.detail).catch(() => null);
+        throw new Error(detail || `HTTP ${resp.status}`);
+      }
       setBanner({ message: `«${doc.filename}» удалён`, severity: 'success' });
       setDocuments(await fetchList(effectiveId));
     } catch (e) {
-      setBanner({ message: `Ошибка удаления: ${e}`, severity: 'error' });
+      const msg = e instanceof Error ? e.message : String(e);
+      setBanner({ message: `Ошибка удаления: ${msg}`, severity: 'error' });
     }
   };
 

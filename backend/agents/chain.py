@@ -1,0 +1,229 @@
+"""Последовательная цепочка агентов (LibreChat Mixture-of-Agents).
+
+Текущий агент — первый узел. `config.agent_ids` — упорядоченный список
+следующих агентов (без текущего). На запуске каждый следующий получает
+выводы предыдущих как auxiliary-контекст, LLM следующего не выбирает.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+import os
+
+MAX_CHAIN_AGENTS = 10
+DEFAULT_GRAPH_STEPS = 50
+MAX_CHAIN_AGENTS_CAP = 50
+GRAPH_STEPS_CAP = 500
+DEFAULT_AGENT_STEPS = 25
+MIN_AGENT_STEPS = 1
+MAX_AGENT_STEPS = 100
+
+
+def _env_int(name: str, default: int, *, lo: int, hi: int) -> int:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return max(lo, min(default, hi))
+    try:
+        return max(lo, min(int(raw), hi))
+    except ValueError:
+        return max(lo, min(default, hi))
+
+
+def get_max_chain_agents() -> int:
+    """Максимум следующих агентов в цепочке: AGENT_CHAIN_MAX_AGENTS (ConfigMap)."""
+    return _env_int("AGENT_CHAIN_MAX_AGENTS", MAX_CHAIN_AGENTS, lo=1, hi=MAX_CHAIN_AGENTS_CAP)
+
+
+def get_agent_graph_steps() -> int:
+    """Лимит шагов графа (LLM + инструменты): AGENT_GRAPH_STEPS (ConfigMap)."""
+    return _env_int("AGENT_GRAPH_STEPS", DEFAULT_GRAPH_STEPS, lo=1, hi=GRAPH_STEPS_CAP)
+
+
+DEFAULT_CHAIN_PROMPT_TEMPLATE = (
+    "Based on the following conversation and analysis from previous agents, "
+    "please provide your insights:\n\n{convo}\n\n"
+    "Please add your specific expertise and perspective to this discussion."
+)
+
+
+def parse_agent_ids(raw: Any, *, exclude_id: Optional[int] = None) -> List[int]:
+    """Нормализовать `config.agent_ids`: уникальные int, без текущего, лимит из ConfigMap."""
+    if not isinstance(raw, list):
+        return []
+    out: List[int] = []
+    seen = set()
+    if exclude_id is not None:
+        try:
+            seen.add(int(exclude_id))
+        except (TypeError, ValueError):
+            pass
+    for item in raw:
+        try:
+            aid = int(item)
+        except (TypeError, ValueError):
+            continue
+        if aid <= 0 or aid in seen:
+            continue
+        seen.add(aid)
+        out.append(aid)
+        if len(out) >= get_max_chain_agents():
+            break
+    return out
+
+
+def parse_recursion_limit(raw: Any) -> Optional[int]:
+    """Per-agent Max Agent Steps (LibreChat recursion_limit). None = системный дефолт."""
+    if raw is None or raw == "":
+        return None
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if n <= 0:
+        return None
+    return max(MIN_AGENT_STEPS, min(MAX_AGENT_STEPS, n))
+
+
+def resolve_agent_steps(profile: Optional[Dict[str, Any]], default: int = DEFAULT_AGENT_STEPS) -> int:
+    if not isinstance(profile, dict):
+        return max(MIN_AGENT_STEPS, default)
+    parsed = parse_recursion_limit(profile.get("recursion_limit"))
+    if parsed is None:
+        return max(MIN_AGENT_STEPS, default)
+    return parsed
+
+
+def format_run_buffer(
+    user_message: str,
+    steps: Sequence[Dict[str, Any]],
+) -> str:
+    """Буфер текущего хода: вопрос пользователя + ответы предыдущих агентов."""
+    parts = [f"Human: {user_message.strip()}"]
+    for step in steps:
+        name = str(step.get("agent_name") or "Agent").strip() or "Agent"
+        content = str(step.get("content") or "").strip()
+        parts.append(f"AI ({name}): {content}")
+    return "\n\n".join(parts)
+
+
+def build_chain_user_message(
+    user_message: str,
+    steps: Sequence[Dict[str, Any]],
+    prompt_template: str = DEFAULT_CHAIN_PROMPT_TEMPLATE,
+) -> str:
+    """Промпт следующего агента: Mixure-of-Agents с `{convo}`."""
+    convo = format_run_buffer(user_message, steps)
+    template = (prompt_template or DEFAULT_CHAIN_PROMPT_TEMPLATE).strip() or DEFAULT_CHAIN_PROMPT_TEMPLATE
+    if "{convo}" not in template:
+        return f"{template}\n\n{convo}"
+    return template.replace("{convo}", convo)
+
+
+def format_visible_chain_content(
+    steps: Sequence[Dict[str, Any]],
+    *,
+    hide_sequential_outputs: bool,
+) -> str:
+    """Текст, который видит пользователь и который уходит в историю."""
+    if not steps:
+        return ""
+    if hide_sequential_outputs:
+        return str(steps[-1].get("content") or "")
+    blocks: List[str] = []
+    for step in steps:
+        name = str(step.get("agent_name") or "Агент").strip() or "Агент"
+        content = str(step.get("content") or "").strip()
+        blocks.append(f"**▸ {name}**\n\n{content}")
+    return "\n\n".join(blocks).strip()
+
+
+def chain_step_header(agent_name: str) -> str:
+    name = (agent_name or "").strip() or "Агент"
+    return f"**▸ {name}**\n\n"
+
+
+async def resolve_agent_chain(
+    primary_id: Any,
+    primary_profile: Dict[str, Any],
+    user_id: Optional[str],
+) -> List[Dict[str, Any]]:
+    """Загрузить профили цепочки: [primary, ...agent_ids]. Без транзитивного обхода чужих цепочек."""
+    from backend.realtime.helpers import _resolve_agent_chat_params
+
+    try:
+        pid = int(primary_id) if primary_id is not None else None
+    except (TypeError, ValueError):
+        pid = None
+
+    primary = dict(primary_profile) if isinstance(primary_profile, dict) else {}
+    if pid is not None:
+        primary["agent_id"] = pid
+    chain: List[Dict[str, Any]] = [primary]
+    if not pid:
+        return chain
+
+    next_ids = parse_agent_ids(primary.get("agent_ids"), exclude_id=pid)
+    if not next_ids:
+        return chain
+
+    for aid in next_ids:
+        profile = await _resolve_agent_chat_params(aid, user_id)
+        if not isinstance(profile, dict):
+            continue
+        if not (profile.get("name") or profile.get("system_prompt")):
+            continue
+        profile["agent_id"] = aid
+        chain.append(profile)
+    return chain
+
+
+def prepare_step_socket_data(
+    data: Optional[dict],
+    profile: Dict[str, Any],
+    *,
+    is_first: bool,
+) -> dict:
+    """Копия payload чата под конкретного агента цепочки.
+
+    MCP/плагины — из карточки шага. coding_mode и явный tool_ids UI — только у первого.
+    """
+    from backend.realtime.helpers import agent_mcp_tool_ids, agent_plugin_ids
+
+    step_data = dict(data) if isinstance(data, dict) else {}
+    if not is_first:
+        step_data.pop("coding_mode", None)
+        step_data.pop("plan_mode", None)
+        step_data.pop("approved_plan", None)
+        step_data["tool_ids"] = agent_mcp_tool_ids(profile)
+        plugins = agent_plugin_ids(profile)
+        if plugins:
+            step_data["__plugin_ids__"] = plugins
+        else:
+            step_data.pop("__plugin_ids__", None)
+        return step_data
+
+    if not (step_data.get("tool_ids") or step_data.get("mcp_tool_ids")):
+        mcp_ids = agent_mcp_tool_ids(profile)
+        if mcp_ids:
+            step_data["tool_ids"] = mcp_ids
+    plugins = agent_plugin_ids(profile)
+    if plugins:
+        step_data["__plugin_ids__"] = plugins
+    return step_data
+
+
+def iter_chain_stream_prefixes(
+    steps_so_far: Iterable[Dict[str, Any]],
+    next_name: str,
+    *,
+    hide_sequential_outputs: bool,
+) -> Tuple[str, str]:
+    """Вернуть (stream_prefix, header) для текущего шага."""
+    if hide_sequential_outputs:
+        return "", ""
+    header = chain_step_header(next_name)
+    if not steps_so_far:
+        return header, header
+    visible = format_visible_chain_content(list(steps_so_far), hide_sequential_outputs=False)
+    prefix = f"{visible}\n\n{header}" if visible else header
+    return prefix, header

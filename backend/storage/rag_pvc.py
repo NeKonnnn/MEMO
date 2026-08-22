@@ -18,7 +18,6 @@ from datetime import datetime, timezone
 from typing import Any, Literal, Optional
 
 from backend.settings.logging import get_logger
-from backend.settings.logging.errors import logged_suppress
 
 logger = get_logger(__name__)
 
@@ -34,6 +33,44 @@ _VALID_SCOPES = frozenset({"memory", "project", "agent"})
 def use_rag_pvc() -> bool:
     """True — исходники RAG пишем в PVC; False — в MinIO (как раньше)."""
     return (os.getenv(RAG_USE_PVC_ENV) or "false").strip().lower() in ("1", "true", "yes", "on")
+
+
+class RagPvcUnavailable(RuntimeError):
+    """PVC RAG недоступен: не смонтирован, не создан или примонтирован только на чтение."""
+
+
+def rag_pvc_available() -> bool:
+    """PVC на месте и доступен на запись. БЕЗ побочного создания каталога.
+
+    Для проверки нельзя использовать rag_pvc_root(): он делает
+    makedirs(exist_ok=True) и на поде без смонтированного PVC молча создаёт
+    пустой каталог на эфемерном диске контейнера. После этого всё выглядит
+    исправным: запись «проходит» (в никуда, до перезапуска пода), а удаление
+    не находит файла и считает, что удалять нечего.
+    """
+    base = (os.getenv(RAG_PVC_DIR_ENV) or "").strip()
+    if not base:
+        return False
+    return os.path.isdir(base) and os.access(base, os.W_OK)
+
+
+def require_rag_pvc_available() -> None:
+    """Бросает RagPvcUnavailable, если исходники живут в PVC, а его нет.
+
+    Зовётся ПЕРЕД удалением записи в БД. Иначе выходит так: запись о документе
+    SVC-RAG уже стёр (это Postgres, PVC ему не нужен), файл удалить не смогли,
+    а пользователю вернулся ok: true — карточка пропала, файл остался на
+    томе навсегда, и найти его больше нечем.
+    """
+    if not use_rag_pvc():
+        return
+    if not rag_pvc_available():
+        base = (os.getenv(RAG_PVC_DIR_ENV) or "").strip() or "<не задан>"
+        raise RagPvcUnavailable(
+            f"Хранилище файлов RAG недоступно ({RAG_PVC_DIR_ENV}={base}). "
+            "Удаление отменено, чтобы документ не пропал из интерфейса, "
+            "оставшись файлом на диске."
+        )
 
 
 def rag_pvc_root(*, required: bool = True) -> Optional[str]:
@@ -390,9 +427,29 @@ def delete_rag_pvc_file(object_name: Optional[str], bucket: Optional[str] = None
     """Удаляет файл из PVC, если bucket — маркер PVC (или bucket не указан, но ключ валиден)."""
     if bucket is not None and not is_rag_pvc_bucket(bucket):
         return
+    # Сначала — доступен ли том вообще. Без этого «файл не найден» из-за
+    # отвалившегося PVC неотличим от «файла и правда нет».
+    require_rag_pvc_available()
     path = rag_pvc_file_path(object_name or "")
     if not path:
+        # Том на месте, файла нет: уже удалён или запись в БД была без файла
+        logger.debug("RAG PVC: файла нет, удалять нечего (object=%s)", object_name)
         return
-    with logged_suppress(logger):
+    scope = (str(object_name or "")).split("/", 1)[0] if object_name else ""
+    if scope not in {"memory", "project", "agent"}:
+        scope = "unknown"
+
+    try:
         os.remove(path)
         logger.info("RAG PVC: удалён файл %s", path)
+
+        from backend.settings.cef_logger.storage_audit import log_rag_pvc_remove_success
+
+        log_rag_pvc_remove_success(str(object_name or ""), scope=scope)
+    except Exception as exc:
+        from backend.settings.cef_logger.storage_audit import log_rag_pvc_remove_failure
+
+        logger.exception("RAG PVC delete error path=%s scope=%s", path, scope)
+        log_rag_pvc_remove_failure(str(object_name or ""), scope=scope, error=str(exc))
+        # Пробрасываем, чтобы роут ответил ошибкой
+        raise

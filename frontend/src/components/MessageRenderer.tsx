@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { Box, IconButton, Typography, Tooltip, Link, Paper, Table, TableBody, TableCell, TableContainer, TableHead, TableRow } from '@mui/material';
+import { Box, IconButton, Typography, Tooltip, Paper, Table, TableBody, TableCell, TableContainer, TableHead, TableRow } from '@mui/material';
 import { ContentCopy as CopyIcon, Check as CheckIcon, Info as InfoIcon, Warning as WarningIcon, Error as ErrorIcon, CheckCircle as SuccessIcon, GetApp as DownloadIcon } from '@mui/icons-material';
 import {
   isGpbPresentationHtml,
@@ -8,10 +8,16 @@ import {
 } from '../utils/presentationViewer';
 import InlinePresentationViewer from './InlinePresentationViewer';
 import ArtifactCard from './artifacts/ArtifactCard';
-import { splitContentWithArtifacts } from '../utils/artifacts';
+import {
+  hoistPresentationArtifacts,
+  sanitizeMermaidSource,
+  splitContentWithArtifacts,
+} from '../utils/artifacts';
+import { normalizeChatInlineHtml } from '../utils/chatInlineHtml';
 import Editor, { loader } from '@monaco-editor/react';
 import * as XLSX from 'xlsx';
 import CodeSelectionMenu from './CodeSelectionMenu';
+import ChatInlineHtml from './ChatInlineHtml';
 
 // Monaco загружается как статические файлы (не через webpack-бандл).
 // Файлы копируются в public/monaco через scripts/copy-monaco-assets.js (prestart/prebuild).
@@ -136,56 +142,6 @@ function markdownHeadingFontSize(level: string, baseFontSize: string): string {
   return `calc(${baseFontSize} * ${scale})`;
 }
 
-/**
- * LLM часто рвёт пары <em></em> между строками списка: на одной строке parseInlineMarkdown не видит
- * закрытие и показывает теги текстом. Снимаем только непарные открыва/закрытия (по стеку на этой строке);
- * корректные пары на той же строке оставляем для курсива. Фрагменты <code> не трогаем.
- */
-function stripOrphanEmIiTagsOnLine(str: string): string {
-  if (!str.includes('<')) return str;
-  const codeBlocks: string[] = [];
-  let s = str.replace(/<code\b[^>]*>[\s\S]*?<\/code>/gi, (full) => {
-    const token = `__ASTRA_CODE_${codeBlocks.length}__`;
-    codeBlocks.push(full);
-    return token;
-  });
-
-  type Tag = { index: number; len: number; close: boolean };
-  const tags: Tag[] = [];
-  const openRe = /<\s*(em|i)\b[^>]*>/gi;
-  const closeRe = /<\s*\/\s*(em|i)\s*>/gi;
-  let m: RegExpExecArray | null;
-  while ((m = openRe.exec(s)) !== null) {
-    tags.push({ index: m.index, len: m[0].length, close: false });
-  }
-  while ((m = closeRe.exec(s)) !== null) {
-    tags.push({ index: m.index, len: m[0].length, close: true });
-  }
-  tags.sort((a, b) => a.index - b.index);
-
-  const stack: number[] = [];
-  const removeIdx = new Set<number>();
-  tags.forEach((t, idx) => {
-    if (!t.close) stack.push(idx);
-    else if (stack.length > 0) stack.pop();
-    else removeIdx.add(idx);
-  });
-  stack.forEach((idx) => removeIdx.add(idx));
-
-  let out = s;
-  Array.from(removeIdx)
-    .sort((a, b) => tags[b].index - tags[a].index)
-    .forEach((idx) => {
-      const t = tags[idx];
-      out = out.slice(0, t.index) + out.slice(t.index + t.len);
-    });
-
-  codeBlocks.forEach((block, i) => {
-    out = out.split(`__ASTRA_CODE_${i}__`).join(block);
-  });
-  return out;
-}
-
 const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isStreaming = false, onSendMessage, messageId }) => {
 
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
@@ -209,45 +165,14 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
   const sanitizeRawContent = useCallback((raw: string): string => {
     if (!raw) return raw;
     // Skill mentions <$slug|Name> → readable chip-like code `$Name`
-    let s = raw.replace(/<\$([^|>]+)\|?([^>]*)>/g, (_m, slug: string, name: string) => {
+    const withSkills = raw.replace(/<\$([^|>]+)\|?([^>]*)>/g, (_m, slug: string, name: string) => {
       const label = String(name || slug || '')
         .trim()
         .replace(/[`*]/g, '');
       return `\`$${label}\``;
     });
-    s = s
-      .replace(/&lt;\s*em\s*&gt;/gi, '<em>')
-      .replace(/&lt;\s*\/\s*em\s*&gt;/gi, '</em>')
-      .replace(/<\\\/\s*em\s*>/gi, '</em>')
-      .replace(/&lt;\s*i\s*&gt;/gi, '<i>')
-      .replace(/&lt;\s*\/\s*i\s*&gt;/gi, '</i>');
-
-    const collapseInsideTag = (inner: string) => inner.replace(/\s+/g, ' ').trim();
-    const preserved: string[] = [];
-    const mark = (html: string) => {
-      const token = `__ASTRACHAT_EM_BLOCK_${preserved.length}__`;
-      preserved.push(html);
-      return token;
-    };
-
-    // Сначала выносим корректные пары в плейсхолдеры (в т.ч. многострочные),
-    // иначе сиротский </em> на следующей строке ломает построчный parseInlineMarkdown.
-    s = s.replace(/<i>\s*([\s\S]*?)\s*<\/i>/gi, (_, inner) =>
-      mark(`<em>${collapseInsideTag(inner)}</em>`)
-    );
-    s = s.replace(/<em>\s*([\s\S]*?)\s*<\/em>/gi, (_, inner) =>
-      mark(`<em>${collapseInsideTag(inner)}</em>`)
-    );
-
-    // Оставшиеся одиночные теги — убираем (пара уже потеряна)
-    s = s.replace(/<\/?em>/gi, '');
-    s = s.replace(/<\/?i>/gi, '');
-
-    preserved.forEach((fragment, i) => {
-      s = s.split(`__ASTRACHAT_EM_BLOCK_${i}__`).join(fragment);
-    });
-
-    return s;
+    // Инлайн HTML от LLM (em/strong/i/b/del/…): отдельный whitelist-парсер.
+    return normalizeChatInlineHtml(withSkills);
   }, []);
 
   const getSelectionClipboardPayload = useCallback((): { plain: string; html: string } => {
@@ -979,7 +904,7 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
                         ...(idx === headers.length - 1 ? { pr: 6 } : {}),
                       }}
                     >
-                      {parseInlineMarkdown(processCellMarkdown(header))}
+                      <ChatInlineHtml text={processCellMarkdown(header)} />
                     </TableCell>
                   ))}
                 </TableRow>
@@ -1002,7 +927,7 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
                         fontFamily: cell.match(/^\d+$/) ? 'monospace' : 'inherit',
                       }}
                     >
-                      {parseInlineMarkdown(processCellMarkdown(cell))}
+                      <ChatInlineHtml text={processCellMarkdown(cell)} />
                     </TableCell>
                   ))}
                 </TableRow>
@@ -1119,14 +1044,34 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
   // Функция для парсинга Markdown
   const parseMarkdown = (text: string) => {
     // Сначала вырезаем :::artifact — внутри них свои fence ```, обычный split ломается.
-    const segments = splitContentWithArtifacts(text, { messageId, isStreaming });
+    const rawSegments = splitContentWithArtifacts(text, { messageId, isStreaming });
+    // Презентация сверху, остальные артефакты (Mermaid/HTML/…) под ней.
+    const segments = hoistPresentationArtifacts(rawSegments, (content) =>
+      isGpbPresentationHtml(content) ||
+      (Boolean(isStreaming) && isGpbPresentationStreaming(content, 'html')),
+    );
 
     return segments.map((segment, segIndex) => {
       if (segment.kind === 'artifact') {
+        const art = segment.artifact;
+        // GPB-презентация отдельным окном «Презентация», не внутри ArtifactCard.
+        const presentationPending = Boolean(isStreaming && !art.closed);
+        const isPresentationArtifact =
+          isGpbPresentationHtml(art.content) ||
+          (presentationPending && isGpbPresentationStreaming(art.content, 'html'));
+        if (isPresentationArtifact) {
+          return (
+            <InlinePresentationViewer
+              key={`artifact-presentation-${art.id}-${segIndex}`}
+              html={art.content}
+              isStreaming={presentationPending}
+            />
+          );
+        }
         return (
           <ArtifactCard
-            key={`artifact-${segment.artifact.id}-${segIndex}`}
-            artifact={segment.artifact}
+            key={`artifact-${art.id}-${segIndex}`}
+            artifact={art}
             isStreaming={isStreaming}
             autoOpen={Boolean(isStreaming)}
           />
@@ -1260,8 +1205,8 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
           id: `fence-mermaid-${messageId || 'msg'}-${index}`,
           identifier: `mermaid-diagram-${index}`,
           type: 'application/vnd.mermaid',
-          title: 'Диаграмма',
-          content: code,
+          title: 'Диаграмма Mermaid',
+          content: sanitizeMermaidSource(code),
           closed: !(isStreaming && !codeBlock.endsWith('```')),
           messageId,
         };
@@ -1581,7 +1526,7 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
         </Box>
         <Box sx={{ flex: 1 }}>
           <Typography variant="body1" sx={{ whiteSpace: 'pre-wrap', lineHeight: 1.6, fontSize: fontSizeValue }}>
-            {parseInlineMarkdown(content)}
+            <ChatInlineHtml text={content} />
           </Typography>
         </Box>
       </Box>
@@ -1728,7 +1673,7 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
               color: 'inherit',
             }}
           >
-            {parseInlineMarkdown(content)}
+            <ChatInlineHtml text={content} />
           </Typography>
         );
       }
@@ -1775,7 +1720,7 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
         
         const listItem = (
           <Box {...listItemProps}>
-            {parseInlineMarkdown(content)}
+            <ChatInlineHtml text={content} />
           </Box>
         );
         
@@ -1852,7 +1797,7 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
               color: 'text.secondary',
             }}
           >
-            {parseInlineMarkdown(content)}
+            <ChatInlineHtml text={content} />
           </Box>
         );
       }
@@ -1886,7 +1831,7 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
               userSelect: 'text',
             }}
           >
-            {parseInlineMarkdown(line)}
+            <ChatInlineHtml text={line} />
           </Typography>
         );
       }
@@ -1917,280 +1862,6 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
          {processedLines.filter(line => line !== null)}
        </Box>
      );
-  };
-
-  // Функция для поиска соответствующего закрывающего тега
-  const findClosingTag = (str: string, tagName: string, startIndex: number): number => {
-    const openTag = `<${tagName}`;
-    const closeTag = `</${tagName}>`;
-    let depth = 1;
-    let i = startIndex + openTag.length;
-    
-    // Находим конец открывающего тега
-    while (i < str.length && str[i] !== '>') i++;
-    i++; // Пропускаем >
-    
-    while (i < str.length && depth > 0) {
-      if (str.substring(i).startsWith(openTag)) {
-        depth++;
-        i += openTag.length;
-        while (i < str.length && str[i] !== '>') i++;
-        i++;
-      } else if (str.substring(i).startsWith(closeTag)) {
-        depth--;
-        if (depth === 0) {
-          return i + closeTag.length;
-        }
-        i += closeTag.length;
-      } else {
-        i++;
-      }
-    }
-    
-    return -1; // Не найдено
-  };
-
-  // Парсинг инлайн Markdown с поддержкой вложенных тегов
-  const parseInlineMarkdown = (text: string): React.ReactNode => {
-    if (!text) return null;
-    text = stripOrphanEmIiTagsOnLine(text);
-
-    // Рекурсивная функция для обработки вложенных тегов
-    const parseWithNestedTags = (str: string): React.ReactNode[] => {
-      const parts: React.ReactNode[] = [];
-      let lastIndex = 0;
-      
-      // Сначала обрабатываем самозакрывающиеся теги (img)
-      const imgRegex = /<img\s+([^>]+)\/>/gi;
-      let imgMatch;
-      const imgMatches: Array<{index: number; match: string; attrs: string}> = [];
-      
-      while ((imgMatch = imgRegex.exec(str)) !== null) {
-        imgMatches.push({
-          index: imgMatch.index,
-          match: imgMatch[0],
-          attrs: imgMatch[1]
-        });
-      }
-      
-      // Ищем все открывающие теги
-      const openTagRegex = /<(strong|em|u|del|sup|sub|code|a)(?:\s[^>]*)?>/gi;
-      let match;
-      const tagMatches: Array<{index: number; tagName: string; endIndex: number; content: string; fullMatch: string}> = [];
-      
-      while ((match = openTagRegex.exec(str)) !== null) {
-        const tagName = match[1].toLowerCase();
-        const openTagEnd = match.index + match[0].length;
-        const closeTagIndex = findClosingTag(str, tagName, match.index);
-        
-        if (closeTagIndex > 0) {
-          const content = str.substring(openTagEnd, closeTagIndex - `</${tagName}>`.length);
-          tagMatches.push({
-            index: match.index,
-            tagName,
-            endIndex: closeTagIndex,
-            content,
-            fullMatch: str.substring(match.index, closeTagIndex)
-          });
-        }
-      }
-      
-      // Объединяем все совпадения и сортируем
-      const allMatches: Array<{index: number; type: 'tag' | 'img'; data: any}> = [];
-      
-      tagMatches.forEach(tag => {
-        allMatches.push({
-          index: tag.index,
-          type: 'tag',
-          data: {
-            tagName: tag.tagName,
-            content: tag.content,
-            fullMatch: tag.fullMatch,
-            endIndex: tag.endIndex
-          }
-        });
-      });
-      
-      imgMatches.forEach(img => {
-        allMatches.push({
-          index: img.index,
-          type: 'img',
-          data: {
-            attrs: img.attrs,
-            fullMatch: img.match
-          }
-        });
-      });
-      
-      // Сортируем по индексу
-      allMatches.sort((a, b) => a.index - b.index);
-      
-      // Удаляем перекрывающиеся теги (вложенные теги уже обработаны в content)
-      const filteredMatches: typeof allMatches = [];
-      for (let i = 0; i < allMatches.length; i++) {
-        const current = allMatches[i];
-        let isNested = false;
-        
-        for (let j = 0; j < i; j++) {
-          const prev = allMatches[j];
-          if (prev.type === 'tag' && 
-              current.index > prev.index && 
-              current.index < prev.data.endIndex) {
-            isNested = true;
-            break;
-          }
-        }
-        
-        if (!isNested) {
-          filteredMatches.push(current);
-        }
-      }
-      
-      filteredMatches.forEach((matchData) => {
-        // Добавляем текст до тега
-        if (matchData.index > lastIndex) {
-          const beforeText = str.substring(lastIndex, matchData.index);
-          if (beforeText) {
-            parts.push(beforeText);
-          }
-        }
-        
-        if (matchData.type === 'img') {
-          // Обработка изображения
-          const srcMatch = matchData.data.attrs.match(/src="([^"]+)"/);
-          const altMatch = matchData.data.attrs.match(/alt="([^"]*)"/);
-          if (srcMatch) {
-            parts.push(
-              <Box
-                key={`${matchData.index}-img`}
-                component="img"
-                src={srcMatch[1]}
-                alt={altMatch ? altMatch[1] : ''}
-                sx={{
-                  maxWidth: '100%',
-                  height: 'auto',
-                  borderRadius: 1,
-                  my: 1,
-                  display: 'block',
-                }}
-              />
-            );
-          }
-          lastIndex = matchData.index + matchData.data.fullMatch.length;
-        } else {
-          // Обработка обычных тегов
-          const tagName = matchData.data.tagName;
-          const content = matchData.data.content;
-        
-          // Рекурсивно обрабатываем содержимое тега
-          const processedContent = parseWithNestedTags(content);
-          
-          switch (tagName) {
-            case 'strong':
-              parts.push(
-                <Box key={`${matchData.index}-strong`} component="span" sx={{ fontWeight: 'bold' }}>
-                  {processedContent}
-                </Box>
-              );
-              break;
-            case 'em':
-              parts.push(
-                <Box key={`${matchData.index}-em`} component="span" sx={{ fontStyle: 'italic' }}>
-                  {processedContent}
-                </Box>
-              );
-              break;
-            case 'u':
-              parts.push(
-                <Box key={`${matchData.index}-u`} component="span" sx={{ textDecoration: 'underline' }}>
-                  {processedContent}
-                </Box>
-              );
-              break;
-            case 'del':
-              parts.push(
-                <Box key={`${matchData.index}-del`} component="span" sx={{ textDecoration: 'line-through' }}>
-                  {processedContent}
-                </Box>
-              );
-              break;
-            case 'sup':
-              parts.push(
-                <Box key={`${matchData.index}-sup`} component="sup" sx={{ fontSize: '0.75em', lineHeight: 0 }}>
-                  {processedContent}
-                </Box>
-              );
-              break;
-            case 'sub':
-              parts.push(
-                <Box key={`${matchData.index}-sub`} component="sub" sx={{ fontSize: '0.75em', lineHeight: 0 }}>
-                  {processedContent}
-                </Box>
-              );
-              break;
-            case 'code':
-              parts.push(
-                <Box
-                  key={`${matchData.index}-code`}
-                  component="code"
-                  sx={{
-                    backgroundColor: 'rgba(175, 184, 193, 0.2)',
-                    padding: '2px 4px',
-                    borderRadius: '3px',
-                    fontFamily: 'monospace',
-                    fontSize: '0.875em',
-                    color: 'inherit',
-                    cursor: 'text',
-                    userSelect: 'text',
-                  }}
-                >
-                  {processedContent}
-                </Box>
-              );
-              break;
-            case 'a':
-              const hrefMatch = matchData.data.fullMatch.match(/href="([^"]+)"/);
-              if (hrefMatch) {
-                parts.push(
-                  <Link
-                    key={`${matchData.index}-a`}
-                    href={hrefMatch[1]}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    sx={{
-                      color: 'primary.main',
-                      textDecoration: 'underline',
-                      '&:hover': {
-                        textDecoration: 'none',
-                      },
-                    }}
-                  >
-                    {processedContent}
-                  </Link>
-                );
-              }
-              break;
-            default:
-              parts.push(<span key={`${matchData.index}-default`}>{processedContent}</span>);
-          }
-          
-          lastIndex = matchData.data.endIndex;
-        }
-      });
-      
-      // Добавляем оставшийся текст
-      if (lastIndex < str.length) {
-        const remainingText = str.substring(lastIndex);
-        if (remainingText) {
-          parts.push(remainingText);
-        }
-      }
-      
-      return parts.length > 0 ? parts : [str];
-    };
-    
-    const result = parseWithNestedTags(text);
-    return result.length === 1 ? result[0] : <>{result}</>;
   };
 
   const renderedContent = useMemo(

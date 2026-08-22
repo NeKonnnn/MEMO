@@ -119,6 +119,48 @@ _my_generation: contextvars.ContextVar = contextvars.ContextVar(
     "chat_generation", default=0
 )
 
+# conversation_id / request_id текущего ответа — чтобы фронт маршрутизировал
+# чанки в нужный чат, даже если на сокете параллельно идут две генерации.
+_stream_conversation_id: contextvars.ContextVar = contextvars.ContextVar(
+    "stream_conversation_id", default=None
+)
+_stream_request_id: contextvars.ContextVar = contextvars.ContextVar(
+    "stream_request_id", default=None
+)
+
+
+def _bind_stream_ids(conversation_id, request_id):
+    """Привязать id стрима к текущему asyncio/executor-контексту."""
+    rid = None
+    if request_id is not None:
+        rid = str(request_id).strip() or None
+    return (
+        _stream_conversation_id.set(conversation_id or None),
+        _stream_request_id.set(rid),
+    )
+
+
+def _reset_stream_ids(tokens) -> None:
+    if not tokens:
+        return
+    try:
+        _stream_conversation_id.reset(tokens[0])
+        _stream_request_id.reset(tokens[1])
+    except Exception:
+        pass
+
+
+def _stream_ids_payload(payload: Optional[dict] = None) -> dict:
+    """Добавить conversation_id/request_id во все chat_* / multi_llm_* события."""
+    out = dict(payload or {})
+    cid = _stream_conversation_id.get()
+    rid = _stream_request_id.get()
+    if cid and "conversation_id" not in out:
+        out["conversation_id"] = cid
+    if rid and "request_id" not in out:
+        out["request_id"] = rid
+    return out
+
 def _begin_generation(sid: str) -> int:
     """Начать новую генерацию на этом сокете и запомнить её номер в контексте."""
     seq = _generation_seq.get(sid, 0) + 1
@@ -150,11 +192,13 @@ async def _abort_chat_reindex(
     """Вместо генерации без контекста - штатный ответ «подождите» + сохранение."""
     await sio.emit(
         "chat_complete",
-        {
-            "response": REINDEX_WAIT_MESSAGE,
-            "timestamp": datetime.now().isoformat(),
-            "was_streaming": False,
-        },
+        _stream_ids_payload(
+            {
+                "response": REINDEX_WAIT_MESSAGE,
+                "timestamp": datetime.now().isoformat(),
+                "was_streaming": False,
+            }
+        ),
         room=sid,
     )
     try:
@@ -175,13 +219,15 @@ async def _abort_multi_llm_reindex(
     for i, model_name in enumerate(multi_llm_models):
         await sio.emit(
             "multi_llm_complete",
-            {
-                "model": model_name,
-                "response": REINDEX_WAIT_MESSAGE,
-                "error": False,
-                "index": i,
-                "total": len(multi_llm_models),
-            },
+            _stream_ids_payload(
+                {
+                    "model": model_name,
+                    "response": REINDEX_WAIT_MESSAGE,
+                    "error": False,
+                    "index": i,
+                    "total": len(multi_llm_models),
+                }
+            ),
             room=sid,
         )
     try:
@@ -228,7 +274,7 @@ async def _compute_and_emit_rag_metrics(
         )
         if metrics:
             with logged_suppress(logger):
-                await sio.emit("chat_rag_metrics", {"metrics": metrics}, room=sid)
+                await sio.emit("chat_rag_metrics", _stream_ids_payload({"metrics": metrics}), room=sid)
         return metrics
     except Exception:
         logger.exception("rag online metrics")
@@ -358,30 +404,43 @@ async def get_conversation_project_id(conversation_id: str) -> "Optional[str]":
         return None
 
 
-def _build_user_inline_attachments_metadata(raw: Any) -> Optional[Dict[str, Any]]:
-    """Метаданные вложений для MongoDB (без base64 — только MinIO-ссылки и имена)."""
-    if not isinstance(raw, list) or not raw:
-        return None
+def _build_user_inline_attachments_metadata(raw: Any, inline_context: str = "") -> Optional[Dict[str, Any]]:
+    """Метаданные вложений для MongoDB.
+
+    Без base64 картинок — только MinIO-ссылки и имена.
+    Текст документа кладём в ``inline_context``, чтобы follow-up в том же чате
+    снова видел файл через историю LLM (UI по-прежнему показывает только вопрос).
+    """
     items: list = []
-    for entry in raw:
-        if not isinstance(entry, dict):
-            continue
-        name = str(entry.get("name") or "file").strip() or "file"
-        ct = entry.get("contentType") or entry.get("content_type")
-        if ct not in ("text", "image"):
-            continue
-        item: Dict[str, Any] = {"name": name, "contentType": ct}
-        mo = entry.get("minio_object")
-        mb = entry.get("minio_bucket")
-        if mo:
-            item["minio_object"] = str(mo)
-        if mb:
-            item["minio_bucket"] = str(mb)
-        sz = entry.get("size")
-        if isinstance(sz, (int, float)) and sz > 0:
-            item["size"] = int(sz)
-        items.append(item)
-    return {"inline_attachments": items} if items else None
+    if isinstance(raw, list):
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("name") or "file").strip() or "file"
+            ct = entry.get("contentType") or entry.get("content_type")
+            if ct not in ("text", "image"):
+                continue
+            item: Dict[str, Any] = {"name": name, "contentType": ct}
+            mo = entry.get("minio_object")
+            mb = entry.get("minio_bucket")
+            if mo:
+                item["minio_object"] = str(mo)
+            if mb:
+                item["minio_bucket"] = str(mb)
+            sz = entry.get("size")
+            if isinstance(sz, (int, float)) and sz > 0:
+                item["size"] = int(sz)
+            te = entry.get("tokenEstimate")
+            if isinstance(te, (int, float)) and te > 0:
+                item["tokenEstimate"] = int(te)
+            items.append(item)
+    meta: Dict[str, Any] = {}
+    if items:
+        meta["inline_attachments"] = items
+    ctx = str(inline_context or "").strip()
+    if ctx:
+        meta["inline_context"] = ctx
+    return meta or None
 
 
 async def _handle_chat_image_generation_request(
@@ -410,11 +469,13 @@ async def _handle_chat_image_generation_request(
 
     await sio.emit(
         "chat_thinking",
-        {
-            "status": "processing",
-            "message": "Генерирую изображение в ComfyUI…",
-            "image_generation": True,
-        },
+        _stream_ids_payload(
+            {
+                "status": "processing",
+                "message": "Генерирую изображение в ComfyUI…",
+                "image_generation": True,
+            }
+        ),
         room=sid,
     )
 
@@ -426,12 +487,12 @@ async def _handle_chat_image_generation_request(
     except ComfyImageGenError as exc:
         err_text = f"Не удалось сгенерировать изображение: {exc}"
         logger.warning("Chat image generation failed: %s", exc)
-        await sio.emit("chat_complete", {
+        await sio.emit("chat_complete", _stream_ids_payload({
             "response": err_text,
             "timestamp": datetime.now().isoformat(),
             "was_streaming": streaming,
             "image_generation_error": True,
-        }, room=sid)
+        }), room=sid)
         try:
             meta = {"image_generation_error": True}
             if project_id:
@@ -474,13 +535,13 @@ async def _handle_chat_image_generation_request(
     except Exception as save_exc:
         logger.warning("Не удалось сохранить ответ image gen: %s", save_exc)
 
-    payload = {
+    payload = _stream_ids_payload({
         "response": response,
         "timestamp": datetime.now().isoformat(),
         "was_streaming": streaming,
         "inline_attachments": inline_attachments,
         "image_generation": True,
-    }
+    })
     await sio.emit("chat_complete", payload, room=sid)
     return True
 
@@ -547,11 +608,16 @@ def register_handlers(sio):
         # Останавливаем всё, что уже запущено на этом сокете. Генерация,
         # начатая ПОСЛЕ нажатия, этим стопом не затрагивается.
         _stopped_upto[sid] = _generation_seq.get(sid, 0)
-        await sio.emit(
-            "generation_stopped",
-            {"content": "Генерация остановлена", "timestamp": datetime.now().isoformat()},
-            room=sid,
-        )
+        payload = {
+            "content": "Генерация остановлена",
+            "timestamp": datetime.now().isoformat(),
+        }
+        if isinstance(data, dict):
+            if data.get("conversation_id"):
+                payload["conversation_id"] = data.get("conversation_id")
+            if data.get("request_id"):
+                payload["request_id"] = data.get("request_id")
+        await sio.emit("generation_stopped", payload, room=sid)
 
     @sio.event
     async def stop_transcription(sid, data):
@@ -601,13 +667,37 @@ def register_handlers(sio):
             _begin_generation(sid)
             user_message_id = data.get("message_id", None)
             conversation_id = data.get("conversation_id", None)
+            # Изоляция пользователей: не даём читать/писать чужой диалог по
+            # угаданному conversation_id и не полагаемся на общий на процесс стейт.
+            if conversation_id:
+                import backend.database.memory_service as mem_mod
+
+                _owner_ok = await mem_mod.verify_conversation_owner(
+                    conversation_id,
+                    validated_user.get("user_id") if validated_user else None,
+                )
+                if not _owner_ok:
+                    logger.warning(
+                        "chat_message: отказ в доступе к чужому диалогу conversation_id=%s user_id=%s",
+                        conversation_id,
+                        validated_user.get("user_id") if validated_user else None,
+                    )
+                    await sio.emit("chat_error", {"error": "Нет доступа к этому диалогу"}, room=sid)
+                    return
+                # Значение живёт только в контексте текущей задачи (не глобально).
+                mem_mod.set_current_conversation_id(conversation_id)
+            request_id = data.get("request_id", None)
+            stream_id_tokens = _bind_stream_ids(conversation_id, request_id)
             use_kb_rag = bool(data.get("use_kb_rag", False))
             use_memory_library_rag = bool(data.get("use_memory_library_rag", False))
             _raw_inline_ctx = data.get("inline_context") or ""
             inline_context = str(_raw_inline_ctx).strip() if _raw_inline_ctx else ""
             _raw_inline_imgs = data.get("inline_images")
             inline_images: list = [str(x) for x in _raw_inline_imgs if x] if isinstance(_raw_inline_imgs, list) else []
-            user_message_metadata = _build_user_inline_attachments_metadata(data.get("inline_attachments"))
+            user_message_metadata = _build_user_inline_attachments_metadata(
+                data.get("inline_attachments"),
+                inline_context=inline_context,
+            )
             requested_rag_strategy = str(data.get("rag_strategy") or "").strip().lower()
             # Стратегия стора подтянется через runtime settings после bind entity_ids
             effective_rag_strategy = (
@@ -656,10 +746,6 @@ def register_handlers(sio):
             )
             is_regenerate = bool(data.get("regenerate"))
             skip_user_save = is_regenerate
-            if conversation_id:
-                import backend.database.memory_service as mem_mod
-
-                mem_mod.current_conversation_id = conversation_id
             with logged_suppress(logger):
                 from backend.settings.cef_logger.cef_audit_context import cef_audit_set
 
@@ -738,6 +824,13 @@ def register_handlers(sio):
                 history = await get_recent_dialog_history(
                     max_entries=state.memory_max_messages, conversation_id=conversation_id
                 )
+            # Follow-up по ранее прикреплённым картинкам: подтянуть из истории.
+            try:
+                from backend.services.inline_images import merge_inline_images_from_history
+
+                inline_images = merge_inline_images_from_history(history, inline_images)
+            except Exception:
+                logger.exception("Не удалось подтянуть inline-картинки из истории")
             if not skip_user_save:
                 try:
                     if project_id:
@@ -763,7 +856,7 @@ def register_handlers(sio):
                         )
                 except RuntimeError as e:
                     if "MongoDB" in str(e):
-                        await sio.emit("chat_error", {"error": "MongoDB недоступен."}, room=sid)
+                        await sio.emit("chat_error", _stream_ids_payload({"error": "MongoDB недоступен."}), room=sid)
                         return
                     raise
             if not bool(data.get("coding_mode")):
@@ -830,11 +923,11 @@ def register_handlers(sio):
                     if stream_role == "reasoning":
                         await sio.emit(
                             "chat_thinking",
-                            {"chunk": chunk, "accumulated": acc, "thinking": chunk, "stream_role": "reasoning"},
+                            _stream_ids_payload({"chunk": chunk, "accumulated": acc, "thinking": chunk, "stream_role": "reasoning"}),
                             room=sid,
                         )
                     else:
-                        await sio.emit("chat_chunk", {"chunk": chunk, "accumulated": acc}, room=sid)
+                        await sio.emit("chat_chunk", _stream_ids_payload({"chunk": chunk, "accumulated": acc}), room=sid)
 
             loop = asyncio.get_event_loop()
 
@@ -872,7 +965,7 @@ def register_handlers(sio):
                     generation_started_at=generation_t0,
                 )
                 return
-            await _handle_direct(
+            await _run_direct_or_chain(
                 sio,
                 sid,
                 data,
@@ -900,8 +993,10 @@ def register_handlers(sio):
             logger.exception("Ошибка операции")
             logger.error(f"Socket.IO chat error: {e}", exc_info=True)
             with logged_suppress(logger):
-                await sio.emit("chat_error", {"error": str(e)}, room=sid)
+                await sio.emit("chat_error", _stream_ids_payload({"error": str(e)}), room=sid)
         finally:
+            with logged_suppress(logger):
+                _reset_stream_ids(locals().get("stream_id_tokens"))
             if rag_runtime_token is not None:
                 with logged_suppress(logger):
                     reset_user_rag_runtime(rag_runtime_token)
@@ -935,13 +1030,13 @@ async def _handle_multi_llm(
 ):
     multi_llm_models = get_model_comparison_models()
     if not multi_llm_models:
-        await sio.emit("chat_error", {"error": "Модели не выбраны"}, room=sid)
+        await sio.emit("chat_error", _stream_ids_payload({"error": "Модели не выбраны"}), room=sid)
         return
     if models_subset is not None:
         allowed = set(multi_llm_models)
         multi_llm_models = [m for m in models_subset if m in allowed]
         if not multi_llm_models:
-            await sio.emit("chat_error", {"error": "Указанная модель не входит в список multi-LLM"}, room=sid)
+            await sio.emit("chat_error", _stream_ids_payload({"error": "Указанная модель не входит в список multi-LLM"}), room=sid)
             return
     _terminal_chat_inference_banner(
         sid=sid,
@@ -1179,13 +1274,17 @@ async def _handle_multi_llm(
         if multi_llm_models:
             await sio.emit(
                 "multi_llm_start",
-                {"model": multi_llm_models[0], "models": multi_llm_models, "total_models": len(multi_llm_models)},
+                _stream_ids_payload(
+                    {"model": multi_llm_models[0], "models": multi_llm_models, "total_models": len(multi_llm_models)}
+                ),
                 room=sid,
             )
         for i, model_name in enumerate(multi_llm_models):
             await sio.emit(
                 "multi_llm_complete",
-                {"model": model_name, "response": canned, "error": False, "index": i, "total": len(multi_llm_models)},
+                _stream_ids_payload(
+                    {"model": model_name, "response": canned, "error": False, "index": i, "total": len(multi_llm_models)}
+                ),
                 room=sid,
             )
         # Сохраняем canned-ответ в историю — иначе после F5 он исчезает
@@ -1254,15 +1353,17 @@ async def _handle_multi_llm(
                 return res
             await sio.emit(
                 "multi_llm_complete",
-                {
-                    "model": res.get("model", model_name),
-                    "response": res.get("response", "") or "",
-                    "error": bool(res.get("error", False)),
-                    "index": idx,
-                    "total": n_models,
-                    "mcp_mode": res.get("mcp_mode"),
-                    "mcp_tool_calls": res.get("mcp_tool_calls"),
-                },
+                _stream_ids_payload(
+                    {
+                        "model": res.get("model", model_name),
+                        "response": res.get("response", "") or "",
+                        "error": bool(res.get("error", False)),
+                        "index": idx,
+                        "total": n_models,
+                        "mcp_mode": res.get("mcp_mode"),
+                        "mcp_tool_calls": res.get("mcp_tool_calls"),
+                    }
+                ),
                 room=sid,
             )
             return res
@@ -1270,7 +1371,9 @@ async def _handle_multi_llm(
         try:
             await sio.emit(
                 "multi_llm_start",
-                {"model": model_name, "models": multi_llm_models, "total_models": n_models, "mcp_enabled": mcp_enabled},
+                _stream_ids_payload(
+                    {"model": model_name, "models": multi_llm_models, "total_models": n_models, "mcp_enabled": mcp_enabled}
+                ),
                 room=sid,
             )
             if mcp_enabled:
@@ -1280,7 +1383,7 @@ async def _handle_multi_llm(
                     async def _mcp_event_cb(payload):
                         event = dict(payload)
                         event["model"] = model_name
-                        await sio.emit("chat_mcp_event", event, room=sid)
+                        await sio.emit("chat_mcp_event", _stream_ids_payload(event), room=sid)
 
                     mcp_result = await run_mcp_for_chat(
                         tool_ids=tool_ids,
@@ -1295,12 +1398,15 @@ async def _handle_multi_llm(
                         max_tokens=mcp_max_tokens,
                         enable_thinking=enable_thinking,
                         emit_event=_mcp_event_cb,
+                        max_iterations=(agent_profile or {}).get("recursion_limit") if isinstance(agent_profile, dict) else None,
                     )
                     if mcp_result is not None:
                         resp = mcp_result.content or ""
                         if streaming and resp:
                             await sio.emit(
-                                "multi_llm_chunk", {"model": model_name, "chunk": resp, "accumulated": resp}, room=sid
+                                "multi_llm_chunk",
+                                _stream_ids_payload({"model": model_name, "chunk": resp, "accumulated": resp}),
+                                room=sid,
                             )
                         if context_added and resp.strip():
                             resp = await maybe_replace_ungrounded(
@@ -1329,7 +1435,7 @@ async def _handle_multi_llm(
                 if _generation_stopped(sid):
                     return False
                 asyncio.run_coroutine_threadsafe(
-                    sio.emit("multi_llm_chunk", {"model": model_name, "chunk": chunk, "accumulated": acc}, room=sid),
+                    sio.emit("multi_llm_chunk", _stream_ids_payload({"model": model_name, "chunk": chunk, "accumulated": acc}), room=sid),
                     loop,
                 )
                 return True
@@ -1366,13 +1472,15 @@ async def _handle_multi_llm(
             continue
         await sio.emit(
             "multi_llm_complete",
-            {
-                "model": multi_llm_models[i] if i < len(multi_llm_models) else "unknown",
-                "response": str(result),
-                "error": True,
-                "index": i,
-                "total": n_models,
-            },
+            _stream_ids_payload(
+                {
+                    "model": multi_llm_models[i] if i < len(multi_llm_models) else "unknown",
+                    "response": str(result),
+                    "error": True,
+                    "index": i,
+                    "total": n_models,
+                }
+            ),
             room=sid,
         )
 
@@ -1439,7 +1547,7 @@ async def _handle_multi_llm(
 
 
 
-async def _handle_direct(
+async def _run_direct_or_chain(
     sio,
     sid,
     data,
@@ -1463,12 +1571,217 @@ async def _handle_direct(
     inline_images: list = None,
     generation_started_at: Optional[float] = None,
 ):
+    """Один агент или последовательная цепочка Mixture-of-Agents."""
+    from backend.agents.chain import (
+        build_chain_user_message,
+        format_visible_chain_content,
+        iter_chain_stream_prefixes,
+        prepare_step_socket_data,
+        resolve_agent_chain,
+    )
+
+    user_id = (current_user or {}).get("user_id") if isinstance(current_user, dict) else None
+    chain = await resolve_agent_chain(data.get("agent_id") if isinstance(data, dict) else None, agent_profile, user_id)
+    if len(chain) <= 1:
+        await _handle_direct(
+            sio,
+            sid,
+            data,
+            user_message,
+            streaming,
+            conversation_id,
+            history,
+            use_kb_rag,
+            use_memory_library_rag,
+            agent_profile,
+            sync_stream_cb,
+            loop,
+            use_agent_scoped_kb,
+            agent_kb_doc_ids,
+            project_id=project_id,
+            project_instructions=project_instructions,
+            rag_strategy=rag_strategy,
+            current_user=current_user,
+            enable_thinking=enable_thinking,
+            inline_context=inline_context,
+            inline_images=inline_images,
+            generation_started_at=generation_started_at,
+        )
+        return
+
+    hide_seq = bool((chain[0] or {}).get("hide_sequential_outputs"))
+    steps: list = []
+    original_message = user_message
+    logger.info(
+        "[agent-chain] start n=%s hide_sequential=%s ids=%s",
+        len(chain),
+        hide_seq,
+        [p.get("agent_id") for p in chain],
+    )
+
+    for i, profile in enumerate(chain):
+        if _generation_stopped(sid):
+            await sio.emit("generation_stopped", _stream_ids_payload({"message": "Генерация остановлена"}), room=sid)
+            return
+        is_first = i == 0
+        is_last = i == len(chain) - 1
+        step_name = (profile.get("name") or "Агент").strip() or "Агент"
+        await sio.emit(
+            "chat_agent_update",
+            _stream_ids_payload(
+                {
+                    "agent_id": profile.get("agent_id"),
+                    "agent_name": step_name,
+                    "index": i,
+                    "total": len(chain),
+                    "hide_sequential": hide_seq,
+                    "is_last": is_last,
+                }
+            ),
+            room=sid,
+        )
+        if hide_seq and not is_last:
+            await sio.emit(
+                "chat_thinking",
+                _stream_ids_payload(
+                    {
+                        "status": "processing",
+                        "message": f"{step_name} думает…",
+                        "agent_chain": True,
+                    }
+                ),
+                room=sid,
+            )
+
+        step_profile = await enrich_agent_profile_with_user_settings(profile, user_id)
+        _eff_ms = step_profile.get("effective_model_settings") if isinstance(step_profile, dict) else None
+        if isinstance(_eff_ms, dict) and _eff_ms:
+            bind_user_model_runtime(_eff_ms)
+
+        step_kb_ids = step_profile.get("kb_document_ids") or []
+        step_use_kb = bool(step_profile.get("file_search_enabled")) and isinstance(step_kb_ids, list) and len(step_kb_ids) > 0
+        step_data = prepare_step_socket_data(data, step_profile, is_first=is_first)
+        step_message = original_message if is_first else build_chain_user_message(original_message, steps)
+        stream_prefix, _header = iter_chain_stream_prefixes(steps, step_name, hide_sequential_outputs=hide_seq)
+
+        raw = await _handle_direct(
+            sio,
+            sid,
+            step_data,
+            step_message,
+            streaming,
+            conversation_id,
+            history,
+            use_kb_rag if is_first else False,
+            use_memory_library_rag,
+            step_profile,
+            sync_stream_cb,
+            loop,
+            step_use_kb,
+            step_kb_ids,
+            project_id=project_id,
+            project_instructions=project_instructions,
+            rag_strategy=rag_strategy,
+            current_user=current_user,
+            enable_thinking=enable_thinking,
+            inline_context=inline_context if is_first else "",
+            inline_images=inline_images if is_first else None,
+            generation_started_at=generation_started_at,
+            rag_query=original_message,
+            stream_prefix=stream_prefix,
+            emit_complete=False,
+            save_response=False,
+            suppress_ui_stream=hide_seq and not is_last,
+        )
+        if raw is None or _generation_stopped(sid):
+            return
+        step_content = raw.get("content") if isinstance(raw, dict) else raw
+        step_reasoning = raw.get("reasoning") if isinstance(raw, dict) else ""
+        step_document_search = raw.get("document_search") if isinstance(raw, dict) else None
+        steps.append(
+            {
+                "agent_id": profile.get("agent_id"),
+                "agent_name": step_name,
+                "content": step_content or "",
+                "reasoning": step_reasoning or "",
+                "document_search": step_document_search or None,
+            }
+        )
+
+    visible = format_visible_chain_content(steps, hide_sequential_outputs=hide_seq)
+    last_profile = chain[-1]
+    last_name = (last_profile.get("name") or "Агент").strip() or "Агент"
+    payload = _stream_ids_payload(
+        {
+            "response": visible,
+            "timestamp": datetime.now().isoformat(),
+            "was_streaming": streaming,
+            "generation_duration_sec": _generation_duration_sec(generation_started_at),
+            "chain_steps": steps,
+            "hide_sequential_outputs": hide_seq,
+            "agent_id": last_profile.get("agent_id"),
+            "agent_name": last_name,
+        }
+    )
+    await sio.emit("chat_complete", payload, room=sid)
+    try:
+        meta = {
+            "chain_steps": steps,
+            "hide_sequential_outputs": hide_seq,
+        }
+        meta = _with_generation_duration(meta, generation_started_at)
+        regen = _regen_save_kwargs(data)
+        await save_assistant_response(
+            visible,
+            meta,
+            conversation_id=conversation_id,
+            user_id=user_id,
+            project_id=project_id,
+            **regen,
+        )
+    except Exception as e:
+        logger.warning(f"Не удалось сохранить ответ цепочки: {e}")
+
+
+async def _handle_direct(
+    sio,
+    sid,
+    data,
+    user_message,
+    streaming,
+    conversation_id,
+    history,
+    use_kb_rag,
+    use_memory_library_rag,
+    agent_profile,
+    sync_stream_cb,
+    loop,
+    use_agent_scoped_kb=False,
+    agent_kb_doc_ids=None,
+    project_id=None,
+    project_instructions=None,
+    rag_strategy="auto",
+    current_user=None,
+    enable_thinking=False,
+    inline_context: str = "",
+    inline_images: list = None,
+    generation_started_at: Optional[float] = None,
+    rag_query: Optional[str] = None,
+    stream_prefix: str = "",
+    emit_complete: bool = True,
+    save_response: bool = True,
+    suppress_ui_stream: bool = False,
+    complete_response: Optional[str] = None,
+    extra_save_meta: Optional[dict] = None,
+):
     chat_timer = StageTimer(
         "CHAT",
         store="direct",
         conversation_id=conversation_id,
         strategy=rag_strategy,
     )
+    rag_query = (rag_query if rag_query is not None else user_message) or ""
+    stream_prefix = stream_prefix or ""
     min_sim, rag_block = rag_guard_env()
     project_min_sim, _ = rag_guard_env("project")
     agent_min_sim, _ = rag_guard_env("agent")
@@ -1500,11 +1813,11 @@ async def _handle_direct(
     if rag_client and sources.project:
         try:
             proj_hits = await rag_client.project_rag_search(
-                user_message, project_id=project_id, k=get_rag_chat_top_k("project"), strategy=rag_strategy
+                rag_query, project_id=project_id, k=get_rag_chat_top_k("project"), strategy=rag_strategy
             )
             proj_hits = filter_rag_hits_by_score(proj_hits, project_min_sim)
             if proj_hits:
-                if _is_structure_query(user_message):
+                if _is_structure_query(rag_query):
                     seen = {(d, i) for _, _, d, i in proj_hits}
                     for doc_id in {d for _, _, d, _ in proj_hits if d is not None}:
                         with logged_suppress(logger):
@@ -1522,7 +1835,7 @@ async def _handle_direct(
                 proj_context = "\n".join(parts)
                 final_message = f"""Документы проекта (RAG):
 {proj_context}
-Вопрос: {user_message}
+Вопрос: {rag_query}
 Ответь на основе этих документов. Перечисляй только то, что явно есть в фрагментах."""
                 proj_hits_for_trace = proj_hits
                 context_added = True
@@ -1580,7 +1893,7 @@ async def _handle_direct(
             )
         if hits_out:
             document_search_trace = {
-                "query": user_message,
+                "query": rag_query,
                 "strategy": rag_strategy,
                 "sourceFiles": sorted(files_used),
                 "hits": hits_out,
@@ -1607,7 +1920,7 @@ async def _handle_direct(
                 kb_hits = list(
                     await kb_search_agent_documents(
                         rag_client,
-                        user_message,
+                        rag_query,
                         agent_kb_doc_ids or [],
                         k=get_rag_chat_top_k("agent"),
                         strategy=rag_strategy,
@@ -1626,7 +1939,7 @@ async def _handle_direct(
         if sources.memory:
             try:
                 mem_hits = list(
-                    await rag_client.memory_rag_search(user_message, strategy=rag_strategy)
+                    await rag_client.memory_rag_search(rag_query, strategy=rag_strategy)
                     or []
                 )
             except RagReindexInProgress:
@@ -1674,7 +1987,7 @@ async def _handle_direct(
                 }
             )
         document_search_trace = {
-            "query": user_message,
+            "query": rag_query,
             "strategy": rag_strategy,
             "sourceFiles": sorted(files_used),
             "hits": hits_out,
@@ -1764,6 +2077,9 @@ async def _handle_direct(
         logger.info(
             f"[direct inline_context] {len(inline_context)} символов, RAG-контекст {('совмещён' if final_message != inline_block else 'не применялся')}"
         )
+    if (user_message or "").strip() != (rag_query or "").strip():
+        if (user_message or "") not in (final_message or ""):
+            final_message = f"{final_message}\n\n{user_message}"
     eff_model_path = agent_profile["model_path"] or get_current_model_path()
     base_system_prompt = agent_profile["system_prompt"] or ""
     user_cpm = await get_user_prompt_manager((current_user or {}).get("user_id"))
@@ -1799,7 +2115,7 @@ async def _handle_direct(
 
         eff_system_prompt, _s, lazy_skill_ids, allowed_tools_extra, _primed = await apply_skills_to_chat(
             system_prompt=eff_system_prompt,
-            user_message=user_message,
+            user_message=rag_query or user_message,
             data=data or {},
             agent_profile=agent_profile if isinstance(agent_profile, dict) else {},
             current_user=current_user,
@@ -1871,14 +2187,16 @@ async def _handle_direct(
             if direct_plugin_run:
                 await sio.emit(
                     "chat_thinking",
-                    {
-                        "status": "processing",
-                        "message": (
-                            f"Плагин «{direct_plugin_run.label}»: файл "
-                            f"«{direct_plugin_run.file_name}» отправлен в сервис. "
-                            "Полный аудит модели занимает до нескольких десятков минут."
-                        ),
-                    },
+                    _stream_ids_payload(
+                        {
+                            "status": "processing",
+                            "message": (
+                                f"Плагин «{direct_plugin_run.label}»: файл "
+                                f"«{direct_plugin_run.file_name}» отправлен в сервис. "
+                                "Полный аудит модели занимает до нескольких десятков минут."
+                            ),
+                        }
+                    ),
                     room=sid,
                 )
                 logger.info(
@@ -1976,7 +2294,8 @@ async def _handle_direct(
 
             async def _coding_event_cb(payload):
                 coding_tool_events.append(dict(payload))
-                await sio.emit("chat_coding_event", payload, room=sid)
+                if not suppress_ui_stream:
+                    await sio.emit("chat_coding_event", _stream_ids_payload(payload), room=sid)
 
             logger.info(
                 "Coding agent: start sid=%s conversation_id=%s workspace_path=%s plan_mode=%s model_path=%s",
@@ -1986,15 +2305,18 @@ async def _handle_direct(
                 plan_mode,
                 eff_model_path,
             )
-            await sio.emit(
-                "chat_thinking",
-                {
-                    "status": "processing",
-                    "message": "Coding agent: запуск (tools + workspace)…",
-                    "coding_agent": True,
-                },
-                room=sid,
-            )
+            if not suppress_ui_stream:
+                await sio.emit(
+                    "chat_thinking",
+                    _stream_ids_payload(
+                        {
+                            "status": "processing",
+                            "message": "Coding agent: запуск (tools + workspace)…",
+                            "coding_agent": True,
+                        }
+                    ),
+                    room=sid,
+                )
             coding_result = await run_coding_for_chat(
                 user_message=user_message,
                 history=history,
@@ -2007,6 +2329,7 @@ async def _handle_direct(
                 max_tokens=max(agent_profile.get("max_tokens") or 1024, 4096),
                 enable_thinking=enable_thinking,
                 emit_event=_coding_event_cb,
+                max_rounds=agent_profile.get("recursion_limit"),
             )
             logger.info(
                 "Coding agent: done sid=%s mode=%s tool_calls_executed=%s iterations=%s plan_mode=%s",
@@ -2024,7 +2347,8 @@ async def _handle_direct(
 
             async def _mcp_event_cb(payload):
                 mcp_tool_events.append(dict(payload))
-                await sio.emit("chat_mcp_event", payload, room=sid)
+                if not suppress_ui_stream:
+                    await sio.emit("chat_mcp_event", _stream_ids_payload(payload), room=sid)
 
             mcp_result = await run_mcp_for_chat(
                 tool_ids=tool_ids,
@@ -2039,6 +2363,7 @@ async def _handle_direct(
                 max_tokens=max(agent_profile.get("max_tokens") or 1024, 4096),
                 enable_thinking=enable_thinking,
                 emit_event=_mcp_event_cb,
+                max_iterations=agent_profile.get("recursion_limit"),
             )
         except Exception:
             logger.exception("MCP agent loop error")
@@ -2051,7 +2376,13 @@ async def _handle_direct(
                 reasoning_trace_accumulated = acc
             elif isinstance(chunk, str) and chunk:
                 reasoning_trace_accumulated += chunk
-        return sync_stream_cb(chunk, acc, stream_role)
+            if suppress_ui_stream:
+                return True
+            return sync_stream_cb(chunk, acc, stream_role)
+        if suppress_ui_stream:
+            return True
+        visible_acc = f"{stream_prefix}{acc}" if stream_prefix else acc
+        return sync_stream_cb(chunk, visible_acc, stream_role)
 
     def _run_ask(stream, cb):
         return ask_agent(
@@ -2071,12 +2402,14 @@ async def _handle_direct(
     _t_llm0 = time.perf_counter()
     if canned:
         response = canned
-        if streaming:
-            await sio.emit("chat_chunk", {"chunk": canned, "accumulated": canned}, room=sid)
+        if streaming and not suppress_ui_stream:
+            vis = f"{stream_prefix}{canned}" if stream_prefix else canned
+            await sio.emit("chat_chunk", _stream_ids_payload({"chunk": canned, "accumulated": vis}), room=sid)
     elif coding_result is not None:
         response = coding_result.content
-        if streaming and response:
-            await sio.emit("chat_chunk", {"chunk": response, "accumulated": response}, room=sid)
+        if streaming and response and not suppress_ui_stream:
+            vis = f"{stream_prefix}{response}" if stream_prefix else response
+            await sio.emit("chat_chunk", _stream_ids_payload({"chunk": response, "accumulated": vis}), room=sid)
         logger.info(
             "Coding agent loop: mode=%s tools=%s iterations=%s plan=%s",
             coding_result.mode,
@@ -2086,8 +2419,9 @@ async def _handle_direct(
         )
     elif mcp_result is not None:
         response = mcp_result.content
-        if streaming and response:
-            await sio.emit("chat_chunk", {"chunk": response, "accumulated": response}, room=sid)
+        if streaming and response and not suppress_ui_stream:
+            vis = f"{stream_prefix}{response}" if stream_prefix else response
+            await sio.emit("chat_chunk", _stream_ids_payload({"chunk": response, "accumulated": vis}), room=sid)
         logger.info(
             "MCP agent loop: mode=%s tools=%s iterations=%s",
             mcp_result.mode,
@@ -2100,7 +2434,7 @@ async def _handle_direct(
                 ex, _make_ctx_runner(lambda: _run_ask(True, _direct_stream_cb))
             )
         if response is None or _generation_stopped(sid):
-            await sio.emit("generation_stopped", {"message": "Генерация остановлена"}, room=sid)
+            await sio.emit("generation_stopped", _stream_ids_payload({"message": "Генерация остановлена"}), room=sid)
             chat_timer.mark("llm", time.perf_counter() - _t_llm0)
             chat_timer.log(logger)
             return
@@ -2117,16 +2451,24 @@ async def _handle_direct(
 
         response = append_artifacts_to_answer(response, plugin_direct_artifact)
     if _generation_stopped(sid):
-        await sio.emit("generation_stopped", {"message": "Генерация остановлена"}, room=sid)
-        return
+        await sio.emit("generation_stopped", _stream_ids_payload({"message": "Генерация остановлена"}), room=sid)
+        return None
+    visible_out = complete_response if complete_response is not None else (
+        f"{stream_prefix}{response}" if stream_prefix else response
+    )
     # Сначала отдаём ответ в UI: зависание Mongo на regenerate не должно
     # блокировать стрим и кнопку «Стоп».
-    payload = {
-        "response": response,
-        "timestamp": datetime.now().isoformat(),
-        "was_streaming": streaming,
-        "generation_duration_sec": _generation_duration_sec(generation_started_at),
-    }
+    payload = _stream_ids_payload(
+        {
+            "response": visible_out,
+            "timestamp": datetime.now().isoformat(),
+            "was_streaming": streaming,
+            "generation_duration_sec": _generation_duration_sec(generation_started_at),
+        }
+    )
+    if extra_save_meta and extra_save_meta.get("chain_steps"):
+        payload["chain_steps"] = extra_save_meta.get("chain_steps")
+        payload["hide_sequential_outputs"] = bool(extra_save_meta.get("hide_sequential_outputs"))
     if document_search_trace:
         payload["document_search"] = document_search_trace
     if mcp_tool_events:
@@ -2143,42 +2485,52 @@ async def _handle_direct(
             payload["active_plan"] = coding_result.active_plan
     chat_timer.meta["context_added"] = context_added
     chat_timer.log(logger)
-    await sio.emit("chat_complete", payload, room=sid)
+    if emit_complete:
+        await sio.emit("chat_complete", payload, room=sid)
     rag_metrics = await _compute_and_emit_rag_metrics(
         sio,
         sid,
-        query=user_message,
+        query=rag_query,
         document_search_trace=document_search_trace,
         context_text=final_message,
         answer=response if isinstance(response, str) else "",
         context_added=context_added,
     )
-    try:
-        meta = {"document_search": document_search_trace} if document_search_trace else None
-        if rag_metrics:
-            meta = dict(meta or {})
-            meta["rag_metrics"] = rag_metrics
-        if reasoning_trace_accumulated.strip():
-            meta = dict(meta or {})
-            meta["reasoning_content"] = reasoning_trace_accumulated.strip()
-        if mcp_tool_events:
-            meta = dict(meta or {})
-            meta["mcp_tool_calls"] = mcp_tool_events
-        if coding_tool_events:
-            meta = dict(meta or {})
-            meta["coding_tool_calls"] = coding_tool_events
-        if mcp_result and getattr(mcp_result, "attachments", None):
-            meta = dict(meta or {})
-            meta["mcp_attachments"] = mcp_result.attachments
-        meta = _with_generation_duration(meta, generation_started_at)
-        regen = _regen_save_kwargs(data)
-        await save_assistant_response(
-            response,
-            meta,
-            conversation_id=conversation_id,
-            user_id=(current_user or {}).get("user_id"),
-            project_id=project_id,
-            **regen,
-        )
-    except Exception as e:
-        logger.warning(f"Не удалось сохранить ответ: {e}")
+    if save_response:
+        try:
+            meta = {"document_search": document_search_trace} if document_search_trace else None
+            if rag_metrics:
+                meta = dict(meta or {})
+                meta["rag_metrics"] = rag_metrics
+            if reasoning_trace_accumulated.strip():
+                meta = dict(meta or {})
+                meta["reasoning_content"] = reasoning_trace_accumulated.strip()
+            if mcp_tool_events:
+                meta = dict(meta or {})
+                meta["mcp_tool_calls"] = mcp_tool_events
+            if coding_tool_events:
+                meta = dict(meta or {})
+                meta["coding_tool_calls"] = coding_tool_events
+            if mcp_result and getattr(mcp_result, "attachments", None):
+                meta = dict(meta or {})
+                meta["mcp_attachments"] = mcp_result.attachments
+            if extra_save_meta:
+                meta = dict(meta or {})
+                meta.update(extra_save_meta)
+            meta = _with_generation_duration(meta, generation_started_at)
+            regen = _regen_save_kwargs(data)
+            await save_assistant_response(
+                visible_out,
+                meta,
+                conversation_id=conversation_id,
+                user_id=(current_user or {}).get("user_id"),
+                project_id=project_id,
+                **regen,
+            )
+        except Exception as e:
+            logger.warning(f"Не удалось сохранить ответ: {e}")
+    return {
+        "content": response if isinstance(response, str) else (str(response) if response is not None else ""),
+        "reasoning": (reasoning_trace_accumulated or "").strip(),
+        "document_search": document_search_trace,
+    }

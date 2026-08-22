@@ -22,7 +22,7 @@ import { useNavigate, Navigate, useSearchParams } from 'react-router-dom';
 import { useTheme } from '@mui/material/styles';
 import { getApiUrl, API_ENDPOINTS } from '../config/api';
 import { useAuth } from '../contexts/AuthContext';
-import { useAppActions } from '../contexts/AppContext';
+import { useAppActions, useAppContext } from '../contexts/AppContext';
 import SkillFilesEditor from '../components/skills/SkillFilesEditor';
 import {
   GalleryEntityCard,
@@ -118,6 +118,7 @@ export default function SkillsPage() {
 export function SkillsGalleryContent({ embedded = false }: { embedded?: boolean }) {
   const { token, user } = useAuth();
   const { showNotification } = useAppActions();
+  const { state: appState } = useAppContext();
   const theme = useTheme();
   const isDarkMode = theme.palette.mode === 'dark';
   const navigate = useNavigate();
@@ -382,7 +383,12 @@ export function SkillsGalleryContent({ embedded = false }: { embedded?: boolean 
         );
       }
       if (skill.user_invocable !== false && !skill.always_apply) {
-        toggleActiveSkill(skill.slug, true, skill.display_title || skill.name);
+        toggleActiveSkill(
+          appState.currentChatId,
+          skill.slug,
+          true,
+          skill.display_title || skill.name,
+        );
       }
       setSnackbar({
         open: true,

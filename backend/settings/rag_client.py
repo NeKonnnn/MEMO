@@ -21,6 +21,42 @@ class RagReindexInProgress(RuntimeError):
     """SVC-RAG вернул 409: стор переиндексируется, поиск временно недоступен."""
 
 
+def _looks_like_rag_model_error(detail: Any) -> bool:
+    """Пытаемся распознать embed/rerank ошибки по тексту ответа SVC-RAG.
+
+    Backend не знает внутренние INT006 SVC-RAG напрямую, поэтому опираемся на
+    response body (detail/text) от SVC-RAG.
+    """
+    try:
+        if isinstance(detail, dict):
+            parts = []
+            for v in detail.values():
+                if v is None:
+                    continue
+                parts.append(str(v))
+            text = " ".join(parts)
+        else:
+            text = str(detail or "")
+    except Exception:
+        text = str(detail or "")
+    low = text.lower()
+
+    keywords = [
+        "embed",
+        "embedding",
+        "embeddings",
+        "эмбед",
+        "эмбеддин",
+        "rerank",
+        "reranker",
+        "реранк",
+        "модель",
+        "ошибка модели",
+        "llm",
+    ]
+    return any(k in low for k in keywords)
+
+
 def _normalize_rag_service_base(url: str) -> str:
     """Базовый origin SVC-RAG без хвоста /v1 (префикс API добавляется в _rag_request_url)."""
     u = (url or "").strip().rstrip("/")
@@ -156,6 +192,28 @@ class RagClient:
             "requestUuid": request_uuid,
         }
 
+    def _cef_identity_headers(self) -> Dict[str, str]:
+        """Прокинуть инициатора в SVC-RAG для сквозного CEF (suser/suid)."""
+        headers: Dict[str, str] = {}
+        try:
+            from backend.settings.cef_logger.cef_audit_context import cef_audit_peek
+
+            _req, _user, _ = cef_audit_peek()
+            if not _user:
+                return headers
+            suser = str(_user.get("username") or _user.get("user_id") or "").strip()
+            suid = str(_user.get("user_id") or "").strip()
+            sntdom = str(_user.get("sntdom") or _user.get("domain") or "").strip()
+            if suser:
+                headers["X-CEF-Suser"] = suser
+            if suid:
+                headers["X-CEF-Suid"] = suid
+            if sntdom:
+                headers["X-CEF-Sntdom"] = sntdom
+        except Exception:
+            pass
+        return headers
+
     async def _request(
         self,
         method: str,
@@ -169,25 +227,54 @@ class RagClient:
         url = _rag_request_url(self.base_url, path)
         client_timeout = self.timeout if http_timeout is None else http_timeout
         _cef_rid = uuid.uuid4().hex
-        _cef_skip = path.rstrip("/") in ("/health",)
+        # Поллинг статусов переиндексации (*/reindex/status) порождает очень много CEF
+        # и обычно не нужен для аудита. Пропускаем такие события целиком.
+        _cef_skip = path.rstrip("/").endswith("/reindex/status") or path.rstrip("/") in ("/health",)
+        _headers = self._cef_identity_headers()
         try:
             async with httpx.AsyncClient(timeout=client_timeout) as client:
-                resp = await client.request(method=method, url=url, json=json, files=files, data=data, params=params)
+                resp = await client.request(
+                    method=method,
+                    url=url,
+                    json=json,
+                    files=files,
+                    data=data,
+                    params=params,
+                    headers=_headers or None,
+                )
                 resp.raise_for_status()
                 result = resp.json()
             if not _cef_skip:
                 with logged_suppress(logger):
                     from backend.settings.cef_logger.cef_audit_context import cef_audit_peek
                     from backend.settings.cef_logger.cef_logger import log_cef_event
+                    from backend.settings.cef_logger.poll_audit import (
+                        is_polling_read,
+                        poll_audit_decision,
+                        poll_count_extra,
+                    )
 
                     _req, _user, _ = cef_audit_peek()
-                    log_cef_event(
-                        "INT005",
-                        request=_req,
-                        current_user=_user,
-                        status_code=200,
-                        extra=self._cef_extra(method, path, _cef_rid),
-                    )
+                    # Плашка переиндексации даёт ЧЕТЫРЕ исходящих вызова на
+                    # каждый свой тик (три /reindex/status + список документов),
+                    # и каждый порождал INT005. Прореживаем: одно событие в
+                    # окно на (пользователь, путь), в нём cn1 - сколько
+                    # обращений оно представляет. Ошибки и любые методы кроме
+                    # GET/HEAD идут мимо этой ветки и аудируются как раньше.
+                    _emit, _poll_count = True, 0
+                    if is_polling_read(method, path, 200):
+                        _emit, _poll_count = poll_audit_decision(_user, method, path)
+                    if _emit:
+                        log_cef_event(
+                            "INT005",
+                            request=_req,
+                            current_user=_user,
+                            status_code=200,
+                            extra={
+                                **self._cef_extra(method, path, _cef_rid),
+                                **poll_count_extra(_poll_count),
+                            },
+                        )
             return result
         except httpx.HTTPStatusError as e:
             detail = None
@@ -205,8 +292,13 @@ class RagClient:
                     _ex = self._cef_extra(method, path, _cef_rid)
                     _ex["codeStatus"] = str(e.response.status_code)
                     _ex["textStatus"] = str(detail or "")[:512]
+                    event_id = "INT007" if _looks_like_rag_model_error(detail) else "INT006"
                     log_cef_event(
-                        "INT006", request=_req, current_user=_user, status_code=e.response.status_code, extra=_ex
+                        event_id,
+                        request=_req,
+                        current_user=_user,
+                        status_code=e.response.status_code,
+                        extra=_ex,
                     )
             msg = f"SVC-RAG {method} {url} failed: {e.response.status_code} {detail}"
             if e.response.status_code == 409:
@@ -223,7 +315,22 @@ class RagClient:
                     _ex = self._cef_extra(method, path, _cef_rid)
                     _ex["codeStatus"] = "EXCEPTION"
                     _ex["textStatus"] = str(e)[:512]
-                    log_cef_event("INT006", request=_req, current_user=_user, status_code=None, extra=_ex)
+                    event_id = "INT006"
+                    if isinstance(e, httpx.ConnectError):
+                        _ex["codeStatus"] = "CONNECT_ERROR"
+                    elif isinstance(e, httpx.NetworkError):
+                        _ex["codeStatus"] = "NETWORK_ERROR"
+                    elif isinstance(e, httpx.ReadTimeout):
+                        _ex["codeStatus"] = "READ_TIMEOUT"
+                    elif isinstance(e, httpx.TimeoutException):
+                        _ex["codeStatus"] = "TIMEOUT"
+                    log_cef_event(
+                        event_id,
+                        request=_req,
+                        current_user=_user,
+                        status_code=None,
+                        extra=_ex,
+                    )
             msg = f"SVC-RAG {method} {url} error: {e}"
             raise RuntimeError(msg) from e
 
@@ -231,9 +338,9 @@ class RagClient:
     def _parse_hits(resp: Any) -> List[Tuple[str, float, Optional[int], Optional[int]]]:
         """Хиты из ответа SVC-RAG.
 
-        ```cosine``` — сырая косинусная близость чанка, необязательное поле:
+        `cosine` — сырая косинусная близость чанка, необязательное поле:
         старый SVC-RAG его не присылает, лексическая стратегия не считает.
-        Едет отдельно от ```score```, потому что тот в шкале стратегии
+        Едет отдельно от `score`, потому что тот в шкале стратегии
         (RRF / логит реранкера), и процент релевантности по нему считать нельзя.
         """
         from backend.rag_query.hit_types import RagHit
@@ -994,16 +1101,23 @@ def get_rag_client() -> RagClient:
 
 
 def rag_model_path_to_provider(model_path: str):
-    """path → (provider_id, model_id)."""
-    p = (model_path or "").strip()
-    lower = p.lower()
-    if lower.startswith("phoenix_embeddings/"):
-        return "PHOENIX_Embeddings", p.split("/", 1)[1]
-    if lower.startswith("phoenix/"):
-        return "PHOENIX", p.split("/", 1)[1]
-    if lower.startswith("corsur/"):
-        return "CORSUR", p.split("/", 1)[1]
-    return "native", None
+    """path -> (provider_id, model_id).
+
+    Разбор пути один на весь бэкенд — 'embedding_fields_from_path': префикс
+    это id провайдера в 'rag_models.providers' у SVC-RAG, сравнение там
+    регистронезависимое. Раньше здесь лежал свой список из трёх известных
+    префиксов, и путь нового шлюза ('corsur_rag/embed/FRIDA') сверялся
+    как 'native': reconcile после рестарта svc-rag видел расхождение и
+    молча пушил кластерную модель поверх выбора пользователя.
+    """
+    from backend.services.user_rag_settings import embedding_fields_from_path
+
+    fields = embedding_fields_from_path(model_path)
+    provider = str(fields.get("embedding_provider") or "native")
+    model = fields.get("embedding_model")
+    if provider == "native":
+        return "native", None
+    return provider, model
 
 async def reconcile_rag_models_provider(
     client,

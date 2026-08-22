@@ -6,7 +6,8 @@ from __future__ import annotations
 import os
 import ssl
 from urllib.parse import urlparse
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, FrozenSet, Set
+import re
 from fastapi import HTTPException, status
 from backend.settings.logging import get_logger
 
@@ -618,6 +619,195 @@ def fetch_ldap_user_profile(username: str, user_id: Optional[str] = None) -> Opt
             "ldap_groups": groups,
         }
     return None
+
+
+def _normalize_ldap_dn(dn: str) -> str:
+    """Нормализация DN для сравнения (регистр, пробелы вокруг запятых)."""
+    parts = [part.strip() for part in str(dn or "").split(",") if part.strip()]
+    return ",".join(parts).casefold()
+
+
+def extract_member_of_dns_from_search_filter(search_filter: str) -> FrozenSet[str]:
+    """Извлечь DN групп из memberOf=… в LDAP_SEARCH_FILTER (ConfigMap)."""
+    if not search_filter:
+        return frozenset()
+    dns: Set[str] = set()
+    for match in re.finditer("(?i)memberOf=([^)]+)", str(search_filter)):
+        dn = match.group(1).strip()
+        if dn:
+            dns.add(_normalize_ldap_dn(dn))
+    return frozenset(dns)
+
+
+def _filter_member_of_by_search_filter(member_of_values: List[str], search_filter: Optional[str]) -> List[str]:
+    """Оставить только группы, перечисленные в memberOf LDAP_SEARCH_FILTER."""
+    allowed = extract_member_of_dns_from_search_filter(search_filter or "")
+    if not allowed:
+        return []
+    filtered: List[str] = []
+    for group_dn in member_of_values:
+        raw = str(group_dn or "").strip()
+        if raw and _normalize_ldap_dn(raw) in allowed:
+            filtered.append(raw)
+    return filtered
+
+
+def _build_user_profile_from_attrs(
+    attrs: Dict[str, Any], settings: Dict[str, Any], *, fallback_username: str
+) -> Dict[str, Any]:
+    """Собрать профиль пользователя LDAP с группами из LDAP_SEARCH_FILTER."""
+    ldap_username = _extract_first(attrs, settings["id_attr"]) or fallback_username
+    full_name = (
+        _extract_first(attrs, settings["full_name_attr"])
+        or _extract_first(attrs, "displayName")
+        or _extract_first(attrs, "cn")
+    )
+    email = (
+        _extract_first(attrs, settings["email_attr"])
+        or _extract_first(attrs, "mail")
+        or _extract_first(attrs, "userPrincipalName")
+    )
+    all_groups = [str(group) for group in attrs.get("memberOf") or []]
+    groups = _filter_member_of_by_search_filter(all_groups, settings.get("search_filter"))
+    if not groups:
+        # Если в SEARCH_FILTER нет memberOf — берём все группы как раньше.
+        groups = all_groups
+    group_names = [_extract_group_cn(g) for g in groups if _extract_group_cn(g)]
+    admin_groups = [g.lower() for g in settings["admin_groups"]]
+    is_admin = any(
+        (
+            any((f"cn={admin_group}," in group.lower() or group.lower() == admin_group for admin_group in admin_groups))
+            for group in groups
+        )
+    )
+    return {
+        "user_id": ldap_username,
+        "username": ldap_username,
+        "email": email,
+        "full_name": full_name,
+        "is_active": True,
+        "is_admin": is_admin,
+        "groups": group_names,
+        "ldap_groups": groups,
+    }
+
+
+def _build_directory_search_filter(settings: Dict[str, Any], query: str) -> str:
+    """Фильтр поиска сотрудников по gpbu / ФИО / email."""
+    escaped = escape_filter_chars(query)
+    username_attr = str(settings.get("username_attr") or "sAMAccountName").strip() or "sAMAccountName"
+    id_attr = str(settings.get("id_attr") or username_attr).strip() or username_attr
+    full_name_attr = str(settings.get("full_name_attr") or "displayName").strip() or "displayName"
+    email_attr = str(settings.get("email_attr") or "mail").strip() or "mail"
+    pattern = f"*{escaped}*"
+    clauses: List[str] = []
+    for attr in (username_attr, id_attr, full_name_attr, email_attr, "cn", "displayName", "mail", "userPrincipalName"):
+        attr = str(attr or "").strip()
+        if not attr:
+            continue
+        clause = f"({attr}={pattern})"
+        if clause not in clauses:
+            clauses.append(clause)
+    if not clauses:
+        return "(objectClass=*)"
+    if len(clauses) == 1:
+        return clauses[0]
+    return f"(|{''.join(clauses)})"
+
+
+def search_ldap_users(query: str, limit: int = 10) -> List[Dict[str, Any]]:
+    """Поиск пользователей в LDAP по gpbu / ФИО / email (service bind)."""
+    if not LDAP_AVAILABLE or not is_ldap_enabled():
+        return []
+    q = (query or "").strip()
+    if len(q) < 2:
+        return []
+    limit = max(1, min(int(limit or 10), 20))
+
+    settings = _get_ldap_settings()
+    if not settings.get("bind_dn") or not settings.get("bind_credentials"):
+        return []
+    required_keys = ("url", "base_dn")
+    missing = [key for key in required_keys if not settings.get(key)]
+    if missing:
+        logger.warning("LDAP search: неполная конфигурация missing=%s", ",".join(missing))
+        return []
+
+    search_filter = _build_directory_search_filter(settings, q)
+    attributes = _ldap_lookup_attributes(settings)
+    server = _build_server(settings["url"], 10, settings["ca_cert_path"])
+
+    try:
+        conn = Connection(
+            server,
+            user=settings["bind_dn"],
+            password=settings["bind_credentials"],
+            authentication=SIMPLE,
+            receive_timeout=10,
+            auto_bind=True,
+        )
+    except (LDAPBindError, LDAPException) as exc:
+        logger.warning("LDAP search: service bind failed reason=%s", str(exc))
+        return []
+
+    results: List[Dict[str, Any]] = []
+    seen: set = set()
+    try:
+        try:
+            found = conn.search(
+                search_base=settings["base_dn"],
+                search_filter=search_filter,
+                search_scope=SUBTREE,
+                attributes=attributes,
+                size_limit=limit * 3,
+            )
+        except LDAPException as size_exc:
+            logger.debug("LDAP search: size/limit notice q=%s reason=%s", q, str(size_exc))
+            found = bool(conn.entries)
+        if not found or not conn.entries:
+            return []
+
+        for entry in conn.entries:
+            if len(results) >= limit:
+                break
+            attrs = entry.entry_attributes_as_dict
+            if _ldap_account_status_error(attrs):
+                continue
+            all_groups = [str(group) for group in attrs.get("memberOf") or []]
+            required = extract_member_of_dns_from_search_filter(settings.get("search_filter") or "")
+            if required:
+                kept = _filter_member_of_by_search_filter(all_groups, settings.get("search_filter"))
+                if not kept:
+                    continue
+
+            profile = _build_user_profile_from_attrs(
+                attrs, settings, fallback_username=_extract_first(attrs, settings.get("username_attr") or "") or ""
+            )
+            uid = (profile.get("user_id") or profile.get("username") or "").strip()
+            if not uid:
+                continue
+            key = uid.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            results.append(
+                {
+                    "user_id": uid,
+                    "username": uid,
+                    "full_name": profile.get("full_name") or None,
+                    "email": profile.get("email") or None,
+                }
+            )
+    except LDAPException as exc:
+        logger.warning("LDAP search: ошибка поиска q=%s reason=%s", q, str(exc))
+        return []
+    finally:
+        try:
+            conn.unbind()
+        except Exception:
+            pass
+
+    return results
 
 
 def is_ldap_enabled() -> bool:

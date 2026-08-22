@@ -64,6 +64,24 @@ function main() {
     console.warn('[presentation-assets] dom-to-pptx не найден — выполните npm install dom-to-pptx');
   }
 
+  // Chart.js для HTML-артефактов без внешнего CDN (корп. сеть часто режет cdnjs).
+  const chartCandidates = [
+    path.join(ROOT, 'node_modules', 'chart.js', 'dist', 'chart.umd.min.js'),
+    path.join(ROOT, 'node_modules', 'chart.js', 'dist', 'chart.umd.js'),
+  ];
+  let chartCopied = false;
+  const vendorDir = path.join(ROOT, 'public', 'vendor');
+  for (const src of chartCandidates) {
+    if (copyFile(src, path.join(vendorDir, 'chart.umd.min.js'))) {
+      chartCopied = true;
+      console.log('[presentation-assets] chart.js:', src);
+      break;
+    }
+  }
+  if (!chartCopied) {
+    console.warn('[presentation-assets] chart.js не найден — выполните npm install chart.js');
+  }
+
   const iconMappings = [
     { from: path.join(PPTX_ICONS, 'icons'), to: path.join(PUBLIC_STATIC, 'icons') },
     { from: path.join(PPTX_ICONS, 'icons_new'), to: path.join(PUBLIC_STATIC, 'icons_new') },
@@ -85,6 +103,27 @@ function main() {
       `[presentation-assets] Не хватает брендовых иконок в public/static/icons: ${missing.join(', ')}`
     );
     console.warn('[presentation-assets] Скопируйте их из pptx/icons/icons/ (внутри контура).');
+  }
+
+  const mermaidCandidates = [
+    path.join(ROOT, 'node_modules', 'mermaid', 'dist', 'mermaid.min.js'),
+    path.join(ROOT, 'node_modules', 'mermaid', 'dist', 'mermaid.js'),
+    // mermaid@10+/11 иногда кладёт бандл глубже
+    path.join(ROOT, 'node_modules', 'mermaid', 'dist', 'mermaid.esm.min.mjs'),
+  ];
+  let mermaidCopied = false;
+  for (const src of mermaidCandidates) {
+    if (src.endsWith('.mjs')) continue; // нужен IIFE/UMD для script-tag
+    if (copyFile(src, path.join(PUBLIC_STATIC, 'mermaid.min.js'))) {
+      mermaidCopied = true;
+      console.log('[presentation-assets] mermaid:', src);
+      break;
+    }
+  }
+  if (!mermaidCopied) {
+    console.warn(
+      '[presentation-assets] mermaid не найден локально — artifact-viewer будет опираться на snapshot из чата (previewHtml)',
+    );
   }
 }
 

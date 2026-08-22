@@ -31,7 +31,7 @@ from config import get_path
 try:
     from backend.config import get_path
     MODEL_PATH = get_path("model_path")
-    from backend.context_prompts import context_prompt_manager, merge_context_prompt_into_system
+    from backend.context_prompts import context_prompt_manager
     from backend.llm_client import (
         ask_agent_llm_svc,
         get_llm_service,
@@ -41,7 +41,7 @@ try:
 except ImportError:
     from config import get_path
     MODEL_PATH = get_path("model_path")
-    from context_prompts import context_prompt_manager, merge_context_prompt_into_system
+    from context_prompts import context_prompt_manager
     from llm_client import (
         ask_agent_llm_svc,
         get_llm_service,
@@ -431,9 +431,12 @@ def get_model_info():
 
 def prepare_prompt(text, system_prompt=None, history=None, model_path=None, custom_prompt_id=None):
     """Подготовка промпта в правильном формате с поддержкой истории диалога и контекстных промптов"""
-    system_prompt = merge_context_prompt_into_system(
-        system_prompt, model_path=model_path, custom_prompt_id=custom_prompt_id
-    )
+    # Не мержим singleton поверх уже собранного system_prompt (утечка чужих/seed инструкций).
+    if system_prompt is None:
+        if model_path:
+            system_prompt = context_prompt_manager.get_effective_prompt(model_path, custom_prompt_id)
+        else:
+            system_prompt = context_prompt_manager.get_global_prompt()
     
     # Базовый шаблон для чата
     prompt_parts = []
@@ -497,9 +500,18 @@ def ask_agent(
     eff_temperature = float(
         temperature if temperature is not None else get_active_model_settings().get("temperature") or 0.7
     )
-    eff_system_prompt = merge_context_prompt_into_system(
-        system_prompt, model_path=model_path, custom_prompt_id=custom_prompt_id
-    )
+    # Не мержим процессный singleton поверх уже собранного system_prompt.
+    if system_prompt is None:
+        try:
+            ctx_prompt = (
+                context_prompt_manager.get_effective_prompt(model_path, custom_prompt_id)
+                if model_path
+                else context_prompt_manager.get_global_prompt()
+            )
+            ctx_prompt = (ctx_prompt or "").strip()
+            system_prompt = ctx_prompt or None
+        except Exception:
+            logger.exception("ask_agent: не удалось получить контекстные инструкции")
     # Служебные вызовы: гасим мышление и поднимаем min max_tokens (страховка 01.08).
     eff_enable_thinking = bool(enable_thinking)
     if service_call and not eff_enable_thinking:
@@ -518,7 +530,7 @@ def ask_agent(
                 stream_callback=stream_callback,
                 max_tokens=eff_max_tokens,
                 temperature=eff_temperature,
-                system_prompt=eff_system_prompt,
+                system_prompt=system_prompt,
                 enable_thinking=eff_enable_thinking,
                 service_call=bool(service_call),
             )
@@ -554,7 +566,7 @@ def ask_agent(
                 model_path=model_path,
                 custom_prompt_id=custom_prompt_id,
                 images=images,
-                system_prompt=eff_system_prompt,
+                system_prompt=system_prompt,
                 temperature=temperature,
                 enable_thinking=False if service_call else enable_thinking,
             )

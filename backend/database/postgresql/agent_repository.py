@@ -705,10 +705,52 @@ WHERE id = ${param_num}
             # поэтому убираем их явно. Иначе новый агент с тем же id унаследовал бы
             # чужие параметры нарезки.
             await self._delete_entity_settings(agent_id)
+            await self.remove_agent_from_chains(agent_id)
             return True
         except Exception:
             logger.exception("Ошибка при удалении агента")
             return False
+
+    async def remove_agent_from_chains(self, deleted_id: int) -> None:
+        """Убрать удалённого агента из config.agent_ids чужих карточек."""
+        try:
+            async with await self.db_connection.acquire() as conn:
+                rows = await conn.fetch(
+                    """
+                    SELECT id, config FROM agents
+                    WHERE jsonb_typeof(config->'agent_ids') = 'array'
+                    """
+                )
+                for row in rows:
+                    cfg = row["config"] if isinstance(row["config"], dict) else {}
+                    raw_ids = cfg.get("agent_ids") if isinstance(cfg, dict) else None
+                    if not isinstance(raw_ids, list):
+                        continue
+                    new_ids = []
+                    changed = False
+                    for item in raw_ids:
+                        try:
+                            aid = int(item)
+                        except (TypeError, ValueError):
+                            continue
+                        if aid == deleted_id:
+                            changed = True
+                            continue
+                        new_ids.append(aid)
+                    if not changed:
+                        continue
+                    next_cfg = dict(cfg)
+                    next_cfg["agent_ids"] = new_ids
+                    await conn.execute(
+                        """
+                        UPDATE agents SET config = $1::jsonb, updated_at = NOW()
+                        WHERE id = $2
+                        """,
+                        json.dumps(next_cfg),
+                        row["id"],
+                    )
+        except Exception:
+            logger.exception("Не удалось вычистить agent_ids после удаления %s", deleted_id)
 
     async def _delete_entity_settings(self, agent_id: int) -> None:
         """Убрать RAG-настройки удалённого агента. Сбой тут агента не воскрешает."""

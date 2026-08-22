@@ -142,6 +142,7 @@ for _name, _import_path in [
     ("auth",    "backend.auth.routes"),
     ("agents",  "backend.api_agents"),
     ("skills",  "backend.api_skills"),
+    ("users",   "backend.api_users"),
     ("share",   "backend.routes.share"),
 ]:
     try:

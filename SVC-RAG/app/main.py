@@ -7,12 +7,14 @@ from fastapi.middleware.cors import CORSMiddleware
 # Единый формат логов со всеми сервисами astrachat (app.* + httpx + uvicorn в одном стиле).
 # Настраиваем ДО импорта роутеров, чтобы их module-level логгеры тоже легли в единый формат.
 from app.core.logging import configure_logging, get_logger, get_uvicorn_log_config
+from app.core.cef_logger import CefAuditMiddleware, configure_cef_logging, log_cef_event
 
 from app.core.config import get_settings, get_settings_diagnostics
 from app.api import router as api_router
 from app.dependencies import get_db
 
 configure_logging()
+configure_cef_logging()
 
 settings = get_settings()
 logger = get_logger(__name__)
@@ -27,8 +29,8 @@ async def lifespan(app: FastAPI):
             diag.get("resolved_config_path"),
             diag.get("used_yaml"),
         )
-        logger.info("SVC-RAG PostgreSQL effective config: %s", diag.get("postgresql"))
-        logger.info("SVC-RAG PostgreSQL env snapshot: %s", diag.get("env_values"))
+        logger.debug("SVC-RAG PostgreSQL effective config: %s", diag.get("postgresql"))
+        logger.debug("SVC-RAG PostgreSQL env snapshot: %s", diag.get("env_values"))
 
         await get_db()
         logger.info("SVC-RAG: БД подключена, таблицы готовы")
@@ -38,10 +40,12 @@ async def lifespan(app: FastAPI):
             await ensure_memory_chunk_consistency()
         except Exception:
             logger.exception("[MEMORY-CHUNK] проверка нарезки Библиотеки не удалась")
+        log_cef_event("SYS001")
     except Exception as e:
         logger.error("SVC-RAG: ошибка старта БД: %s", e, exc_info=True)
         raise
     yield
+    log_cef_event("SYS002")
     logger.info("SVC-RAG: shutdown")
 
 def create_application() -> FastAPI:
@@ -60,6 +64,8 @@ def create_application() -> FastAPI:
         allow_methods=settings.cors.allow_methods,
         allow_headers=settings.cors.allow_headers,
     )
+    # CEF после CORS: внутренний middleware выполняется первым на запросе.
+    app.add_middleware(CefAuditMiddleware)
     app.include_router(api_router, prefix="/v1")
     return app
 
@@ -68,9 +74,9 @@ app = create_application()
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     request_id = str(uuid.uuid4())[:8]
-    logger.info("%s %s %s", request_id, request.method, request.url.path)
+    logger.debug("%s %s %s", request_id, request.method, request.url.path)
     response = await call_next(request)
-    logger.info(
+    logger.debug(
         "%s %s %s %s",
         request_id,
         request.method,

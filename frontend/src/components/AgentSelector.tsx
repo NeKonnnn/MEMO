@@ -7,14 +7,7 @@ import {
   Computer as ComputerIcon,
   SmartToy as AgentIcon,
   Check as CheckIcon,
-  Image as ImageIcon,
 } from '@mui/icons-material';
-import {
-  ImageGenPreset,
-  ImageGenPresetsPayload,
-  readSelectedImageGenPresetId,
-  writeSelectedImageGenPresetId,
-} from '../utils/imageGenerationPresets';
 import { useAuth } from '../contexts/AuthContext';
 import { useAppActions } from '../contexts/AppContext';
 import { getApiUrl } from '../config/api';
@@ -31,6 +24,16 @@ import {
   MENU_ACTION_TEXT_SIZE,
 } from '../constants/menuStyles';
 
+function readStoredModelPath(): string {
+  if (typeof window === 'undefined') return '';
+  try {
+    const raw = (localStorage.getItem(LAST_SELECTED_MODEL_PATH_STORAGE_KEY) || '').trim();
+    return isValidSelectedModelPath(raw) ? raw : '';
+  } catch {
+    return '';
+  }
+}
+
 export interface Agent {
   id: number;
   name: string;
@@ -39,10 +42,8 @@ export interface Agent {
   config?: Record<string, unknown>;
   author_id: string;
   author_name?: string;
-  /** Агент расшарен текущему пользователю (не автор). */
+  author_full_name?: string | null;
   is_shared_with_me?: boolean;
-  /** Роль: owner | editor | viewer */
-  my_permission?: string;
 }
 
 interface ModelItem {
@@ -125,7 +126,6 @@ interface AgentSelectorProps {
 
 const LEFT_PANEL_W = 185;
 const RIGHT_PANEL_W = 260;
-const IMAGE_GEN_SLOT = '__image_generation__';
 
 export default function AgentSelector({
   isDarkMode = true,
@@ -144,7 +144,9 @@ export default function AgentSelector({
   const [loadingModels, setLoadingModels] = useState(false);
   const [isLoadingModel, setIsLoadingModel] = useState(false);
   const [loadingModelPath, setLoadingModelPath] = useState<string | null>(null);
-  const [selectedModelPath, setSelectedModelPath] = useState('');
+  // Сразу из localStorage — иначе при remount (свап проектный/обычный чат)
+  // триггер мигает «Агенты / Модели», пока не ответит /api/models/current.
+  const [selectedModelPath, setSelectedModelPath] = useState(readStoredModelPath);
   const [defaultProviderId, setDefaultProviderId] = useState<string>(() => {
     const cached = readTimedCache<{ defaultProviderId?: string }>(PROVIDERS_CACHE_KEY, PROVIDERS_CACHE_TTL_MS);
     return (cached?.defaultProviderId || '').toString();
@@ -169,9 +171,6 @@ export default function AgentSelector({
   const [modelsSubmenuOpen, setModelsSubmenuOpen] = useState(false);
   /** Какое подключение сейчас активно (наведено) в левой панели. */
   const [activeConnectionLabel, setActiveConnectionLabel] = useState<string | null>(null);
-  const [imagePresets, setImagePresets] = useState<ImageGenPreset[]>([]);
-  const [imagePresetsLoading, setImagePresetsLoading] = useState(false);
-  const [selectedImagePresetId, setSelectedImagePresetId] = useState(() => readSelectedImageGenPresetId() || '');
 
   const { menuItemColor, menuItemHover, menuDividerBorder } = getMenuColors(isDarkMode);
   const windowSx = { ...getDropdownPanelSx(isDarkMode) } as Record<string, unknown>;
@@ -249,31 +248,6 @@ export default function AgentSelector({
 
   /** Один in-flight запрос на /available: фоновый прогрев и открытие меню не дублируют сеть. */
   const availableCatalogInFlightRef = useRef<Promise<Record<string, unknown> | null> | null>(null);
-  const loadImagePresets = useCallback(async () => {
-    setImagePresetsLoading(true);
-    try {
-      const r = await fetch(getApiUrl('/api/image-generation/presets'));
-      if (!r.ok) return;
-      const data = (await r.json()) as ImageGenPresetsPayload;
-      const list = Array.isArray(data.presets) ? data.presets : [];
-      setImagePresets(list);
-      const stored = readSelectedImageGenPresetId();
-      const defaultId = data.default_preset_id || list[0]?.id || '';
-      const nextId =
-        stored && list.some((p) => p.id === stored)
-          ? stored
-          : defaultId;
-      if (nextId) {
-        setSelectedImagePresetId(nextId);
-        if (!stored || stored !== nextId) writeSelectedImageGenPresetId(nextId);
-      }
-    } catch {
-      // ignore
-    } finally {
-      setImagePresetsLoading(false);
-    }
-  }, []);
-
   const fetchAvailableCatalog = useCallback(async (): Promise<Record<string, unknown> | null> => {
     const existing = availableCatalogInFlightRef.current;
     if (existing) return existing;
@@ -366,22 +340,6 @@ export default function AgentSelector({
   }, [anchorEl, loadModels, modelsLoadedOnce]);
 
   useEffect(() => {
-    void loadImagePresets();
-  }, [loadImagePresets]);
-
-  useEffect(() => {
-    if (anchorEl) void loadImagePresets();
-  }, [anchorEl, loadImagePresets]);
-
-  useEffect(() => {
-    const onPresetChanged = () => {
-      setSelectedImagePresetId(readSelectedImageGenPresetId() || '');
-    };
-    window.addEventListener('astrachatImageGenPresetChanged', onPresetChanged);
-    return () => window.removeEventListener('astrachatImageGenPresetChanged', onPresetChanged);
-  }, []);
-
-  useEffect(() => {
     let cancelled = false;
     fetch(getApiUrl('/api/models/current'))
       .then((r) => (r.ok ? r.json() : null))
@@ -409,7 +367,7 @@ export default function AgentSelector({
 
   useEffect(() => {
     const syncFromStorage = () => {
-      const path = localStorage.getItem(LAST_SELECTED_MODEL_PATH_STORAGE_KEY) || '';
+      const path = readStoredModelPath();
       setSelectedModelPath((prev) => (prev === path ? prev : path));
     };
     const onModelChanged = (e: Event) => {
@@ -451,7 +409,7 @@ export default function AgentSelector({
     if (modelPath === selectedModelPath) { handleClose(); return; }
     const prevModelPath = selectedModelPath;
     try {
-      // Спиннер крутится, пока backend реально подтянет веса (POST /api/models/load).
+      // Спиннер крутится, пока backend реально подтянет веса (Post /api/models/load).
       setIsLoadingModel(true);
       setLoadingModelPath(modelPath);
       handleClose();
@@ -520,35 +478,13 @@ export default function AgentSelector({
     );
   }, [connections, activeConnectionLabel, modelSearch]);
 
-  const filteredImagePresets = useMemo(() => {
-    if (!modelSearch.trim()) return imagePresets;
-    const q = modelSearch.toLowerCase();
-    return imagePresets.filter(
-      (p) =>
-        p.label.toLowerCase().includes(q) ||
-        p.id.toLowerCase().includes(q) ||
-        (p.description || '').toLowerCase().includes(q),
-    );
-  }, [imagePresets, modelSearch]);
-
-  const isImageSlotActive = activeConnectionLabel === IMAGE_GEN_SLOT;
-
-  const handleSelectImagePreset = (presetId: string) => {
-    if (!presetId) return;
-    setSelectedImagePresetId(presetId);
-    writeSelectedImageGenPresetId(presetId);
-    const label = imagePresets.find((p) => p.id === presetId)?.label || presetId;
-    showNotification('success', `Модель генерации: ${label}`);
-    handleClose();
-  };
-
   const triggerLabel = activeAgent
     ? activeAgent.name
     : loadingModelPath
       ? getModelDisplayName(loadingModelPath)
       : isValidSelectedModelPath(selectedModelPath)
         ? getModelDisplayName(selectedModelPath)
-        : 'Модели';
+        : 'Агенты / Модели';
 
   // ─── Styles ──────────────────────────────────────────────────────────────────
 
@@ -676,39 +612,6 @@ export default function AgentSelector({
             }}
           >
             <Box sx={{ py: 0.5, px: 0.5 }}>
-              <Box
-                onMouseEnter={() => {
-                  setActiveConnectionLabel(IMAGE_GEN_SLOT);
-                  setModelsSubmenuOpen(true);
-                  setModelSearch('');
-                }}
-                sx={leftEntrySx(
-                  isImageSlotActive || Boolean(selectedImagePresetId),
-                )}
-              >
-                <ImageIcon sx={{ fontSize: 18, color: iconColor, flexShrink: 0 }} />
-                <Typography
-                  sx={{
-                    flex: 1,
-                    minWidth: 0,
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                    fontSize: MENU_ACTION_TEXT_SIZE,
-                  }}
-                >
-                  Изображения
-                </Typography>
-                <ChevronRightIcon
-                  sx={{
-                    fontSize: 18,
-                    color: subtleColor,
-                    flexShrink: 0,
-                    transform: isImageSlotActive ? 'rotate(90deg)' : 'none',
-                    transition: 'transform 0.15s',
-                  }}
-                />
-              </Box>
               {connections.length === 0 ? (
                 <Box sx={{ px: 1.5, py: 2, fontSize: MENU_ACTION_TEXT_SIZE, color: subtleColor, textAlign: 'center' }}>
                   {loadingModels ? '' : 'Нет подключений'}
@@ -785,7 +688,7 @@ export default function AgentSelector({
                 <SearchIcon sx={{ color: subtleColor, fontSize: 16, flexShrink: 0 }} />
                 <Box
                   component="input"
-                  placeholder={isImageSlotActive ? 'Поиск моделей изображений...' : 'Поиск моделей...'}
+                  placeholder="Поиск моделей..."
                   value={modelSearch}
                   onChange={(e: React.ChangeEvent<HTMLInputElement>) => setModelSearch(e.target.value)}
                   disabled={isLoadingModel}
@@ -813,121 +716,53 @@ export default function AgentSelector({
                   '&::-webkit-scrollbar': { display: 'none' },
                 }}
               >
-                {isImageSlotActive ? (
-                  <>
-                    {imagePresetsLoading && filteredImagePresets.length === 0 ? (
-                      <Box sx={{ py: 3, display: 'flex', justifyContent: 'center' }}>
-                        <CircularProgress size={22} sx={{ color: subtleColor }} />
-                      </Box>
-                    ) : null}
-                    {filteredImagePresets.map((preset) => {
-                      const isSelected = selectedImagePresetId === preset.id;
-                      const unavailable = preset.available === false;
-                      return (
-                        <Box
-                          key={preset.id}
-                          onClick={unavailable ? undefined : () => handleSelectImagePreset(preset.id)}
-                          sx={{
-                            ...dropdownItemSx,
-                            display: 'flex',
-                            alignItems: 'flex-start',
-                            gap: 1,
-                            opacity: unavailable ? 0.45 : 1,
-                            cursor: unavailable ? 'not-allowed' : 'pointer',
-                            color: isSelected ? menuItemColor : mutedTextColor,
-                            fontWeight: isSelected ? 600 : 400,
-                            bgcolor: isSelected ? menuItemHover : 'transparent',
-                          }}
-                        >
-                          <ImageIcon sx={{ fontSize: 18, color: iconColor, flexShrink: 0, mt: 0.15 }} />
-                          <Box sx={{ flex: 1, minWidth: 0 }}>
-                            <Typography
-                              sx={{
-                                overflow: 'hidden',
-                                textOverflow: 'ellipsis',
-                                whiteSpace: 'nowrap',
-                                fontSize: MENU_ACTION_TEXT_SIZE,
-                              }}
-                            >
-                              {preset.label}
-                            </Typography>
-                            {preset.description ? (
-                              <Typography
-                                sx={{
-                                  fontSize: '0.68rem',
-                                  color: subtleColor,
-                                  lineHeight: 1.25,
-                                  mt: 0.25,
-                                }}
-                              >
-                                {preset.description}
-                                {unavailable ? ' · файл не найден' : ''}
-                              </Typography>
-                            ) : null}
-                          </Box>
-                          {isSelected ? (
-                            <CheckIcon sx={{ fontSize: 16, color: 'primary.main', flexShrink: 0 }} />
-                          ) : null}
-                        </Box>
-                      );
-                    })}
-                    {!imagePresetsLoading && filteredImagePresets.length === 0 && (
-                      <Box sx={{ px: 1.5, py: 2, fontSize: MENU_ACTION_TEXT_SIZE, color: subtleColor, textAlign: 'center' }}>
-                        {modelSearch.trim() ? 'Ничего не найдено' : 'Нет пресетов'}
-                      </Box>
-                    )}
-                  </>
-                ) : (
-                  <>
-                    {catalogLoading && filteredModels.length === 0 ? (
-                      <Box sx={{ py: 3, display: 'flex', justifyContent: 'center' }}>
-                        <CircularProgress size={22} sx={{ color: subtleColor }} />
-                      </Box>
-                    ) : null}
-                    {filteredModels.map((model) => {
-                      const isSelected = selectedModelPath === model.path && !loadingModelPath;
-                      const isLoading = loadingModelPath === model.path;
-                      return (
-                        <Box
-                          key={model.path}
-                          onClick={isLoading ? undefined : () => handleSelectModel(model.path)}
-                          sx={{
-                            ...dropdownItemSx,
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: 1,
-                            color: isSelected || isLoading ? menuItemColor : mutedTextColor,
-                            fontWeight: isSelected || isLoading ? 600 : 400,
-                            bgcolor: isSelected || isLoading ? menuItemHover : 'transparent',
-                          }}
-                        >
-                          <ComputerIcon sx={{ fontSize: 18, color: iconColor, flexShrink: 0 }} />
-                          <Typography
-                            sx={{
-                              flex: 1,
-                              minWidth: 0,
-                              overflow: 'hidden',
-                              textOverflow: 'ellipsis',
-                              whiteSpace: 'nowrap',
-                              fontSize: MENU_ACTION_TEXT_SIZE,
-                            }}
-                          >
-                            {(model.display_name || model.name || '').replace(/\.gguf$/i, '')}
-                          </Typography>
-                          {isLoading ? (
-                            <CircularProgress size={16} sx={{ color: mutedTextColor, flexShrink: 0 }} />
-                          ) : isSelected ? (
-                            <CheckIcon sx={{ fontSize: 16, color: 'primary.main', flexShrink: 0 }} />
-                          ) : null}
-                        </Box>
-                      );
-                    })}
-                    {!catalogLoading && filteredModels.length === 0 && (
-                      <Box sx={{ px: 1.5, py: 2, fontSize: MENU_ACTION_TEXT_SIZE, color: subtleColor, textAlign: 'center' }}>
-                        {modelSearch.trim() ? 'Ничего не найдено' : 'Нет доступных моделей'}
-                      </Box>
-                    )}
-                  </>
+                {catalogLoading && filteredModels.length === 0 ? (
+                  <Box sx={{ py: 3, display: 'flex', justifyContent: 'center' }}>
+                    <CircularProgress size={22} sx={{ color: subtleColor }} />
+                  </Box>
+                ) : null}
+                {filteredModels.map((model) => {
+                  const isSelected = selectedModelPath === model.path && !loadingModelPath;
+                  const isLoading = loadingModelPath === model.path;
+                  return (
+                    <Box
+                      key={model.path}
+                      onClick={isLoading ? undefined : () => handleSelectModel(model.path)}
+                      sx={{
+                        ...dropdownItemSx,
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 1,
+                        color: isSelected || isLoading ? menuItemColor : mutedTextColor,
+                        fontWeight: isSelected || isLoading ? 600 : 400,
+                        bgcolor: isSelected || isLoading ? menuItemHover : 'transparent',
+                      }}
+                    >
+                      <ComputerIcon sx={{ fontSize: 18, color: iconColor, flexShrink: 0 }} />
+                      <Typography
+                        sx={{
+                          flex: 1,
+                          minWidth: 0,
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                          fontSize: MENU_ACTION_TEXT_SIZE,
+                        }}
+                      >
+                        {(model.display_name || model.name || '').replace(/\.gguf$/i, '')}
+                      </Typography>
+                      {isLoading ? (
+                        <CircularProgress size={16} sx={{ color: mutedTextColor, flexShrink: 0 }} />
+                      ) : isSelected ? (
+                        <CheckIcon sx={{ fontSize: 16, color: 'primary.main', flexShrink: 0 }} />
+                      ) : null}
+                    </Box>
+                  );
+                })}
+                {!catalogLoading && filteredModels.length === 0 && (
+                  <Box sx={{ px: 1.5, py: 2, fontSize: MENU_ACTION_TEXT_SIZE, color: subtleColor, textAlign: 'center' }}>
+                    {modelSearch.trim() ? 'Ничего не найдено' : 'Нет доступных моделей'}
+                  </Box>
                 )}
               </Box>
             </Box>

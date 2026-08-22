@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Dialog,
   DialogTitle,
@@ -12,6 +12,7 @@ import {
   Alert,
   IconButton,
   Popover,
+  Autocomplete,
 } from '@mui/material';
 import {
   Close as CloseIcon,
@@ -22,6 +23,13 @@ import {
 } from '@mui/icons-material';
 import { getApiUrl } from '../config/api';
 import { useAuth } from '../contexts/AuthContext';
+import {
+  directoryUserOptionLabel,
+  directoryUserOptionSecondary,
+  resolveShareUsernames,
+  searchDirectoryUsers,
+  type DirectoryUserHit,
+} from '../utils/directoryUserSearch';
 
 type SharePermission = 'viewer' | 'editor';
 
@@ -73,6 +81,9 @@ export default function ShareAgentDialog({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [userOptions, setUserOptions] = useState<DirectoryUserHit[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Якоря выпадающих списков (стиль как «Агенты» в конструкторе)
   const [addRoleAnchor, setAddRoleAnchor] = useState<HTMLElement | null>(null);
@@ -142,9 +153,45 @@ export default function ShareAgentDialog({
       setPermission('viewer');
       setError(null);
       setSuccess(null);
+      setUserOptions([]);
       void loadShares();
     }
   }, [open, loadShares]);
+
+  const scheduleUserSearch = useCallback(
+    (q: string) => {
+      if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+      const query = q.trim();
+      // Берём последний фрагмент после запятой для поиска
+      const last = query.split(/[,;\n]+/).pop()?.trim() || '';
+      if (last.length < 2 || !token) {
+        setUserOptions([]);
+        setSearchLoading(false);
+        return;
+      }
+      setSearchLoading(true);
+      searchTimerRef.current = setTimeout(() => {
+        void (async () => {
+          try {
+            const hits = await searchDirectoryUsers(token, last, 10);
+            setUserOptions(hits);
+          } catch {
+            setUserOptions([]);
+          } finally {
+            setSearchLoading(false);
+          }
+        })();
+      }, 300);
+    },
+    [token],
+  );
+
+  useEffect(
+    () => () => {
+      if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+    },
+    [],
+  );
 
   const applyShare = useCallback(
     async (usernames: string[], perm: SharePermission): Promise<boolean> => {
@@ -163,20 +210,29 @@ export default function ShareAgentDialog({
   );
 
   const handleShare = async () => {
-    const parts = username
-      .split(/[,;\s]+/)
-      .map((s) => s.trim())
-      .filter(Boolean);
-    if (parts.length === 0) {
-      setError('Укажите логин пользователя');
+    if (!username.trim()) {
+      setError('Укажите ФИО, почту или gpbu');
+      return;
+    }
+    if (!token) {
+      setError('Нет авторизации');
       return;
     }
     setSaving(true);
     setError(null);
     setSuccess(null);
     try {
-      await applyShare(parts, permission);
+      const { usernames, unresolved } = await resolveShareUsernames(token, username);
+      if (unresolved.length > 0) {
+        throw new Error(`Не найдены: ${unresolved.join(', ')}`);
+      }
+      if (usernames.length === 0) {
+        setError('Укажите ФИО, почту или gpbu');
+        return;
+      }
+      await applyShare(usernames, permission);
       setUsername('');
+      setUserOptions([]);
       setSuccess('Доступ выдан');
       await loadShares();
     } catch (e) {
@@ -408,31 +464,71 @@ export default function ShareAgentDialog({
 
       <DialogContent sx={{ pt: 1 }}>
         <Typography variant="body2" sx={{ color: muted, mb: 1.5, fontSize: '0.8rem' }}>
-          Укажите логин пользователя (gpbu, как при входе — одинаков для LDAP и SSO). Можно несколько
-          через запятую или пробел. Получатель увидит агента в списке «Мои агенты» и сможет
-          использовать его в чате.
+          Найдите сотрудника по ФИО, корпоративной почте или gpbu (как при входе). Можно несколько через
+          запятую. Получатель увидит агента в списке «Мои агенты» и сможет использовать его в чате.
         </Typography>
 
-        {/* Добавление: логин + роль (дропдаун в стиле «Агенты») + кнопка */}
+        {/* Добавление: поиск + роль + кнопка */}
         <Box sx={{ display: 'flex', gap: 1, mb: 0.75, alignItems: 'stretch' }}>
-          <TextField
-            size="small"
+          <Autocomplete
+            freeSolo
             fullWidth
-            placeholder="логин1, логин2"
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') void handleShare();
+            size="small"
+            options={userOptions}
+            filterOptions={(x) => x}
+            loading={searchLoading}
+            inputValue={username}
+            onInputChange={(_, value, reason) => {
+              if (reason === 'reset') return;
+              setUsername(value);
+              scheduleUserSearch(value);
             }}
-            disabled={saving}
-            sx={{
-              '& .MuiOutlinedInput-root': {
-                color: text,
-                bgcolor: fieldBg,
-                '& fieldset': { borderColor: border },
-              },
-              '& .MuiInputBase-input::placeholder': { color: muted, opacity: 1 },
+            onChange={(_, value) => {
+              if (value && typeof value === 'object') {
+                const login = value.username || value.user_id;
+                setUsername(login);
+                setUserOptions([]);
+              }
             }}
+            getOptionLabel={(opt) =>
+              typeof opt === 'string' ? opt : directoryUserOptionLabel(opt) || opt.username || opt.user_id
+            }
+            isOptionEqualToValue={(a, b) =>
+              (a.username || a.user_id).toLowerCase() === (b.username || b.user_id).toLowerCase()
+            }
+            renderOption={(props, option) => (
+              <li {...props} key={option.user_id || option.username}>
+                <Box sx={{ py: 0.25 }}>
+                  <Typography sx={{ fontSize: '0.85rem', color: text }}>
+                    {directoryUserOptionLabel(option)}
+                  </Typography>
+                  <Typography sx={{ fontSize: '0.72rem', color: muted }}>
+                    {directoryUserOptionSecondary(option)}
+                  </Typography>
+                </Box>
+              </li>
+            )}
+            renderInput={(params) => (
+              <TextField
+                {...params}
+                placeholder="ФИО, почта или gpbu…"
+                disabled={saving}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    void handleShare();
+                  }
+                }}
+                sx={{
+                  '& .MuiOutlinedInput-root': {
+                    color: text,
+                    bgcolor: fieldBg,
+                    '& fieldset': { borderColor: border },
+                  },
+                  '& .MuiInputBase-input::placeholder': { color: muted, opacity: 1 },
+                }}
+              />
+            )}
           />
           <Box
             onClick={(e) => !saving && setAddRoleAnchor(e.currentTarget)}

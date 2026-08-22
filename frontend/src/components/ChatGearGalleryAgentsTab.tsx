@@ -19,8 +19,10 @@ import type { Agent } from './AgentSelector';
 import { getActiveAgentFromStorage } from './AgentSelector';
 import { loadAgentModelOnly } from '../utils/applyAgentServer';
 import { persistAgentMcpConfig } from '../utils/applyAgentMcp';
+import { persistAgentArtifactsEnabled } from '../utils/agentArtifactsEnabled';
 import { clearActiveAgent } from '../utils/clearActiveAgent';
 import ChatGearAgentReindexHint from './ChatGearAgentReindexHint';
+import { formatAuthorLabel } from '../utils/formatAuthorLabel';
 
 const STORAGE_AGENT_ID = 'active_agent_id';
 const STORAGE_AGENT_NAME = 'active_agent_name';
@@ -101,7 +103,7 @@ function GalleryAgentMenuItem({
             whiteSpace: 'nowrap',
           }}
         >
-          от {agent.author_name || agent.author_id || 'автора'}
+          от {formatAuthorLabel(agent.author_name, agent.author_full_name, agent.author_id) || 'автора'}
         </Typography>
       </Box>
       <ChatGearAgentReindexHint agentId={agent.id} />
@@ -123,7 +125,8 @@ function GalleryAgentMenuItem({
   );
 }
 
-interface ChatGearGalleryAgentsTabProps {  isDarkMode: boolean;
+interface ChatGearGalleryAgentsTabProps {
+  isDarkMode: boolean;
   searchQuery: string;
   visible: boolean;
 }
@@ -235,6 +238,7 @@ export default function ChatGearGalleryAgentsTab({
         localStorage.setItem(STORAGE_AGENT_NAME, full.name);
         localStorage.setItem(STORAGE_AGENT_PROMPT, full.system_prompt || '');
         persistAgentMcpConfig(cfg);
+        persistAgentArtifactsEnabled(cfg);
         setActiveAgent({ id: full.id, name: full.name, system_prompt: full.system_prompt || '' });
         window.dispatchEvent(new CustomEvent('agentSelected', { detail: full }));
       };
@@ -253,11 +257,18 @@ export default function ChatGearGalleryAgentsTab({
       );
       try {
         const applied = await loadAgentModelOnly(token, modelPath || null);
+        persistLocal();
         if (!applied.ok) {
-          showNotification('error', `Агент не активирован: ${applied.message}`);
+          showNotification('warning', `Агент «${full.name}» выбран, но модель не загрузилась: ${applied.message}`);
           return;
         }
-        persistLocal();
+        if ('pending' in applied && applied.pending) {
+          showNotification(
+            'info',
+            `Агент «${full.name}» выбран. Модель подтянется при первом сообщении.`,
+          );
+          return;
+        }
         showNotification(
           'success',
           modelPath
@@ -265,8 +276,9 @@ export default function ChatGearGalleryAgentsTab({
             : `Агент «${full.name}» активирован — промпт и настройки из карточки агента`,
         );
       } catch (e: unknown) {
+        persistLocal();
         const msg = e instanceof Error ? e.message : String(e);
-        showNotification('error', `Агент не активирован: ${msg}`);
+        showNotification('warning', `Агент «${full.name}» выбран, но модель не загрузилась: ${msg}`);
       } finally {
         setIsLoadingModel(false);
         setLoadingAgentId(null);
@@ -340,7 +352,8 @@ export default function ChatGearGalleryAgentsTab({
               onSelect={(a) => void handleSelectAgent(a)}
               onRemove={(a, e) => void handleRemoveFromGallery(a, e)}
             />
-          ))}          {!loadingAgents && filteredAgents.length === 0 && !searchQuery.trim() && (
+          ))}
+          {!loadingAgents && filteredAgents.length === 0 && !searchQuery.trim() && (
             <Typography
               variant="body2"
               sx={{ color: subtleColor, fontSize: MENU_ACTION_TEXT_SIZE, px: 0.5, py: 1, textAlign: 'center' }}

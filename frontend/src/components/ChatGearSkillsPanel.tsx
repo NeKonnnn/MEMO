@@ -8,6 +8,7 @@ import {
 } from '@mui/icons-material';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
+import { useAppContext } from '../contexts/AppContext';
 import { getApiUrl, API_ENDPOINTS } from '../config/api';
 import {
   getDropdownItemSx,
@@ -37,15 +38,18 @@ interface SkillRow {
 
 interface ChatGearSkillsPanelProps {
   isDarkMode: boolean;
+  chatId?: string | null;
 }
 
-export default function ChatGearSkillsPanel({ isDarkMode }: ChatGearSkillsPanelProps) {
+export default function ChatGearSkillsPanel({ isDarkMode, chatId }: ChatGearSkillsPanelProps) {
   const { token } = useAuth();
+  const { state } = useAppContext();
+  const effectiveChatId = chatId ?? state.currentChatId;
   const navigate = useNavigate();
   const [skills, setSkills] = useState<SkillRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState('');
-  const [activeIds, setActiveIds] = useState<string[]>(() => getActiveSkillIds());
+  const [activeIds, setActiveIds] = useState<string[]>(() => getActiveSkillIds(effectiveChatId));
 
   const dropdownItemSx = useMemo(() => getDropdownItemSx(isDarkMode), [isDarkMode]);
   const muted = isDarkMode ? 'rgba(255,255,255,0.65)' : 'rgba(0,0,0,0.6)';
@@ -87,10 +91,15 @@ export default function ChatGearSkillsPanel({ isDarkMode }: ChatGearSkillsPanelP
   }, [loadSkills]);
 
   useEffect(() => {
-    const onChange = () => setActiveIds(getActiveSkillIds());
-    window.addEventListener(SKILL_SELECTION_CHANGED_EVENT, onChange);
-    return () => window.removeEventListener(SKILL_SELECTION_CHANGED_EVENT, onChange);
-  }, []);
+    setActiveIds(getActiveSkillIds(effectiveChatId));
+    const onChange = (e: Event) => {
+      const detailChatId = (e as CustomEvent<{ chatId?: string }>).detail?.chatId;
+      if (detailChatId && effectiveChatId && detailChatId !== effectiveChatId) return;
+      setActiveIds(getActiveSkillIds(effectiveChatId));
+    };
+    window.addEventListener(SKILL_SELECTION_CHANGED_EVENT, onChange as EventListener);
+    return () => window.removeEventListener(SKILL_SELECTION_CHANGED_EVENT, onChange as EventListener);
+  }, [effectiveChatId]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -166,7 +175,7 @@ export default function ChatGearSkillsPanel({ isDarkMode }: ChatGearSkillsPanelP
         ) : (
           <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
             <Box
-              onClick={() => clearActiveSkills()}
+              onClick={() => clearActiveSkills(effectiveChatId)}
               sx={{
                 ...dropdownItemSx,
                 display: 'flex',
@@ -196,7 +205,7 @@ export default function ChatGearSkillsPanel({ isDarkMode }: ChatGearSkillsPanelP
               return (
                 <Box
                   key={skill.id}
-                  onClick={() => toggleActiveSkill(skill.slug, !selected, title)}
+                  onClick={() => toggleActiveSkill(effectiveChatId, skill.slug, !selected, title)}
                   sx={{
                     ...dropdownItemSx,
                     display: 'flex',

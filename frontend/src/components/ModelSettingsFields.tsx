@@ -34,11 +34,11 @@ const TOOLTIPS: Record<string, string> = {
   output_tokens: 'Максимальное количество токенов, которые модель может сгенерировать в ответе. Увеличение позволяет получать более длинные ответы.',
   temperature: 'Контролирует случайность генерации. Низкие значения (0.1-0.5) — более точные ответы, высокие (0.8-1.5) — более креативные.',
   top_p: 'Работает совместно с top-k. Высокое значение (0.95) — разнообразнее текст, низкое (0.5) — более сфокусированный.',
-  repeat_penalty: 'Штраф за повторение уже использованных токенов. Значения выше 1.0 уменьшают повторения.',
+  repeat_penalty: 'Запрещает модели повторять недавно использованные фразы и предложения. Значения выше 1.0 уменьшают повторения',
   top_k: 'Ограничивает выборку k наиболее вероятными токенами. Больше (100+) — разнообразнее, меньше (10-20) — консервативнее.',
   min_p: 'Минимальная вероятность токена относительно наиболее вероятного. Альтернатива top_p/top_k.',
-  frequency_penalty: 'Штраф за частоту появления токенов. Высокое значение сильнее наказывает за повторения.',
-  presence_penalty: 'Штраф за сам факт появления токена. При 0 отключено.',
+  frequency_penalty: 'Чем чаще слово повторяется, тем сильнее модель избегает его использовать. Высокое значение сильнее наказывает за повторения',
+  presence_penalty: 'Если слово уже встречалось хотя бы раз, модель старается использовать новые слова. При 0 отключено.',
   use_gpu: 'Использование GPU для ускорения. Требует CUDA.',
   streaming: 'Показывать ответ по мере генерации (токен за токеном).',
 };
@@ -140,7 +140,7 @@ export default function ModelSettingsFields({
       )}
       {numField(
         'output_tokens',
-        'max_tokens',
+        'Лимит токенов ответа',
         value.output_tokens,
         (v) => set({ output_tokens: v }),
         64,
@@ -179,7 +179,7 @@ export default function ModelSettingsFields({
       )}
       {numField(
         'repeat_penalty',
-        'Repeat penalty',
+        'Штраф за повторы',
         value.repeat_penalty,
         (v) => set({ repeat_penalty: v }),
         1.0,
@@ -218,7 +218,7 @@ export default function ModelSettingsFields({
       )}
       {numField(
         'frequency_penalty',
-        'Frequency penalty',
+        'Штраф за частоту',
         value.frequency_penalty,
         (v) => set({ frequency_penalty: v }),
         0,
@@ -231,7 +231,7 @@ export default function ModelSettingsFields({
       )}
       {numField(
         'presence_penalty',
-        'Presence penalty',
+        'Штраф за присутствие',
         value.presence_penalty,
         (v) => set({ presence_penalty: v }),
         0,

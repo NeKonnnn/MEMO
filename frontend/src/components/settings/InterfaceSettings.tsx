@@ -163,12 +163,12 @@ export default function InterfaceSettings() {
       widescreenMode: savedWidescreenMode !== null ? savedWidescreenMode === 'true' : false,
       showUserName: savedShowUserName !== null ? savedShowUserName === 'true' : false,
       enableNotification: savedEnableNotification !== null ? savedEnableNotification === 'true' : false,
-      useFoldersMode: savedUseFoldersMode !== null ? savedUseFoldersMode === 'true' : true, // По умолчанию папки
+      useFoldersMode: savedUseFoldersMode !== null ? savedUseFoldersMode === 'true' : false, // По умолчанию выкл. (проекты)
       browserNotifications: savedBrowserNotifications !== null ? savedBrowserNotifications === 'true' : false,
       tabNotifications: savedTabNotifications !== null ? savedTabNotifications === 'true' : false,
       showDialoguesPanel: savedShowDialoguesPanel !== null ? savedShowDialoguesPanel === 'true' : true,
       autoScrollWhileStreaming:
-        savedChatAutoscrollStreaming !== null ? savedChatAutoscrollStreaming === 'true' : true,
+        savedChatAutoscrollStreaming !== null ? savedChatAutoscrollStreaming === 'true' : false,
       chatInputStyle: (savedChatInputStyle as 'compact' | 'classic') || 'compact',
       chatInputColor: savedChatInputColor,
       chatInputContrast: Number.isFinite(savedChatInputContrast)

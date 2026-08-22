@@ -255,3 +255,40 @@ def log_rag_pvc_write_failure(
     if file_size is not None:
         extra["fsize"] = file_size
     _emit_cef("FS010", status_code=500, extra=extra)
+
+
+def log_rag_pvc_remove_success(object_name: str, *, scope: str) -> None:
+    """Удаление исходника RAG из PVC (FS011)."""
+    filename = str(object_name or "").rsplit("/", 1)[-1] or str(object_name or "")
+    _emit_cef(
+        "FS011",
+        status_code=200,
+        extra={
+            "fname": filename,
+            "file": object_name,
+            "bucket": _pvc_uri(object_name),
+            "cs1": scope,
+            "cs1Label": "RagPvcScope",
+            "cs2": object_name,
+            "cs2Label": "PvcRagObject",
+        },
+    )
+
+
+def log_rag_pvc_remove_failure(object_name: str, scope: str, error: str) -> None:
+    """Ошибка удаления исходника RAG из PVC (FS012)."""
+    filename = str(object_name or "").rsplit("/", 1)[-1] or str(object_name or "")
+    _emit_cef(
+        "FS012",
+        status_code=500,
+        extra={
+            "fname": filename,
+            "file": object_name,
+            "bucket": _pvc_uri(object_name),
+            "reason": str(error)[:300],
+            "cs1": scope,
+            "cs1Label": "RagPvcScope",
+            "cs2": object_name,
+            "cs2Label": "PvcRagObject",
+        },
+    )
