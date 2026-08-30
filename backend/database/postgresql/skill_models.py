@@ -64,6 +64,7 @@ class Skill(BaseModel):
     file_count: int = 0
     author_id: str
     author_name: str
+    author_full_name: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -88,6 +89,7 @@ class SkillListItem(BaseModel):
     file_count: int = 0
     author_id: str
     author_name: str
+    author_full_name: Optional[str] = None
     created_at: datetime
     updated_at: datetime
     views_count: int = 0

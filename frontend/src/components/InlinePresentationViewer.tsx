@@ -9,6 +9,7 @@ import {
   getStablePresentationSnapshot,
   openPresentationViewer,
 } from '../utils/presentationViewer';
+import { useInViewport } from '../hooks/useInViewport';
 
 /** Номинальный размер слайда GPB (как в presentation-viewer.html). */
 const SLIDE_W_MM = 297;
@@ -153,12 +154,18 @@ export function buildInlinePresentationViewerSrcDoc(rawHtml: string): string {
     var slides = [];
     var current = 0;
     var exporting = false;
-    var slideStylesInjected = false;
+    var applyGen = 0;
 
     function showError(msg) {
       var el = document.getElementById('error');
       el.style.display = 'block';
       el.textContent = msg;
+    }
+
+    function hideError() {
+      var el = document.getElementById('error');
+      el.style.display = 'none';
+      el.textContent = '';
     }
 
     function stripEmbeddedScripts(h) {
@@ -183,16 +190,15 @@ export function buildInlinePresentationViewerSrcDoc(rawHtml: string): string {
       scaler.style.height = (natH * s) + 'px';
     }
 
-    function init() {
-      var raw = document.getElementById('src').textContent || '';
-      var html = stripEmbeddedScripts(raw.trim());
-      if (!html) {
-        showError('HTML презентации пуст.');
-        return;
-      }
+    function applyHtml(raw) {
+      var html = stripEmbeddedScripts((raw || '').trim());
+      if (!html) return;
+      var gen = ++applyGen;
+      hideError();
       var frame = document.getElementById('frame');
-      frame.srcdoc = html;
+      var keep = current;
       frame.onload = function () {
+        if (gen !== applyGen) return;
         try {
           var doc = frame.contentDocument;
           slides = Array.from(doc.querySelectorAll('.slide'));
@@ -200,15 +206,15 @@ export function buildInlinePresentationViewerSrcDoc(rawHtml: string): string {
             showError('В HTML не найдены слайды с классом .slide');
             return;
           }
-          if (!slideStylesInjected) {
-            doc.querySelectorAll('style').forEach(function (s) {
-              var ns = document.createElement('style');
-              ns.textContent = s.textContent;
-              document.head.appendChild(ns);
-            });
-            slideStylesInjected = true;
-          }
-          show(0);
+          document.querySelectorAll('style[data-astra-slide-css]').forEach(function (s) { s.remove(); });
+          doc.querySelectorAll('style').forEach(function (s) {
+            var ns = document.createElement('style');
+            ns.setAttribute('data-astra-slide-css', '1');
+            ns.textContent = s.textContent;
+            document.head.appendChild(ns);
+          });
+          var idx = Math.min(Math.max(keep, 0), slides.length - 1);
+          show(idx);
           document.getElementById('exportBtn').disabled = false;
           document.getElementById('prevBtn').disabled = false;
           document.getElementById('nextBtn').disabled = false;
@@ -219,6 +225,17 @@ export function buildInlinePresentationViewerSrcDoc(rawHtml: string): string {
           console.error(e);
         }
       };
+      frame.srcdoc = html;
+    }
+
+    function init() {
+      window.addEventListener('message', function (e) {
+        if (e.source !== window.parent) return;
+        if (!e.data || e.data.type !== 'astra-pptx-set-html') return;
+        applyHtml(String(e.data.html || ''));
+      });
+      var initial = document.getElementById('src').textContent || '';
+      if (initial.trim()) applyHtml(initial);
       if (typeof ResizeObserver !== 'undefined') {
         new ResizeObserver(fitStage).observe(document.getElementById('stageWrap'));
       }
@@ -316,7 +333,11 @@ interface InlinePresentationViewerProps {
 /**
  * Встроенный просмотр GPB-презентации в ответе чата.
  * При стриме: спиннер + послайдовый показ без мерцания.
+ * Shell iframe + postMessage: не пересоздаём iframe на каждый слайд.
  */
+const PPTX_PUSH_MIN_MS = 700;
+const PPTX_STALL_MS = 8000;
+
 export default function InlinePresentationViewer({
   html,
   sourceSlot,
@@ -329,6 +350,24 @@ export default function InlinePresentationViewer({
   const [startedCount, setStartedCount] = useState(0);
   const [pending, setPending] = useState(isStreaming);
   const lastReadyRef = useRef(-1);
+  const lastPushAtRef = useRef(0);
+  const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const iframeReadyRef = useRef(false);
+  const { ref: viewportRef, inView } = useInViewport<HTMLDivElement>(
+    '280px 0px',
+    // Только текущая генерация сразу с iframe; старые презентации — после IO,
+    // иначе при Virtuoso→map все iframe встают разом → белый экран.
+    Boolean(isStreaming),
+  );
+  const keepIframe = isStreaming || inView;
+
+  const shellSrcDoc = useMemo(() => buildInlinePresentationViewerSrcDoc(''), []);
+
+  const pushHtmlToIframe = (nextHtml: string) => {
+    const win = iframeRef.current?.contentWindow;
+    if (!win || !iframeReadyRef.current) return;
+    win.postMessage({ type: 'astra-pptx-set-html', html: nextHtml }, '*');
+  };
 
   useEffect(() => {
     const snap = getStablePresentationSnapshot(html, isStreaming);
@@ -347,22 +386,48 @@ export default function InlinePresentationViewer({
     setStartedCount(snap.startedCount);
     setPending(true);
 
-    // Обновляем iframe только когда вырос readyCount (зафиксирован новый слайд).
     if (snap.html && snap.readyCount > lastReadyRef.current) {
-      lastReadyRef.current = snap.readyCount;
-      setCommittedHtml(snap.html);
+      const now = Date.now();
+      const jumped = snap.readyCount >= lastReadyRef.current + 2;
+      const elapsed = now - lastPushAtRef.current >= PPTX_PUSH_MIN_MS;
+      const first = lastReadyRef.current < 0;
       setReadyCount(snap.readyCount);
+      if (first || jumped || elapsed) {
+        lastReadyRef.current = snap.readyCount;
+        lastPushAtRef.current = now;
+        setCommittedHtml(snap.html);
+      }
     }
   }, [html, isStreaming]);
 
-  const srcDoc = useMemo(
-    () => (committedHtml ? buildInlinePresentationViewerSrcDoc(committedHtml) : null),
-    [committedHtml]
-  );
+  // Стрим завис (HTML не растёт) — фиксируем то, что уже есть, без вечного спиннера.
+  useEffect(() => {
+    if (!isStreaming) return;
+    const timer = window.setTimeout(() => {
+      const snap = getStablePresentationSnapshot(html, false);
+      if (snap.html) {
+        setCommittedHtml(snap.html);
+        setReadyCount(snap.readyCount);
+        setStartedCount(snap.startedCount);
+        lastReadyRef.current = snap.readyCount;
+      }
+      setPending(false);
+    }, PPTX_STALL_MS);
+    return () => window.clearTimeout(timer);
+  }, [html, isStreaming]);
 
-  const showLoader = pending && !srcDoc;
-  const showGeneratingBadge = pending && !!srcDoc;
-  const showMissingSlides = !pending && !srcDoc;
+  useEffect(() => {
+    if (!committedHtml) return;
+    pushHtmlToIframe(committedHtml);
+  }, [committedHtml]);
+
+  useEffect(() => {
+    if (!keepIframe) iframeReadyRef.current = false;
+  }, [keepIframe]);
+
+  const showLoader = pending && !committedHtml;
+  const showGeneratingBadge = pending && !!committedHtml;
+  const showMissingSlides = !pending && !committedHtml;
 
   const statusLabel = (() => {
     if (showMissingSlides) return 'Презентация · нет слайдов';
@@ -384,6 +449,7 @@ export default function InlinePresentationViewer({
 
   const stage = (
     <Box
+      ref={viewportRef}
       sx={
         embedded
           ? {
@@ -406,14 +472,17 @@ export default function InlinePresentationViewer({
             }
       }
     >
-      {srcDoc ? (
-        <Box
-          component="iframe"
-          key={`pptx-ready-${readyCount}-${pending ? 's' : 'done'}`}
+      {committedHtml && keepIframe ? (
+        <iframe
+          ref={iframeRef}
           title="Просмотр презентации"
-          srcDoc={srcDoc}
+          srcDoc={shellSrcDoc}
+          onLoad={() => {
+            iframeReadyRef.current = true;
+            if (committedHtml) pushHtmlToIframe(committedHtml);
+          }}
           sandbox="allow-scripts allow-same-origin allow-downloads"
-          sx={{
+          style={{
             position: 'absolute',
             inset: 0,
             width: '100%',

@@ -1,6 +1,7 @@
 import React from 'react';
 import { Box, Typography } from '@mui/material';
 import SmartToyIcon from '@mui/icons-material/SmartToy';
+import ThinkingShimmerText from './ThinkingShimmerText';
 
 /** Заголовок шага цепочки — как ChainAgentUpdate в GPB_ASTRA. */
 export default function AgentChainUpdate({
@@ -42,15 +43,9 @@ export default function AgentChainUpdate({
         {title}
       </Typography>
       {thinking ? (
-        <Typography
-          variant="caption"
-          sx={{
-            fontSize: '0.75rem',
-            color: isDarkMode ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.4)',
-          }}
-        >
+        <ThinkingShimmerText isDarkMode={isDarkMode} fontSize="0.75rem" fontWeight={500}>
           думает...
-        </Typography>
+        </ThinkingShimmerText>
       ) : null}
     </Box>
   );

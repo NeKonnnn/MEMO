@@ -27,6 +27,8 @@ interface WorkspacePickerProps {
   isDarkMode?: boolean;
   showGlobalDefault?: boolean;
   compact?: boolean;
+  /** Подставить workspace по умолчанию при загрузке (не включать Coding сам по себе). */
+  autoPickDefault?: boolean;
 }
 
 export default function WorkspacePicker({
@@ -36,6 +38,7 @@ export default function WorkspacePicker({
   isDarkMode = false,
   showGlobalDefault = true,
   compact = false,
+  autoPickDefault = true,
 }: WorkspacePickerProps) {
   const muted = isDarkMode ? 'rgba(255,255,255,0.65)' : 'rgba(0,0,0,0.6)';
   const text = isDarkMode ? 'rgba(255,255,255,0.95)' : 'rgba(0,0,0,0.9)';
@@ -62,7 +65,7 @@ export default function WorkspacePicker({
             (p) => p.path === current || p.path.replace(/\\/g, '/') === current.replace(/\\/g, '/'),
           );
           setUseCustomPath(!matchesPreset);
-        } else {
+        } else if (autoPickDefault) {
           const pick =
             data.default_workspace ||
             loaded.find((p) => p.ok)?.path ||

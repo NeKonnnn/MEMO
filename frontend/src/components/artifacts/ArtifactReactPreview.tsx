@@ -1,9 +1,11 @@
 import React, { useMemo } from 'react';
 import { Box, Typography } from '@mui/material';
 import { SandpackProvider, SandpackPreview } from '@codesandbox/sandpack-react';
+import { useCommittedContent } from '../../hooks/useCommittedContent';
 
 interface Props {
   content: string;
+  isStreaming?: boolean;
 }
 
 function normalizeReactEntry(raw: string): string {
@@ -27,10 +29,12 @@ function normalizeReactEntry(raw: string): string {
   return code;
 }
 
-export default function ArtifactReactPreview({ content }: Props) {
+export default function ArtifactReactPreview({ content, isStreaming = false }: Props) {
+  // Sandpack дорого пересобирать на каждый токен — коммитим с задержкой / по концу стрима.
+  const committed = useCommittedContent(content || '', isStreaming, 700);
   const files = useMemo(
     () => ({
-      '/App.tsx': normalizeReactEntry(content),
+      '/App.tsx': normalizeReactEntry(committed),
       '/index.tsx': `import React from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
@@ -56,10 +60,10 @@ body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
 </html>
 `,
     }),
-    [content],
+    [committed],
   );
 
-  if (!(content || '').trim()) {
+  if (!(committed || '').trim()) {
     return (
       <Box sx={{ p: 2 }}>
         <Typography variant="body2" color="text.secondary">

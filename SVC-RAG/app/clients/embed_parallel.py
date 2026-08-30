@@ -69,7 +69,7 @@ async def embed_texts_in_batches(
         out: List[List[float]] = []
         for bi, (start, batch) in enumerate(batches):
             if n_batches > 1:
-                logger.info(
+                logger.debug(
                     "%s: батч %s–%s из %s (seq slot=%s)",
                     log_prefix,
                     start + 1,
@@ -85,7 +85,7 @@ async def embed_texts_in_batches(
                 )
             out.extend(part)
         if _ORDER_LOG:
-            logger.info(
+            logger.debug(
                 "%s: порядок векторов OK (mode=sequential, texts=%s batches=%s) "
                 "склейка по возрастанию start",
                 log_prefix,
@@ -105,7 +105,7 @@ async def embed_texts_in_batches(
         async with sem:
             t_first = _text_fp(batch[0])
             t_last = _text_fp(batch[-1])
-            logger.info(
+            logger.debug(
                 "%s: батч %s–%s из %s (parallel conc=%s slot=%s "
                 "text_fp[first]=%s text_fp[last]=%s)",
                 log_prefix,
@@ -127,7 +127,7 @@ async def embed_texts_in_batches(
             async with finish_lock:
                 finish_order.append(i)
             if _ORDER_LOG:
-                logger.info(
+                logger.debug(
                     "%s: слот %s готов (start=%s size=%s) "
                     "emb_fp[first]=%s emb_fp[last]=%s finish_seq=%s",
                     log_prefix,
@@ -174,7 +174,7 @@ async def embed_texts_in_batches(
             for j in (0, len(batch) - 1):
                 abs_idx = start + j
                 same_text = texts[abs_idx] == batch[j]
-                logger.info(
+                logger.debug(
                     "%s: align slot=%s idx=%s text_match=%s text_fp=%s emb_fp=%s",
                     log_prefix,
                     i,
@@ -189,7 +189,7 @@ async def embed_texts_in_batches(
     finish_sorted = sorted(finish_order) == list(range(n_batches))
     finish_was_sorted = finish_order == list(range(n_batches))
     if order_ok:
-        logger.info(
+        logger.debug(
             "%s: порядок векторов OK (mode=parallel texts=%s batches=%s "
             "batch_size=%s concurrency=%s %.3fs) "
             "слоты склеены по возрастанию i; "

@@ -287,42 +287,57 @@
   display: flex;
   flex-direction: column;
   transition: background 0.3s ease;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .chat-messages-area {
   flex: 1;
-  overflow: auto;
+  /* Только внутренний scroller Virtuoso; overflow:auto здесь сдвигал «Думает» при скролле. */
+  overflow: hidden;
   padding: 16px;
+  /* Только свёрнутый rail (main margin-right:-64px); при развёрнутой панели flex уже сужает main. */
+  padding-right: calc(16px + var(--right-sidebar-rail-overlap, 0px));
   background: transparent;
   display: flex;
   flex-direction: column;
-  align-items: center;
+  /* stretch: Virtuoso на всю ширину рабочей зоны — wheel работает не только над баблами */
+  align-items: stretch;
   justify-content: flex-start;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
   /* Убираем gap, так как отступы уже есть в .message-bubble */
   /* Карточки полностью статичны, никаких анимаций */
 }
 
-/* Стили скроллбара для чата - будут переопределены через sx в компоненте */
-.chat-messages-area::-webkit-scrollbar {
-  width: 8px;
+/* Скролл колёсиком/тачпадом — без видимой полосы */
+.chat-messages-area,
+[data-virtuoso-scroller] {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
 }
 
-.chat-messages-area::-webkit-scrollbar-track {
-  background: transparent;
+.chat-messages-area::-webkit-scrollbar,
+[data-virtuoso-scroller]::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
 }
 
-.chat-messages-area::-webkit-scrollbar-thumb {
-  background: rgba(0, 0, 0, 0.2);
-  border-radius: 4px;
-}
-
-.chat-messages-area::-webkit-scrollbar-thumb:hover {
-  background: rgba(0, 0, 0, 0.3);
+[data-virtuoso-scroller] {
+  overscroll-behavior: contain;
+  overflow-x: hidden;
+  max-width: 100%;
 }
 
 .chat-input-area {
   background: transparent;
   padding: 20px;
+  padding-right: calc(20px + var(--right-sidebar-rail-overlap, 0px));
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 /* Улучшенные стили для сообщений */
@@ -332,6 +347,12 @@
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
   margin-bottom: 0px; /* Отступ между сообщениями */
   border: 1px solid rgba(255, 255, 255, 0.1);
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  overflow-x: hidden;
   /* Карточка полностью фиксирована, никаких анимаций */
 }
 
@@ -497,6 +518,15 @@
 /* Стили для иконки скрепки - всегда голубой цвет */
 
 /* Анимации для индикатора "думает" */
+@keyframes cursorThinkingShimmer {
+  0% {
+    background-position: 120% 0;
+  }
+  100% {
+    background-position: -120% 0;
+  }
+}
+
 @keyframes thinking {
   0% { 
     opacity: 1;
@@ -668,7 +698,8 @@
   text-decoration: none;
 }
 
-.message-bubble img {
+/* Картинки в теле сообщения (markdown/inline), не аватар AstraChat в шапке пузыря */
+.message-bubble img:not(.MuiAvatar-img) {
   max-width: 100%;
   height: auto;
   border-radius: 4px;

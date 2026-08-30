@@ -61,6 +61,7 @@ import { getProjectIconGlyphSx } from '../constants/menuStyles';
 import ProjectRagLibraryInline from './ProjectRagLibraryInline';
 import RAGSettings from './settings/RAGSettings';
 import { saveEntityRagSettings, type EntityRagDraft } from '../utils/entityRagSettings';
+import { useRagReindexStatus } from '../contexts/RagReindexStatusContext';
 
 const iconOptions = [
   { name: 'folder', icon: FolderIcon },
@@ -118,6 +119,7 @@ export interface EditProjectModalProps {
 
 export default function EditProjectModal({ open, onClose, project, onSave }: EditProjectModalProps) {
   const theme = useTheme();
+  const { notifyReindexStarted } = useRagReindexStatus();
   const [projectName, setProjectName] = useState('');
   const [selectedIcon, setSelectedIcon] = useState<string | null>(null);
   const [selectedEmoji, setSelectedEmoji] = useState<string | null>(null);
@@ -193,6 +195,9 @@ export default function EditProjectModal({ open, onClose, project, onSave }: Edi
     });
     if (ragApplied.ok) {
       setRagDraft(null);
+      if (ragApplied.reindexed) {
+        notifyReindexStarted();
+      }
     } else {
       console.warn(`[RAG] Проект сохранён; настройки РАГ не применены: ${ragApplied.message}`);
     }

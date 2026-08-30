@@ -165,7 +165,7 @@ def resolve_auto_pipeline_strategy(
         }
         for choice in order:
             if avail.get(choice):
-                logger.info(
+                logger.debug(
                     "[RAG-AUTO] store=%s mode=priority selected=%s query=%r available=%s",
                     store,
                     choice,
@@ -173,7 +173,7 @@ def resolve_auto_pipeline_strategy(
                     {name: enabled for name, enabled in avail.items()},
                 )
                 return choice
-        logger.info(
+        logger.debug(
             "[RAG-AUTO] store=%s mode=priority selected=vector query=%r reason=no_available_strategy",
             store,
             raw_query[:160],
@@ -283,7 +283,7 @@ def resolve_auto_pipeline_strategy(
 
     tie = ("lexical", "graph", "hybrid", "vector", "hierarchical")
     best = min(scores.keys(), key=lambda s: (-scores[s], tie.index(s) if s in tie else 99))
-    logger.info(
+    logger.debug(
         "[RAG-AUTO] store=%s mode=heuristic selected=%s query=%r scores=%s "
         "available={lexical:%s, hybrid:%s, graph:%s, vector:true}",
         store,
@@ -330,7 +330,7 @@ def filter_by_min_vector_similarity(
     filtered = [h for h in hits if h[1] >= min_similarity]
     if filtered:
         if len(filtered) < len(hits):
-            logger.info(
+            logger.debug(
                 "[RAG] min_vector_similarity=%.3f: %d/%d чанков выше порога (отброшено %d нерелевантных)",
                 min_similarity,
                 len(filtered),
@@ -342,7 +342,7 @@ def filter_by_min_vector_similarity(
     # спасаем ограниченный top-N, чтобы не ломать recall на "трудных" корпусах (PDF/OCR).
     rescue_n = max(3, min(max(k, 1), 12))
     rescued = sorted(hits, key=lambda x: float(x[1]), reverse=True)[:rescue_n]
-    logger.info(
+    logger.debug(
         "[RAG] min_vector_similarity=%.3f: все %d чанков ниже порога → rescue top-%d (recall-first)",
         min_similarity,
         len(hits),
@@ -490,7 +490,7 @@ def filter_low_signal_chunks(
     keep = [h for h in hits if len((h[0].content or "").strip()) >= min_len]
     if keep:
         if len(keep) < len(hits):
-            logger.info(
+            logger.debug(
                 "[RAG] low_signal_filter: оставлено %d/%d чанков (min_len=%d)",
                 len(keep),
                 len(hits),
@@ -498,7 +498,7 @@ def filter_low_signal_chunks(
             )
         return keep
     rescue_n = max(3, min(rescue_keep, len(hits)))
-    logger.info(
+    logger.debug(
         "[RAG] low_signal_filter: все чанки короткие (<%d), rescue top-%d",
         min_len,
         rescue_n,
@@ -862,7 +862,7 @@ def log_rag_retrieval_report(
     stdout_lines: List[str] = []
 
     def _emit(text: str) -> None:
-        logger.info("%s", text)
+        logger.debug("%s", text)
         if stdout_metrics:
             stdout_lines.append(text)
 

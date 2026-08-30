@@ -207,6 +207,15 @@ export default function SupportAssistantWidget() {
                   '& strong': { fontWeight: 600 },
                   '& ul, & ol': { m: 0, pl: 2 },
                   '& li': { fontSize: '0.875rem', mb: 0.35 },
+                  '& img': {
+                    display: 'block',
+                    maxWidth: '100%',
+                    height: 'auto',
+                    borderRadius: 1,
+                    mt: 0.75,
+                    mb: 0.5,
+                    border: (t) => `1px solid ${t.palette.divider}`,
+                  },
                 }}
               >
                 {m.role === 'assistant' ? (

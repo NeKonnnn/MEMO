@@ -32,6 +32,12 @@ import { getApiUrl } from '../config/api';
 import { readSelectedImageGenPresetId } from '../utils/imageGenerationPresets';
 import { isImageGenerationModeEnabled, isVideoGenerationModeEnabled } from '../imageGeneration/selectionStorage';
 
+/** Нет чанков после начала стрима — часто finish_reason=length без chat_complete. */
+const STREAM_STALL_AFTER_CHUNK_MS = 120_000;
+/** Нет вообще никакой активности (RAG/ожидание первого токена) — дольше. */
+const STREAM_STALL_BEFORE_CHUNK_MS = 360_000;
+const STREAM_STALL_CHECK_MS = 5_000;
+
 function dispatchMcpToolActivity(record: McpToolCallRecord, phase: 'start' | 'end') {
   window.dispatchEvent(new CustomEvent('astrachatMcpToolActivity', { detail: { record, phase } }));
 }
@@ -229,6 +235,9 @@ export function SocketProvider({ children }: { children: ReactNode }) {
     multiLLMResponses: Map<string, MultiLLMResponseSlot>;
     expectedModelsCount: number;
     mcpToolCalls: McpToolCallRecord[];
+    lastActivityAtMs: number;
+    /** true после первого chunk/thinking — короткий idle-таймаут */
+    receivedStreamData: boolean;
     regeneration: {
       isRegenerating: boolean;
       assistantMessageId: string;
@@ -238,6 +247,27 @@ export function SocketProvider({ children }: { children: ReactNode }) {
   };
 
   const streamSessionsRef = useRef<Map<string, StreamSession>>(new Map());
+
+  const touchStreamActivity = (requestId?: string | null, opts?: { streamData?: boolean }) => {
+    const now = Date.now();
+    const markData = Boolean(opts?.streamData);
+    const rid = requestId || activeRequestIdRef.current;
+    if (rid) {
+      const session = streamSessionsRef.current.get(rid);
+      if (session) {
+        session.lastActivityAtMs = now;
+        if (markData) session.receivedStreamData = true;
+      }
+    }
+    const chatId = currentChatIdRef.current;
+    if (!chatId) return;
+    for (const session of Array.from(streamSessionsRef.current.values())) {
+      if (session.chatId === chatId && !session.isStopped) {
+        session.lastActivityAtMs = now;
+        if (markData) session.receivedStreamData = true;
+      }
+    }
+  };
 
   const persistActiveSession = (requestId: string | null | undefined) => {
     if (!requestId) return;
@@ -291,6 +321,8 @@ export function SocketProvider({ children }: { children: ReactNode }) {
       multiLLMResponses: partial?.multiLLMResponses ?? new Map(),
       expectedModelsCount: partial?.expectedModelsCount ?? 0,
       mcpToolCalls: partial?.mcpToolCalls ?? [],
+      lastActivityAtMs: partial?.lastActivityAtMs ?? Date.now(),
+      receivedStreamData: partial?.receivedStreamData ?? false,
       regeneration: partial?.regeneration ?? null,
     };
     streamSessionsRef.current.set(requestId, session);
@@ -777,6 +809,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
     switch (data.type) {
       case 'agent_update':
         {
+          touchStreamActivity(routedSession?.requestId || activeRequestIdRef.current);
           if (!currentChatIdRef.current) break;
           const agentName = typeof data.agent_name === 'string' && data.agent_name.trim()
             ? data.agent_name.trim()
@@ -804,6 +837,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
 
       case 'thinking':
         {
+          touchStreamActivity(routedSession?.requestId || activeRequestIdRef.current, { streamData: true });
           const mediaKind = isMediaGenThinkingPayload(data);
           if (
             mediaKind &&
@@ -978,6 +1012,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
 
       case 'multi_llm_chunk':
         // Потоковая генерация от одной модели в режиме multi-llm
+        touchStreamActivity(routedSession?.requestId || activeRequestIdRef.current, { streamData: true });
         if (!currentChatIdRef.current) return;
         if (isStoppedRef.current) return;
 
@@ -1122,6 +1157,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
 
       case 'chunk':
         // Потоковая генерация - обновляем существующее сообщение
+        touchStreamActivity(routedSession?.requestId || activeRequestIdRef.current, { streamData: true });
         if (!currentChatIdRef.current) {
           
           return;
@@ -1536,6 +1572,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
 
       case 'mcp_event': {
         if (isStoppedRef.current) break;
+        touchStreamActivity(routedSession?.requestId || activeRequestIdRef.current);
         const eventType = data.mcp_event_type === 'mcp_tool_end' ? 'mcp_tool_end' : 'mcp_tool_start';
         const record: McpToolCallRecord = {
           type: eventType,
@@ -2160,6 +2197,84 @@ export function SocketProvider({ children }: { children: ReactNode }) {
       window.clearInterval(watchdogId);
     };
   }, [token, isConnected]);
+
+  // Стрим без чанков — принудительно завершаем UI (лимит токенов / обрыв без complete).
+  useEffect(() => {
+    const stallWatchId = window.setInterval(() => {
+      const now = Date.now();
+      const stalled: StreamSession[] = [];
+      for (const session of Array.from(streamSessionsRef.current.values())) {
+        if (session.isStopped) continue;
+        const limit = session.receivedStreamData
+          ? STREAM_STALL_AFTER_CHUNK_MS
+          : STREAM_STALL_BEFORE_CHUNK_MS;
+        if (now - session.lastActivityAtMs < limit) continue;
+        stalled.push(session);
+      }
+      if (stalled.length === 0) return;
+
+      for (const session of stalled) {
+        session.isStopped = true;
+        setChatLoading(session.chatId, false);
+        if (session.messageId) {
+          updateMessage(session.chatId, session.messageId, undefined, false);
+        }
+        if (session.multiLLMMessageId) {
+          const snap = Array.from(session.multiLLMResponses.values()).map((r) => ({
+            ...r,
+            isStreaming: false,
+          }));
+          updateMessage(
+            session.chatId,
+            session.multiLLMMessageId,
+            undefined,
+            false,
+            snap.length
+              ? mergeMultiLlmSocketPayload(session.chatId, session.multiLLMMessageId, snap)
+              : undefined,
+          );
+        }
+        const chat = getChatById(session.chatId);
+        if (chat) {
+          for (const m of chat.messages) {
+            if (m.role !== 'assistant') continue;
+            const slotStreaming = m.multiLLMResponses?.some((r) => r.isStreaming);
+            if (m.isStreaming || slotStreaming) {
+              const clearedSlots = m.multiLLMResponses?.map((r) => ({ ...r, isStreaming: false }));
+              updateMessage(
+                session.chatId,
+                m.id,
+                undefined,
+                false,
+                clearedSlots,
+              );
+            }
+          }
+        }
+        streamSessionsRef.current.delete(session.requestId);
+        if (activeRequestIdRef.current === session.requestId) {
+          activeRequestIdRef.current = null;
+          currentMessageRef.current = null;
+          multiLLMMessageRef.current = null;
+          multiLLMResponsesRef.current.clear();
+          expectedModelsCountRef.current = 0;
+          expectMultiLlmResponseRef.current = false;
+          thinkingTraceRef.current = '';
+          responseAccumulatedRef.current = '';
+          clearRegenerationUi();
+          clearMcpToolActivity();
+        }
+      }
+      showNotification(
+        'warning',
+        'Генерация прервана: долго не было новых токенов (возможен лимит ответа).',
+      );
+    }, STREAM_STALL_CHECK_MS);
+
+    return () => {
+      window.clearInterval(stallWatchId);
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const onVisibilityChange = () => {

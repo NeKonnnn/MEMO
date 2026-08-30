@@ -18,6 +18,7 @@ import Editor, { loader } from '@monaco-editor/react';
 import * as XLSX from 'xlsx';
 import CodeSelectionMenu from './CodeSelectionMenu';
 import ChatInlineHtml from './ChatInlineHtml';
+import { useChatFontSize } from '../hooks/useChatFontSize';
 
 // Monaco загружается как статические файлы (не через webpack-бандл).
 // Файлы копируются в public/monaco через scripts/copy-monaco-assets.js (prestart/prebuild).
@@ -36,24 +37,6 @@ interface MessageRendererProps {
   /** Стабильный id сообщения — для ключей артефактов. */
   messageId?: string;
 }
-
-type FontSize = 'small' | 'medium' | 'large';
-
-const getFontSize = (): FontSize => {
-  const saved = localStorage.getItem('chat-font-size') as FontSize;
-  return saved && ['small', 'medium', 'large'].includes(saved) ? saved : 'medium';
-};
-
-const getFontSizeValue = (size: FontSize): string => {
-  switch (size) {
-    case 'small':
-      return '0.875rem';
-    case 'large':
-      return '1.125rem';
-    default:
-      return '1rem';
-  }
-};
 
 /** Markdown-заголовки: чуть крупнее body, без MUI h1–h6 (там 2–3rem). */
 const MARKDOWN_HEADING_SCALE: Record<string, number> = {
@@ -145,7 +128,7 @@ function markdownHeadingFontSize(level: string, baseFontSize: string): string {
 const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isStreaming = false, onSendMessage, messageId }) => {
 
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
-  const [fontSize, setFontSize] = useState<FontSize>(getFontSize());
+  const { fontSizeValue } = useChatFontSize();
   
   // Используем useRef для стабильного хранения состояния меню (не сбросится при ререндерах!)
   const selectedTextRef = useRef<string>('');
@@ -388,34 +371,6 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
 
     return { plain, html: richHtml };
   }, []);
-
-  // Слушаем изменения размера шрифта
-  useEffect(() => {
-    const handleStorageChange = () => {
-      const newSize = getFontSize();
-      setFontSize(prevSize => {
-        if (prevSize !== newSize) {
-          return newSize;
-        }
-        return prevSize;
-      });
-    };
-    
-    // Проверяем изменения каждые 500мс (было 100мс - слишком часто!)
-    const interval = setInterval(() => {
-      handleStorageChange();
-    }, 500);
-
-    window.addEventListener('storage', handleStorageChange);
-    
-    return () => {
-      clearInterval(interval);
-      window.removeEventListener('storage', handleStorageChange);
-    };
-  }, []); // Убрали fontSize из зависимостей!
-
-  const fontSizeValue = getFontSizeValue(fontSize);
-
 
   // Обработчики для меню
   const handleMenuClose = useCallback(() => {
@@ -1394,7 +1349,6 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
                 language={editorLanguage}
                 value={code}
                 path={editorPath}
-                keepCurrentModel
                 theme="memo-monaco-dark"
                 loading={
                   <Box
@@ -1866,7 +1820,7 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
 
   const renderedContent = useMemo(
     () => parseMarkdown(sanitizeRawContent(content)),
-    [content, isStreaming, sanitizeRawContent, fontSize]
+    [content, isStreaming, sanitizeRawContent, fontSizeValue]
   );
 
   return (

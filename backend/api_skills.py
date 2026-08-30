@@ -1,12 +1,12 @@
 """API endpoints для Skills (аналог Open WebUI /api/v1/skills)."""
 
-import asyncio
-from typing import Annotated, Dict, List, Optional
+from typing import Annotated, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from backend.auth.jwt_handler import get_current_user
+from backend.auth.user_directory import enrich_items_author_full_names, resolve_full_names
 from backend.database.init_db import get_skill_repository
 from backend.database.postgresql.skill_models import (
     SkillCreate,
@@ -27,63 +27,9 @@ logger = get_logger(__name__)
 
 router = APIRouter(prefix="/api/skills", tags=["skills"])
 
-_full_name_cache: Dict[str, Optional[str]] = {}
-
 
 def _is_admin(user: dict) -> bool:
     return bool(user.get("is_admin"))
-
-
-async def _resolve_full_names(user_ids: List[str]) -> Dict[str, Optional[str]]:
-    result: Dict[str, Optional[str]] = {}
-    to_lookup: List[str] = []
-    seen: set = set()
-    for raw in user_ids:
-        uid = (raw or "").strip()
-        if not uid:
-            continue
-        key = uid.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        if key in _full_name_cache:
-            result[uid] = _full_name_cache[key]
-        else:
-            to_lookup.append(uid)
-    if not to_lookup:
-        return result
-    try:
-        from backend.auth.ldap_auth import fetch_ldap_user_profile, is_ldap_enabled
-    except Exception:
-        for uid in to_lookup:
-            result[uid] = None
-        return result
-    if not is_ldap_enabled():
-        for uid in to_lookup:
-            result[uid] = None
-        return result
-
-    def _bulk() -> Dict[str, Optional[str]]:
-        out: Dict[str, Optional[str]] = {}
-        for uid in to_lookup:
-            name = None
-            try:
-                profile = fetch_ldap_user_profile(uid)
-                if profile:
-                    name = profile.get("full_name") or None
-            except Exception:
-                name = None
-            out[uid] = name
-        return out
-
-    try:
-        looked = await asyncio.to_thread(_bulk)
-    except Exception:
-        looked = {uid: None for uid in to_lookup}
-    for uid, name in looked.items():
-        _full_name_cache[uid.lower()] = name
-        result[uid] = name
-    return result
 
 
 class SkillsListResponse(BaseModel):
@@ -103,6 +49,7 @@ async def get_skills(current_user: Annotated[dict, Depends(get_current_user)]):
             SkillFilters(limit=100, offset=0),
             is_admin=_is_admin(current_user),
         )
+        await enrich_items_author_full_names(items)
         return items
     except Exception as e:
         logger.exception("Ошибка get_skills")
@@ -129,6 +76,7 @@ async def get_skill_list(
         items, total = await repo.list_skills(
             current_user["user_id"], filters, is_admin=_is_admin(current_user)
         )
+        await enrich_items_author_full_names(items)
         pages = (total + limit - 1) // limit if total else 0
         return SkillsListResponse(items=items, total=total, page=page, pages=pages)
     except Exception as e:
@@ -192,6 +140,7 @@ async def get_my_bookmarks(
             skill = await repo.get_skill_by_id(sid, current_user["user_id"], is_admin=admin)
             if skill:
                 items.append(SkillListItem(**skill.model_dump(exclude={"content"})))
+        await enrich_items_author_full_names(items)
         pages = (total + limit - 1) // limit if total else 0
         return SkillsListResponse(items=items, total=total, page=page, pages=pages)
     except Exception as e:
@@ -332,10 +281,10 @@ async def update_skill(
         if not skill:
             raise HTTPException(status_code=403, detail="Нет прав или skill не найден")
         return skill
-    except HTTPException:
-        raise
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("Ошибка update_skill")
         raise HTTPException(status_code=500, detail=str(e)) from e
@@ -430,7 +379,7 @@ async def list_skill_shares(skill_id: int, current_user: Annotated[dict, Depends
             raise HTTPException(status_code=403, detail="Только автор может просматривать шаринги")
         raw_shares = await repo.list_skill_shares(skill_id, existing.author_id)
         owner_id = existing.author_id or current_user["user_id"]
-        name_map = await _resolve_full_names([owner_id, *[s.shared_with_user_id for s in raw_shares]])
+        name_map = await resolve_full_names([owner_id, *[s.shared_with_user_id for s in raw_shares]])
         owner_name = name_map.get(owner_id)
         if not owner_name and author == me:
             owner_name = current_user.get("full_name") or current_user.get("name")

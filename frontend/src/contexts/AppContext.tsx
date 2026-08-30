@@ -136,11 +136,16 @@ export interface Chat {
   isPinnedInProject?: boolean;
   /** Ветка: есть история в UI, но в сайдбаре не показываем, пока пользователь не отправит новое сообщение. */
   hiddenFromSidebarUntilUserMessage?: boolean;
+  /** Сообщения выгружены из RAM; подгружаются при открытии чата. */
+  messagesUnloaded?: boolean;
+  /** Сколько сообщений было до выгрузки (для сайдбара / listing). */
+  unloadedMessageCount?: number;
 }
 
 /** Чат показывается в блоке сайдбара «Все чаты», если уже есть переписка (сообщения пользователя и/или ассистента). */
 export function chatIsListedInAllChatsSection(chat: Chat): boolean {
   if (chat.hiddenFromSidebarUntilUserMessage) return false;
+  if (chat.messagesUnloaded) return (chat.unloadedMessageCount ?? 0) > 0;
   return chat.messages.length > 0;
 }
 
@@ -243,10 +248,10 @@ export interface AppState {
 // Действия
 type AppAction =
   | { type: 'CREATE_CHAT'; payload: Chat }
-  | { type: 'RESTORE_CHATS'; payload: { chats: Chat[]; currentChatId: string | null; folders: Folder[] } }
-  | { type: 'SET_CURRENT_CHAT'; payload: string | null }
+  | { type: 'RESTORE_CHATS'; payload: { chats: Chat[]; currentChatId: string | null; folders: Folder[]; unloadInactive?: boolean } }
+  | { type: 'SET_CURRENT_CHAT'; payload: string | null | { chatId: string | null; unloadInactive?: boolean } }
   | { type: 'UPDATE_CHAT_TITLE'; payload: { chatId: string; title: string } }
-  | { type: 'UPDATE_CHAT_MESSAGES'; payload: { chatId: string; messages: Message[] } }
+  | { type: 'UPDATE_CHAT_MESSAGES'; payload: { chatId: string; messages: Message[]; updatedAt?: string } }
   | { type: 'DELETE_CHAT'; payload: string }
   | { type: 'DELETE_ALL_CHATS' }
   | { type: 'ADD_MESSAGE'; payload: { chatId: string; message: Message } }
@@ -325,15 +330,90 @@ function smartConcatenateChunk(existingContent: string, newChunk: string): strin
   return existingContent + newChunk;
 }
 
+/** LRU-кэш сообщений вне state — переживает unload, мгновенное переключение чатов. */
+const CHAT_MESSAGES_CACHE_LIMIT = 16;
+const chatMessagesCache = new Map<string, Message[]>();
+
+function touchChatMessagesCache(chatId: string, messages: Message[]): void {
+  if (!messages.length) return;
+  if (chatMessagesCache.has(chatId)) chatMessagesCache.delete(chatId);
+  chatMessagesCache.set(chatId, messages);
+  while (chatMessagesCache.size > CHAT_MESSAGES_CACHE_LIMIT) {
+    const oldest = chatMessagesCache.keys().next().value;
+    if (oldest) chatMessagesCache.delete(oldest);
+  }
+}
+
+function readChatMessagesCache(chatId: string): Message[] | null {
+  const hit = chatMessagesCache.get(chatId);
+  if (!hit?.length) return null;
+  chatMessagesCache.delete(chatId);
+  chatMessagesCache.set(chatId, hit);
+  return hit;
+}
+
+function seedChatMessagesCache(chats: Chat[]): void {
+  for (const chat of chats) {
+    if (chat.messages?.length) touchChatMessagesCache(chat.id, chat.messages);
+  }
+}
+
+function applyCachedMessagesIfNeeded(chat: Chat): Chat {
+  if (chat.messages.length > 0) return chat;
+  const cached = readChatMessagesCache(chat.id);
+  if (!cached?.length) return chat;
+  return {
+    ...chat,
+    messages: cached,
+    messagesUnloaded: false,
+    unloadedMessageCount: undefined,
+  };
+}
+
+function unloadChatPayload(chat: Chat): Chat {
+  if (chat.messagesUnloaded || chat.messages.length === 0) return chat;
+  touchChatMessagesCache(chat.id, chat.messages);
+  return {
+    ...chat,
+    messages: [],
+    messagesUnloaded: true,
+    unloadedMessageCount: chat.messages.length,
+  };
+}
+
+function readPersistedChatBootstrap(): Pick<AppState, 'chats' | 'currentChatId' | 'folders' | 'isInitialized'> {
+  try {
+    const saved = localStorage.getItem('memo-chats');
+    if (!saved) {
+      return { chats: [], currentChatId: null, folders: [], isInitialized: false };
+    }
+    const parsed = JSON.parse(saved);
+    if (!Array.isArray(parsed?.chats) || parsed.chats.length === 0) {
+      return { chats: [], currentChatId: null, folders: [], isInitialized: false };
+    }
+    return {
+      chats: parsed.chats,
+      currentChatId: parsed.currentChatId || parsed.chats[0]?.id || null,
+      folders: parsed.folders || [],
+      isInitialized: true,
+    };
+  } catch {
+    return { chats: [], currentChatId: null, folders: [], isInitialized: false };
+  }
+}
+
+const persistedChatBootstrap = readPersistedChatBootstrap();
+seedChatMessagesCache(persistedChatBootstrap.chats);
+
 // Начальное состояние
 const initialState: AppState = {
-  chats: [],
-  currentChatId: null,
-  folders: [],
+  chats: persistedChatBootstrap.chats,
+  currentChatId: persistedChatBootstrap.currentChatId,
+  folders: persistedChatBootstrap.folders,
   projects: [],
   isLoading: false,
   loadingChatIds: [],
-  isInitialized: false,
+  isInitialized: persistedChatBootstrap.isInitialized,
   currentModel: null,
   modelSettings: {
     context_size: 2048,
@@ -370,6 +450,30 @@ const initialState: AppState = {
   },
 };
 
+function chatHasLiveWork(chat: Chat, loadingChatIds: string[]): boolean {
+  if (loadingChatIds.includes(chat.id)) return true;
+  return chat.messages.some(
+    (m) =>
+      m.isStreaming ||
+      m.isImageGenerating ||
+      m.isVideoGenerating ||
+      m.multiLLMResponses?.some((r) => r.isStreaming),
+  );
+}
+
+function unloadInactiveChats(
+  chats: Chat[],
+  keepIds: Set<string>,
+  loadingChatIds: string[],
+): Chat[] {
+  return chats.map((chat) => {
+    if (keepIds.has(chat.id) || chatHasLiveWork(chat, loadingChatIds)) {
+      return chat;
+    }
+    return unloadChatPayload(chat);
+  });
+}
+
 // Reducer
 function appReducer(state: AppState, action: AppAction): AppState {
   switch (action.type) {
@@ -380,20 +484,77 @@ function appReducer(state: AppState, action: AppAction): AppState {
         currentChatId: action.payload.id,
       };
       
-    case 'RESTORE_CHATS':
+    case 'RESTORE_CHATS': {
+      const currentId = action.payload.currentChatId;
+      const keep = new Set<string>();
+      if (currentId) keep.add(currentId);
+      const shouldUnload = action.payload.unloadInactive !== false;
+      const prevById = new Map(state.chats.map((c) => [c.id, c]));
+      let chats: Chat[] = action.payload.chats.map((serverChat) => {
+        const prev = prevById.get(serverChat.id);
+        // isArchived с сервера — источник истины (явный boolean из metadata.archived).
+        const archived = Boolean(serverChat.isArchived);
+        if (prev && prev.messages.length > 0 && serverChat.messages.length === 0) {
+          return {
+            ...serverChat,
+            messages: prev.messages,
+            messagesUnloaded: prev.messagesUnloaded,
+            unloadedMessageCount: prev.unloadedMessageCount,
+            isArchived: archived,
+          };
+        }
+        return {
+          ...serverChat,
+          isArchived: archived,
+        };
+      });
+      if (shouldUnload) {
+        chats = unloadInactiveChats(chats, keep, state.loadingChatIds);
+      }
+      if (currentId) {
+        chats = chats.map((c) => (c.id === currentId ? applyCachedMessagesIfNeeded(c) : c));
+      }
       return {
         ...state,
-        chats: action.payload.chats,
-        currentChatId: action.payload.currentChatId,
+        chats,
+        currentChatId: currentId,
         folders: action.payload.folders || [],
         isInitialized: true,
       };
+    }
       
-    case 'SET_CURRENT_CHAT':
+    case 'SET_CURRENT_CHAT': {
+      const raw = action.payload;
+      const nextId = raw && typeof raw === 'object' ? raw.chatId : raw;
+      const unloadInactive =
+        raw && typeof raw === 'object' ? Boolean(raw.unloadInactive) : true;
+      const prevId = state.currentChatId;
+      if (!unloadInactive) {
+        // Даже если выгрузка/гидратация отключены (например, нет токена),
+        // попробуем восстановить чат из in-memory LRU-кэша.
+        if (!nextId) {
+          return { ...state, currentChatId: nextId };
+        }
+        return {
+          ...state,
+          currentChatId: nextId,
+          chats: state.chats.map((c) => (c.id === nextId ? applyCachedMessagesIfNeeded(c) : c)),
+        };
+      }
+      const keep = new Set<string>();
+      if (nextId) keep.add(nextId);
+      // Держим предыдущий чат гидратированным для быстрого переключения туда-обратно.
+      if (prevId && prevId !== nextId) keep.add(prevId);
+      let chats = unloadInactiveChats(state.chats, keep, state.loadingChatIds);
+      if (nextId) {
+        chats = chats.map((c) => (c.id === nextId ? applyCachedMessagesIfNeeded(c) : c));
+      }
       return {
         ...state,
-        currentChatId: action.payload,
+        currentChatId: nextId,
+        chats,
       };
+    }
       
     case 'UPDATE_CHAT_TITLE':
       return {
@@ -406,11 +567,19 @@ function appReducer(state: AppState, action: AppAction): AppState {
       };
       
     case 'UPDATE_CHAT_MESSAGES':
+      touchChatMessagesCache(action.payload.chatId, action.payload.messages);
       return {
         ...state,
         chats: state.chats.map(chat =>
           chat.id === action.payload.chatId
-            ? { ...chat, messages: action.payload.messages, updatedAt: new Date().toISOString() }
+            ? {
+                ...chat,
+                messages: action.payload.messages,
+                messagesUnloaded: false,
+                unloadedMessageCount: undefined,
+                // Гидратация из API не должна сдвигать чат в «Сегодня» — берём дату с сервера или оставляем текущую.
+                updatedAt: action.payload.updatedAt ?? chat.updatedAt,
+              }
             : chat
         ),
       };
@@ -439,6 +608,8 @@ function appReducer(state: AppState, action: AppAction): AppState {
             ? {
                 ...chat,
                 messages: [...chat.messages, message],
+                messagesUnloaded: false,
+                unloadedMessageCount: undefined,
                 updatedAt: new Date().toISOString(),
                 ...(chat.hiddenFromSidebarUntilUserMessage && message.role === 'user'
                   ? { hiddenFromSidebarUntilUserMessage: undefined }
@@ -518,6 +689,13 @@ function appReducer(state: AppState, action: AppAction): AppState {
 
     case 'PATCH_MESSAGE_FIELDS': {
       const { chatId, messageId, fields } = action.payload;
+      const targetChat = state.chats.find((chat) => chat.id === chatId);
+      const targetMsg = targetChat?.messages.find((msg) => msg.id === messageId);
+      if (!targetMsg) return state;
+      const needsUpdate = (Object.keys(fields) as Array<keyof typeof fields>).some(
+        (key) => targetMsg[key] !== fields[key],
+      );
+      if (!needsUpdate) return state;
       return {
         ...state,
         chats: state.chats.map((chat) =>
@@ -949,12 +1127,41 @@ export function AppProvider({ children }: { children: ReactNode }) {
               ? payload.conversations.map(mapServerConversationToChat)
               : [];
             if (serverChats.length > 0) {
+              // Миграция: раньше архив был только в localStorage — переносим на сервер.
+              const localArchivedIds = new Set(
+                (Array.isArray(parsed?.chats) ? parsed.chats : [])
+                  .filter((c: Chat) => c?.isArchived && c?.id)
+                  .map((c: Chat) => String(c.id)),
+              );
+              const mergedChats = serverChats.map((c) =>
+                localArchivedIds.has(c.id) && !c.isArchived ? { ...c, isArchived: true } : c,
+              );
+              const toSyncArchive = mergedChats
+                .filter((c) => c.isArchived && localArchivedIds.has(c.id))
+                .map((c) => c.id);
+              if (toSyncArchive.length) {
+                void Promise.all(
+                  toSyncArchive.map((chatId) =>
+                    fetch(getApiUrl(`/api/conversations/${chatId}/archive`), {
+                      method: 'POST',
+                      headers: { Authorization: `Bearer ${effectiveToken}` },
+                    }).catch(() => {}),
+                  ),
+                );
+              }
+              const savedCurrentId =
+                typeof parsed?.currentChatId === 'string' ? parsed.currentChatId : null;
+              const restoredCurrentId =
+                savedCurrentId && mergedChats.some((c) => c.id === savedCurrentId && !c.isArchived)
+                  ? savedCurrentId
+                  : mergedChats.find((c) => !c.isArchived)?.id || mergedChats[0]?.id || null;
               dispatch({
                 type: 'RESTORE_CHATS',
                 payload: {
-                  chats: serverChats,
-                  currentChatId: serverChats[0]?.id || null,
+                  chats: mergedChats,
+                  currentChatId: restoredCurrentId,
                   folders: parsed?.folders || [],
+                  unloadInactive: true,
                 },
               });
               return;
@@ -974,6 +1181,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
             chats: parsed.chats || [],
             currentChatId: parsed.currentChatId || null,
             folders: parsed.folders || [],
+            // Offline-кэш: без API не выгружаем, иначе нечего гидратировать.
+            unloadInactive: false,
           },
         });
       } else {
@@ -983,6 +1192,45 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
     loadInitialState();
   }, [token]);
+
+  // Подгрузка сообщений выгруженного чата при переключении.
+  const currentChatNeedsHydration = Boolean(
+    state.currentChatId &&
+      state.chats.find((c) => c.id === state.currentChatId)?.messagesUnloaded,
+  );
+
+  useEffect(() => {
+    const chatId = state.currentChatId;
+    if (!chatId || !currentChatNeedsHydration) return;
+
+    let cancelled = false;
+    const effectiveToken = token || localStorage.getItem('auth_token');
+    if (!effectiveToken) return;
+
+    (async () => {
+      try {
+        await initSettings();
+        const response = await fetch(getApiUrl(`/api/conversations/${chatId}`), {
+          headers: { Authorization: `Bearer ${effectiveToken}` },
+        });
+        if (!response.ok || cancelled) return;
+        const payload = await response.json();
+        const conversation = payload?.conversation ?? payload;
+        const mapped = mapServerConversationToChat(conversation);
+        if (cancelled) return;
+        dispatch({
+          type: 'UPDATE_CHAT_MESSAGES',
+          payload: { chatId, messages: mapped.messages, updatedAt: mapped.updatedAt },
+        });
+      } catch (error) {
+        console.warn('Не удалось подгрузить сообщения чата', chatId, error);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [state.currentChatId, currentChatNeedsHydration, token]);
 
   // Сохраняем состояние в localStorage при изменении.
   // Полные чаты с base64-картинками быстро превышают квоту (~5 МБ) → QuotaExceededError.
@@ -1133,9 +1381,10 @@ export function useAppActions() {
     },
     
     setCurrentChat: (chatId: string | null) => {
+      const canRehydrate = Boolean(token || localStorage.getItem('auth_token'));
       dispatch({
         type: 'SET_CURRENT_CHAT',
-        payload: chatId,
+        payload: { chatId, unloadInactive: canRehydrate },
       });
     },
     
@@ -1369,6 +1618,7 @@ export function useAppActions() {
                 chats: importData.chats,
                 currentChatId: importData.currentChatId || null,
                 folders: importData.folders || [],
+                unloadInactive: false,
               },
             });
             
@@ -1383,23 +1633,94 @@ export function useAppActions() {
     },
     
     archiveAllChats: () => {
+      const ids = state.chats.filter((c) => !c.isArchived).map((c) => c.id);
       dispatch({ type: 'ARCHIVE_ALL_CHATS' });
+      const effectiveToken = token || localStorage.getItem('auth_token');
+      if (effectiveToken && ids.length) {
+        initSettings()
+          .then(() =>
+            Promise.all(
+              ids.map((chatId) =>
+                fetch(getApiUrl(`/api/conversations/${chatId}/archive`), {
+                  method: 'POST',
+                  headers: { Authorization: `Bearer ${effectiveToken}` },
+                }).catch(() => {}),
+              ),
+            ),
+          )
+          .catch(() => {});
+      }
     },
     
     archiveChat: (chatId: string) => {
       dispatch({ type: 'ARCHIVE_CHAT', payload: chatId });
+      const effectiveToken = token || localStorage.getItem('auth_token');
+      if (effectiveToken) {
+        initSettings()
+          .then(() =>
+            fetch(getApiUrl(`/api/conversations/${chatId}/archive`), {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${effectiveToken}` },
+            }),
+          )
+          .catch(() => {});
+      }
     },
     
     archiveFolder: (folderId: string) => {
+      const folder = state.folders.find((f) => f.id === folderId);
+      const chatIds = folder?.chatIds ? [...folder.chatIds] : [];
       dispatch({ type: 'ARCHIVE_FOLDER', payload: folderId });
+      const effectiveToken = token || localStorage.getItem('auth_token');
+      if (effectiveToken && chatIds.length) {
+        initSettings()
+          .then(() =>
+            Promise.all(
+              chatIds.map((chatId) =>
+                fetch(getApiUrl(`/api/conversations/${chatId}/archive`), {
+                  method: 'POST',
+                  headers: { Authorization: `Bearer ${effectiveToken}` },
+                }).catch(() => {}),
+              ),
+            ),
+          )
+          .catch(() => {});
+      }
     },
     
     unarchiveChat: (chatId: string) => {
       dispatch({ type: 'UNARCHIVE_CHAT', payload: chatId });
+      const effectiveToken = token || localStorage.getItem('auth_token');
+      if (effectiveToken) {
+        initSettings()
+          .then(() =>
+            fetch(getApiUrl(`/api/conversations/${chatId}/unarchive`), {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${effectiveToken}` },
+            }),
+          )
+          .catch(() => {});
+      }
     },
     
     unarchiveAllChats: () => {
+      const ids = state.chats.filter((c) => c.isArchived).map((c) => c.id);
       dispatch({ type: 'UNARCHIVE_ALL_CHATS' });
+      const effectiveToken = token || localStorage.getItem('auth_token');
+      if (effectiveToken && ids.length) {
+        initSettings()
+          .then(() =>
+            Promise.all(
+              ids.map((chatId) =>
+                fetch(getApiUrl(`/api/conversations/${chatId}/unarchive`), {
+                  method: 'POST',
+                  headers: { Authorization: `Bearer ${effectiveToken}` },
+                }).catch(() => {}),
+              ),
+            ),
+          )
+          .catch(() => {});
+      }
     },
     
     getChatById: (chatId: string) => {

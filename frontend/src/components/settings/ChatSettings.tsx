@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
+import { useTheme } from '@mui/material/styles';
 import {
   Box,
   Typography,
@@ -37,17 +38,22 @@ import {
 import { useAppContext, useAppActions } from '../../contexts/AppContext';
 import ManageSharesDialog from '../ManageSharesDialog';
 import {
+  getChatFontSize,
+  setChatFontSize,
+  type ChatFontSize,
+} from '../../utils/chatFontSize';
+import {
   loadFollowUpSettings,
   saveFollowUpAutoGenerate,
 } from '../../chat/followUpSettings';
-
-type FontSize = 'small' | 'medium' | 'large';
 
 interface ChatSettingsProps {
   isDarkMode?: boolean;
 }
 
-export default function ChatSettings({ isDarkMode = false }: ChatSettingsProps = {}) {
+export default function ChatSettings({ isDarkMode: isDarkModeProp }: ChatSettingsProps = {}) {
+  const theme = useTheme();
+  const isDarkMode = isDarkModeProp ?? theme.palette.mode === 'dark';
   const dropdownItemSx = useMemo(() => getDropdownItemSx(isDarkMode), [isDarkMode]);
   const dropdownTriggerSx = useMemo(() => getDropdownTriggerButtonSx(isDarkMode), [isDarkMode]);
   const dropdownTriggerTextSx = useMemo(() => getDropdownTriggerTextSx(isDarkMode), [isDarkMode]);
@@ -58,7 +64,7 @@ export default function ChatSettings({ isDarkMode = false }: ChatSettingsProps =
   const [showArchiveDialog, setShowArchiveDialog] = useState(false);
   const [showManageSharesDialog, setShowManageSharesDialog] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [fontSize, setFontSize] = useState<FontSize>('medium');
+  const [fontSize, setFontSize] = useState<ChatFontSize>(() => getChatFontSize());
   const [fontPopoverAnchor, setFontPopoverAnchor] = useState<HTMLElement | null>(null);
   const [chatSuggestionsEnabled, setChatSuggestionsEnabled] = useState(
     () => loadFollowUpSettings().followUpAutoGenerate,
@@ -80,24 +86,20 @@ export default function ChatSettings({ isDarkMode = false }: ChatSettingsProps =
     showNotification('success', enabled ? 'Подсказки в чате включены' : 'Подсказки в чате отключены');
   };
 
-  // Загружаем размер шрифта из localStorage
   useEffect(() => {
-    const savedFontSize = localStorage.getItem('chat-font-size') as FontSize;
-    if (savedFontSize && ['small', 'medium', 'large'].includes(savedFontSize)) {
-      setFontSize(savedFontSize);
-    }
+    setFontSize(getChatFontSize());
   }, []);
 
-  // Сохраняем размер шрифта в localStorage
+  // Сохраняем размер шрифта (custom event → MessageRenderer без polling)
   const handleFontSizeChange = (event: any) => {
-    const newFontSize = event.target.value as FontSize;
+    const newFontSize = event.target.value as ChatFontSize;
     setFontSize(newFontSize);
-    localStorage.setItem('chat-font-size', newFontSize);
+    setChatFontSize(newFontSize);
     showNotification('success', 'Размер шрифта изменен');
   };
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const getFontSizeLabel = (size: FontSize): string => {
+  const getFontSizeLabel = (size: ChatFontSize): string => {
     switch (size) {
       case 'small':
         return 'Мелкий';
@@ -234,7 +236,12 @@ export default function ChatSettings({ isDarkMode = false }: ChatSettingsProps =
                     {(['small', 'medium', 'large'] as const).map((size) => (
                       <Box
                         key={size}
-                        onClick={() => { setFontSize(size); localStorage.setItem('chat-font-size', size); showNotification('success', 'Размер шрифта изменен'); setFontPopoverAnchor(null); }}
+                        onClick={() => {
+                          setFontSize(size);
+                          setChatFontSize(size);
+                          showNotification('success', 'Размер шрифта изменен');
+                          setFontPopoverAnchor(null);
+                        }}
                         sx={{
                           ...dropdownItemSx,
                           ...getDropdownItemStateSx(isDarkMode, fontSize === size),

@@ -44,6 +44,8 @@ import {
   getFormFieldTriggerSx,
   getFormFieldTriggerValueSx,
   SIDEBAR_HIDE_SCROLLBAR_SX,
+  AGENT_CONSTRUCTOR_FIELD_PADDING_X_PX,
+  AGENT_CONSTRUCTOR_FIELD_PADDING_Y_PX,
 } from '../../constants/menuStyles';
 import {
   getSidebarPanelBackground,
@@ -68,6 +70,43 @@ import {
   ASTRA_OPEN_SKILLS_SIDEBAR,
   ASTRA_OPEN_SKILLS_SIDEBAR_ID_KEY,
 } from '../../constants/hotkeys';
+
+/** Если skill был активен в чатах под старым slug — обновить упоминание. */
+function renameActiveSkillSlug(oldSlug: string, newSlug: string, name?: string): void {
+  renameSkillSlugInAllChats(oldSlug, newSlug, name);
+}
+
+/** Подпись поля + «?» со всплывающей подсказкой (как «Стратегия поиска» в RAG). */
+function FieldWithHelp({
+  children,
+  help,
+  ariaLabel,
+}: {
+  children: React.ReactNode;
+  help: React.ReactNode;
+  ariaLabel: string;
+}) {
+  return (
+    <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 0.5, width: '100%' }}>
+      <Box sx={{ flex: 1, minWidth: 0 }}>{children}</Box>
+      <Tooltip title={help} arrow placement="top">
+        <IconButton
+          size="small"
+          aria-label={ariaLabel}
+          sx={{
+            mt: 0.75,
+            p: 0.35,
+            color: 'inherit',
+            opacity: 0.45,
+            '&:hover': { opacity: 0.75, bgcolor: 'transparent' },
+          }}
+        >
+          <HelpOutlineIcon sx={{ fontSize: 16 }} />
+        </IconButton>
+      </Tooltip>
+    </Box>
+  );
+}
 
 interface SkillRow {
   id: number;
@@ -109,43 +148,6 @@ interface SkillsSidebarPanelProps {
   isOpen?: boolean;
 }
 
-/** Если skill был активен в чатах под старым slug — обновить упоминание. */
-function renameActiveSkillSlug(oldSlug: string, newSlug: string, name?: string): void {
-  renameSkillSlugInAllChats(oldSlug, newSlug, name);
-}
-
-/** Подпись поля + «?» со всплывающей подсказкой (как «Стратегия поиска» в RAG). */
-function FieldWithHelp({
-  children,
-  help,
-  ariaLabel,
-}: {
-  children: React.ReactNode;
-  help: React.ReactNode;
-  ariaLabel: string;
-}) {
-  return (
-    <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 0.5, width: '100%' }}>
-      <Box sx={{ flex: 1, minWidth: 0 }}>{children}</Box>
-      <Tooltip title={help} arrow placement="top">
-        <IconButton
-          size="small"
-          aria-label={ariaLabel}
-          sx={{
-            mt: 0.75,
-            p: 0.35,
-            color: 'inherit',
-            opacity: 0.45,
-            '&:hover': { opacity: 0.75, bgcolor: 'transparent' },
-          }}
-        >
-          <HelpOutlineIcon sx={{ fontSize: 16 }} />
-        </IconButton>
-      </Tooltip>
-    </Box>
-  );
-}
-
 export default function SkillsSidebarPanel({
   isOpen = true,
 }: SkillsSidebarPanelProps) {
@@ -177,6 +179,22 @@ export default function SkillsSidebarPanel({
   const nameFieldSx = useMemo(
     () =>
       [formFieldInputSx, { '& .MuiFormLabel-asterisk': { color: '#f44336' } }] as SxProps<Theme>,
+    [formFieldInputSx],
+  );
+  /** Как «Инструкции» в конструкторе агента: без двойного padding у multiline. */
+  const multilineFieldSx = useMemo(
+    () =>
+      [
+        formFieldInputSx,
+        {
+          '& .MuiOutlinedInput-root.MuiInputBase-multiline': {
+            padding: 0,
+          },
+          '& .MuiOutlinedInput-root.MuiInputBase-multiline .MuiOutlinedInput-input': {
+            padding: `${AGENT_CONSTRUCTOR_FIELD_PADDING_Y_PX}px ${AGENT_CONSTRUCTOR_FIELD_PADDING_X_PX}px !important`,
+          },
+        },
+      ] as SxProps<Theme>,
     [formFieldInputSx],
   );
   const footerActionBtnSx = useMemo(
@@ -255,6 +273,8 @@ export default function SkillsSidebarPanel({
     'author_id' | 'write_access' | 'my_permission' | 'is_public'
   > | null>(null);
   const [form, setForm] = useState(emptyForm);
+  /** Slug, с которым skill был загружен/сохранён (для обновления $упоминания в чате). */
+  const persistedSlugRef = useRef<string>('');
   const [isSaving, setIsSaving] = useState(false);
   const [isPublishing, setIsPublishing] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
@@ -263,8 +283,6 @@ export default function SkillsSidebarPanel({
   const [busyImportExport, setBusyImportExport] = useState(false);
   const [activeIds, setActiveIds] = useState<string[]>(() => getActiveSkillIds(currentChatId));
   const [loadingDetail, setLoadingDetail] = useState(false);
-  /** Slug на момент загрузки skill — чтобы обновить активный выбор при переименовании. */
-  const loadedSlugRef = useRef<string>('');
 
   const authHeaders = useCallback((): HeadersInit => {
     const h: HeadersInit = { 'Content-Type': 'application/json' };
@@ -309,9 +327,9 @@ export default function SkillsSidebarPanel({
     setSelectedSkillId('new');
     setDetailMeta(null);
     setForm(emptyForm);
+    persistedSlugRef.current = '';
     setSaveSuccess(false);
     setSaveError(null);
-    loadedSlugRef.current = '';
   }, []);
 
   const loadSkillDetail = useCallback(
@@ -330,6 +348,7 @@ export default function SkillsSidebarPanel({
           my_permission: full.my_permission,
           is_public: full.is_public,
         });
+        persistedSlugRef.current = full.slug || '';
         setForm({
           slug: full.slug,
           name: full.name,
@@ -345,7 +364,6 @@ export default function SkillsSidebarPanel({
           category: full.category || '',
           tags: (full.meta?.tags || []).join(', '),
         });
-        loadedSlugRef.current = full.slug || '';
       } catch (e) {
         showNotification('error', e instanceof Error ? e.message : 'Ошибка загрузки');
         resetToNew();
@@ -460,23 +478,9 @@ export default function SkillsSidebarPanel({
     setSaveSuccess(false);
     try {
       const rawSlug = form.slug.trim();
-      if (!rawSlug) {
-        const msg = 'Укажите служебное имя ($упоминание)';
-        setSaveError(msg);
-        setSaveSuccess(false);
-        showNotification('error', msg);
-        return;
-      }
       const slug = /^[a-z0-9][a-z0-9._-]*$/i.test(rawSlug)
         ? rawSlug.toLowerCase()
-        : slugifySkillName(rawSlug || form.name);
-      if (!slug) {
-        const msg = 'Служебное имя должно содержать латиницу, цифры или . _ -';
-        setSaveError(msg);
-        setSaveSuccess(false);
-        showNotification('error', msg);
-        return;
-      }
+        : slugifySkillName(form.name);
       const payload = {
         slug,
         name: form.name.trim(),
@@ -519,6 +523,16 @@ export default function SkillsSidebarPanel({
       if (!saved?.id) {
         throw new Error('Сервер не вернул сохранённый skill');
       }
+      const previousSlug = persistedSlugRef.current;
+      const nextSlug = saved.slug || slug;
+      if (isEdit) {
+        renameActiveSkillSlug(
+          previousSlug,
+          nextSlug,
+          saved.display_title || saved.name || form.name,
+        );
+      }
+      persistedSlugRef.current = nextSlug;
       setSelectedSkillId(saved.id);
       setDetailMeta({
         author_id: saved.author_id,
@@ -542,15 +556,6 @@ export default function SkillsSidebarPanel({
         category: saved.category || f.category,
         tags: (saved.meta?.tags || []).join(', ') || f.tags,
       }));
-      const finalSlug = saved.slug || slug;
-      if (isEdit && loadedSlugRef.current && loadedSlugRef.current !== finalSlug) {
-        renameActiveSkillSlug(
-          loadedSlugRef.current,
-          finalSlug,
-          saved.display_title || saved.name || form.display_title || form.name,
-        );
-      }
-      loadedSlugRef.current = finalSlug;
       await loadSkills();
       notifySkillsChanged();
       setSaveSuccess(true);
@@ -920,21 +925,13 @@ export default function SkillsSidebarPanel({
             >
               <TextField
                 value={form.slug}
-                onChange={(e) => {
-                  const next = e.target.value
-                    .toLowerCase()
-                    .replace(/\s+/g, '-')
-                    .replace(/[^a-z0-9._-]/g, '');
-                  setForm((f) => ({ ...f, slug: next.slice(0, 100) }));
-                }}
+                onChange={(e) => setForm((f) => ({ ...f, slug: slugifySkillName(e.target.value) }))}
                 label="Служебное имя ($упоминание)"
                 placeholder="my-skill"
                 variant="outlined"
                 size="small"
                 fullWidth
-                // Редактируется и у новых, и у существующих skills (сохраняется в БД через PUT).
                 disabled={readOnly}
-                InputProps={{ readOnly: false }}
                 sx={formFieldInputSx}
               />
             </FieldWithHelp>
@@ -948,10 +945,10 @@ export default function SkillsSidebarPanel({
               size="small"
               fullWidth
               multiline
-              minRows={2}
-              maxRows={6}
+              minRows={3}
+              maxRows={8}
               disabled={readOnly}
-              sx={formFieldInputSx}
+              sx={multilineFieldSx}
             />
 
             <TextField
@@ -963,10 +960,10 @@ export default function SkillsSidebarPanel({
               size="small"
               fullWidth
               multiline
-              minRows={6}
-              maxRows={16}
+              minRows={3}
+              maxRows={8}
               disabled={readOnly}
-              sx={formFieldInputSx}
+              sx={multilineFieldSx}
             />
 
             <TextField

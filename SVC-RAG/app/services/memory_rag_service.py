@@ -226,7 +226,7 @@ class MemoryRagService:
                 "error": "Ошибка сохранения документа в БД",
                 "document_id": None,
             }
-
+        
         # Пометка для логов гардрейла: клиент видит только список строк, имя
         # файла и id документа до него не доезжают. Ставим до ветвления, чтобы
         # покрыть и иерархическую индексацию, и обычную.
@@ -387,7 +387,6 @@ class MemoryRagService:
         text = doc.content or ""
         if not text.strip():
             return 0
-        await self.vector_repo.delete_vectors_by_document(document_id)
         # Пометка для логов гардрейла: клиент видит только список строк, имя
         # файла и id документа до него не доезжают. Ставим до ветвления, чтобы
         # покрыть и иерархическую индексацию, и обычную.
@@ -397,6 +396,7 @@ class MemoryRagService:
             document_id=document_id,
             filename=getattr(doc, "filename", None),
         )
+        await self.vector_repo.delete_vectors_by_document(document_id)
         strategy = (chunking_strategy or "universal").strip().lower()
         if strategy == "hierarchical":
             count = await index_document_hierarchically(
@@ -486,7 +486,7 @@ class MemoryRagService:
                 n_docs += 1
                 n_chunks += c
                 _own, _up, _name = _doc_actors(doc)
-                logger.info(
+                logger.debug(
                     "[REINDEX memory] '%s' (id=%s, owner=%s, uploader=%s) чанков=%s",
                     _name,
                     doc.id,
@@ -624,6 +624,13 @@ class MemoryRagService:
                 await self.graph_repo.delete_document_graph("memory", document_id)
             except Exception:
                 pass
+        # Для CEF INT005/INT006 по чанкам ставим контекст ДО удаления векторов.
+        set_embed_log_context(
+            store="memory",
+            operation="delete",
+            document_id=document_id,
+            filename=doc.filename,
+        )
         await self.vector_repo.delete_vectors_by_document(document_id)
         await self.doc_repo.delete_document(document_id)
         self._mark_bm25_dirty()

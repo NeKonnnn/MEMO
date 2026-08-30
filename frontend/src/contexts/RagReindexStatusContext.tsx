@@ -28,6 +28,7 @@ interface RagReindexStatusContextValue {
   blockMessage: string;
   shouldBlockRagSend: (ctx: Pick<RagSendBlockContext, 'libraryEnabled'>) => boolean;
   memoryRagEnabled: boolean;
+  notifyReindexStarted: () => void;
 }
 
 const defaultStatus: RagReindexStatusPayload = {
@@ -50,7 +51,32 @@ const RagReindexStatusContext = createContext<RagReindexStatusContextValue>({
   blockMessage: '',
   shouldBlockRagSend: () => false,
   memoryRagEnabled: true,
+  notifyReindexStarted: () => {},
 });
+
+/** Пауза между опросами во время разгона, секунд. */
+const REINDEX_KICK_INTERVAL_SECONDS = 1;
+
+/**
+
+* Сколько секунд держать разгон. Перечанковка запускается фоновой задачей,
+* и до подъёма флага она успевает сходить в БД - под нагрузкой это заметно.
+* Разгон снимается досрочно, как только флаг увидели.
+ */
+const REINDEX_KICK_WINDOW_SECONDS = 25;
+
+/**
+
+* Пауза между опросами, пока плашка висит.
+* 
+* Момента завершения не знает никто, кроме SVC-RAG: бэкенд снимает флаг прямо
+* в обработчике статуса, увидев, что локи освободились. То есть пересборка
+* заканчивается ровно тогда, когда мы спросили, - и плашка гаснет через эту
+* паузу, а не через полный интервал опроса.
+* 
+* Дороже покоя, но пересборка - событие редкое и конечное.
+ */
+const REINDEX_ACTIVE_POLL_SECONDS = 3;
 
 function readActiveAgentId(): number | null {
   if (typeof localStorage === 'undefined') return null;
@@ -78,19 +104,22 @@ export function RagReindexStatusProvider({ children }: { children: ReactNode }) 
 
   const pollAgentId = useMemo(() => readActiveAgentId(), [location.pathname, state.currentChatId]);
 
-  // Актуальные значения для poll без перезапуска интервала на каждый апдейт chats (стрим).
-  const pathnameRef = useRef(location.pathname);
-  const chatsRef = useRef(state.chats);
-  const currentChatIdRef = useRef(state.currentChatId);
-  pathnameRef.current = location.pathname;
-  chatsRef.current = state.chats;
-  currentChatIdRef.current = state.currentChatId;
+  // Разгон опроса после запуска перечанковки.
+  const fastPollUntilRef = useRef(0);
+  const anyReindexingRef = useRef(false);
+  // Пересборку запустили отсюда: только тогда учащаем опрос, пока висит плашка.
+  const ourReindexRef = useRef(false);
+  const kickRef = useRef<(() => void) | null>(null);
+
+  const notifyReindexStarted = useCallback(() => {
+    ourReindexRef.current = true;
+    fastPollUntilRef.current = Date.now() + REINDEX_KICK_WINDOW_SECONDS * 1000;
+    kickRef.current?.();
+  }, []);
 
   useEffect(() => {
-    let interval: ReturnType<typeof setInterval> | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     let cancelled = false;
-    let inFlight = false;
-    let abortController: AbortController | null = null;
 
     const startPolling = async () => {
       let settings;
@@ -105,17 +134,13 @@ export function RagReindexStatusProvider({ children }: { children: ReactNode }) 
       }
       if (cancelled) return;
 
-      const pollIntervalSeconds = Math.max(1, settings.app.ragReindexStatusPollSeconds);
+      const pollIntervalSeconds = settings.app.ragReindexStatusPollSeconds;
 
       const poll = async () => {
-        if (cancelled || inFlight) return;
-        inFlight = true;
-        abortController?.abort();
-        abortController = new AbortController();
         const activeAgentId = readActiveAgentId();
-        const routeProjectId = projectIdFromPathname(pathnameRef.current);
-        const chat = chatsRef.current.find((c) => c.id === currentChatIdRef.current);
-        const activeProjectId = routeProjectId ?? chat?.projectId ?? null;
+        // Берём готовое значение из useMemo выше, а не пересчитываем по
+        // state.chats
+        const activeProjectId = pollProjectId;
         const params = new URLSearchParams();
         if (activeAgentId != null) {
           params.set('agent_id', String(activeAgentId));
@@ -127,11 +152,18 @@ export function RagReindexStatusProvider({ children }: { children: ReactNode }) 
         try {
           const res = await fetch(getApiUrl(`/api/rag/reindex-status${qs}`), {
             headers: getAuthFetchHeaders(),
-            signal: abortController.signal,
           });
-          if (!res.ok || cancelled) return;
+          if (!res.ok) return;
           const data = (await res.json()) as RagReindexStatusPayload;
-          if (cancelled) return;
+          // Темп опроса выбирается по этому флагу, поэтому держим его в ref
+          anyReindexingRef.current = Boolean(data.any_reindexing);
+          if (anyReindexingRef.current) {
+            // Флаг увидели - разгон своё отработал, дальше хватает паузы
+            // активной пересборки.
+            fastPollUntilRef.current = 0;
+          } else if (Date.now() >= fastPollUntilRef.current) {
+            ourReindexRef.current = false;
+          }
           setStatus({
             memory: { reindexing: Boolean(data.memory?.reindexing) },
             project: { reindexing: Boolean(data.project?.reindexing) },
@@ -143,27 +175,70 @@ export function RagReindexStatusProvider({ children }: { children: ReactNode }) 
             message: typeof data.message === 'string' ? data.message : '',
             active: Array.isArray(data.active) ? data.active : [],
           });
-        } catch (err) {
-          if ((err as { name?: string })?.name === 'AbortError') return;
+        } catch {
           /* ignore transient network errors */
-        } finally {
-          inFlight = false;
         }
       };
 
-      void poll();
-      interval = setInterval(poll, pollIntervalSeconds * 1000);
+      // Три темпа: ждём подъёма флага - разгон; пересборка идёт - часто,
+      // чтобы плашка погасла почти сразу; в покое - как настроено
+      let inFlight = false;
+      
+      const scheduleNext = () => {
+        if (cancelled) return;
+        let seconds = pollIntervalSeconds;
+        if (Date.now() < fastPollUntilRef.current) {
+          seconds = REINDEX_KICK_INTERVAL_SECONDS;
+        } else if (anyReindexingRef.current) {
+          seconds = REINDEX_ACTIVE_POLL_SECONDS;
+        }
+        timer = setTimeout(tick, seconds * 1000);
+      };
+
+      // inFlight держит цепочку в единственном экземпляре
+      const tick = async () => {
+        if (cancelled || inFlight) return;
+        inFlight = true;
+        try {
+          await poll();
+        } finally {
+          inFlight = false;
+        }
+        scheduleNext();
+      };
+
+      // Немедленный опрос по требованию: сбрасываем текущее ожидание и
+      // спрашиваем сейчас. Дальше цепочка сама пойдёт в разгонном темпе.
+      kickRef.current = () => {
+        if (cancelled) return;
+        if (timer) clearTimeout(timer);
+        void tick();
+      };
+
+      await tick();
     };
 
     void startPolling();
     return () => {
       cancelled = true;
-      abortController?.abort();
-      if (interval) clearInterval(interval);
+      if (timer) clearTimeout(timer);
     };
-    // Не зависеть от state.chats: иначе каждый стрим-апдейт чата рвёт интервал
-    // и спамит GET /api/rag/reindex-status → ERR_INSUFFICIENT_RESOURCES.
-  }, [pollProjectId, pollAgentId]);
+    // state.chats здесь БЫЛ и всё ломал. Это массив, React сравнивает
+    // зависимости по ссылке, а редьюсер пересоздаёт его в 17 местах
+    // (chats: state.chats.map(...)) Любое изменение чата - в том числе
+    // каждый кусочек ответа модели при стриминге - роняло эффект и
+    // запускало заново: срабатывал немедленный poll(), а прежний таймер
+    // сбрасывался, так и не досчитав до конца.
+    //
+    // Из-за этого настроенные 10 секунд превращались примерно в один запрос
+    // в секунду, пока человек работает в чате. На SVC-RAG это умножалось на
+    // пять: бэкенд на каждый такой запрос дёргает три /reindex/status и два
+    // списка документов.
+    //
+    // pollProjectId - useMemo, возвращает строку или null. Он сам зависит от
+    // state.chats, но при пересчёте отдаёт то же значение, и эффект на это
+    // не реагирует.
+  }, [location.pathname, state.currentChatId, pollProjectId, pollAgentId]);
 
   const effectiveStatus = status ?? defaultStatus;
   const bannerCtx = useMemo(
@@ -197,8 +272,9 @@ export function RagReindexStatusProvider({ children }: { children: ReactNode }) 
       memoryRagEnabled: effectiveStatus.memory_rag_enabled !== false,
       blockMessage,
       shouldBlockRagSend: shouldBlock,
+      notifyReindexStarted,
     }),
-    [effectiveStatus, anyReindexing, blockMessage, shouldBlock],
+    [effectiveStatus, anyReindexing, blockMessage, shouldBlock, notifyReindexStarted],
   );
 
   return (

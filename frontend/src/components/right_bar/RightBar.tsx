@@ -14,6 +14,8 @@ import {
   ChevronLeft as ChevronLeftIcon,
   ChevronRight as ChevronRightIcon,
   HistoryEdu as SkillsNavIcon,
+  PushPin as PushPinIcon,
+  PushPinOutlined as PushPinOutlinedIcon,
 } from '@mui/icons-material';
 import {
   SIDEBAR_CHAT_ROW_LIST_ITEM_BUTTON_SX,
@@ -44,32 +46,46 @@ import GalleryNavButton from './GalleryNavButton';
 import SkillsSidebarPanel from './SkillsSidebarPanel';
 import SidebarRailMenuGlyph from '../SidebarRailMenuGlyph';
 import TranscriptionSidebarSection from './TranscriptionSidebarSection';
+import RightSidebarResizeHandle from './RightSidebarResizeHandle';
+import { clampRightSidebarWidthPx } from '../../hooks/useRightSidebarWidth';
+import { RIGHT_SIDEBAR_COLLAPSED_WIDTH_PX } from '../../hooks/useRightSidebarInsetCssVar';
 
 export interface RightBarProps {
   open: boolean;
   hidden: boolean;
+  expandedWidthPx: number;
+  widthPinned: boolean;
   isDarkMode: boolean;
   onToggleOpen: () => void;
   onHide: () => void;
   onShow: () => void;
   setOpen: (open: boolean | ((prev: boolean) => boolean)) => void;
   setHidden: (hidden: boolean | ((prev: boolean) => boolean)) => void;
+  setExpandedWidthPx: (widthPx: number | ((prev: number) => number)) => void;
+  setWidthPinned: (pinned: boolean | ((prev: boolean) => boolean)) => void;
 }
 
 export default function RightBar({
   open,
   hidden,
+  expandedWidthPx,
+  widthPinned,
   isDarkMode,
   onToggleOpen,
   onHide,
   onShow,
   setOpen,
   setHidden,
+  setExpandedWidthPx,
+  setWidthPinned,
 }: RightBarProps) {
   const [panelBg, setPanelBg] = useState(() => getSidebarPanelBackground());
   const [transcriptionMenuOpen, setTranscriptionMenuOpen] = useState(false);
   const [skillsPanelOpen, setSkillsPanelOpen] = useState(false);
   const [agentConstructorOpen, setAgentConstructorOpen] = useState(false);
+  const [isResizing, setIsResizing] = useState(false);
+
+  const drawerWidth = open ? clampRightSidebarWidthPx(expandedWidthPx) : RIGHT_SIDEBAR_COLLAPSED_WIDTH_PX;
 
   useEffect(() => {
     const sync = () => setPanelBg(getSidebarPanelBackground());
@@ -124,6 +140,25 @@ export default function RightBar({
 
   const panelIsLight = isSidebarPanelLight(panelBg);
 
+  const handleResize = useCallback(
+    (widthPx: number) => {
+      setExpandedWidthPx(clampRightSidebarWidthPx(widthPx));
+    },
+    [setExpandedWidthPx],
+  );
+
+  const handleResizeEnd = useCallback(
+    (widthPx: number) => {
+      setExpandedWidthPx(clampRightSidebarWidthPx(widthPx));
+      setIsResizing(false);
+    },
+    [setExpandedWidthPx],
+  );
+
+  const toggleWidthPinned = useCallback(() => {
+    setWidthPinned((prev) => !prev);
+  }, [setWidthPinned]);
+
   return (
     <>
       {!hidden && (
@@ -133,16 +168,19 @@ export default function RightBar({
           open={true}
           slotProps={{ paper: { className: 'astra-right-rail' } }}
           sx={{
-            width: open ? 240 : 64,
+            width: drawerWidth,
             flexShrink: 0,
-            transition: 'width 0.3s ease',
+            transition: isResizing ? 'none' : 'width 0.3s ease',
             '& .MuiDrawer-paper': {
-              width: open ? 240 : 64,
+              width: drawerWidth,
               boxSizing: 'border-box',
+              position: 'relative',
               ...getSidebarChromeSx(panelBg),
               ...getSidebarForcedContrastSx(panelBg),
               borderLeft: '1px solid var(--sidebar-border-color, rgba(255,255,255,0.08))',
-              transition: 'width 0.3s ease, background 0.3s ease, color 0.3s ease',
+              transition: isResizing
+                ? 'none'
+                : 'width 0.3s ease, background 0.3s ease, color 0.3s ease',
               overflowX: 'hidden',
               overflowY: 'auto',
               display: 'flex',
@@ -151,6 +189,14 @@ export default function RightBar({
             },
           }}
         >
+          {open && (
+            <RightSidebarResizeHandle
+              disabled={widthPinned}
+              onResize={handleResize}
+              onResizeEnd={handleResizeEnd}
+              onResizeStart={() => setIsResizing(true)}
+            />
+          )}
           {!open && (
             <>
               <Box
@@ -237,7 +283,7 @@ export default function RightBar({
                   right: 0,
                   top: '50%',
                   transform: 'translateY(-50%)',
-                  width: 64,
+                  width: RIGHT_SIDEBAR_COLLAPSED_WIDTH_PX,
                   display: 'flex',
                   justifyContent: 'center',
                   zIndex: 1300,
@@ -272,7 +318,8 @@ export default function RightBar({
                 flexDirection: 'column',
                 height: '100%',
                 overflow: 'hidden',
-                minWidth: 240,
+                width: '100%',
+                minWidth: 0,
                 boxSizing: 'border-box',
               }}
             >
@@ -282,7 +329,8 @@ export default function RightBar({
                   py: 1.5,
                   display: 'flex',
                   alignItems: 'center',
-                  justifyContent: 'flex-start',
+                  justifyContent: 'space-between',
+                  gap: 1,
                   minHeight: 64,
                   flexShrink: 0,
                   boxSizing: 'border-box',
@@ -305,6 +353,33 @@ export default function RightBar({
                     }}
                   >
                     <SidebarRailMenuGlyph side="right" />
+                  </IconButton>
+                </Tooltip>
+                <Tooltip
+                  title={
+                    widthPinned
+                      ? 'Ширина закреплена — нажмите, чтобы изменить'
+                      : 'Закрепить текущую ширину панели'
+                  }
+                  placement="left"
+                >
+                  <IconButton
+                    onClick={toggleWidthPinned}
+                    aria-pressed={widthPinned}
+                    sx={{
+                      color: 'white',
+                      opacity: widthPinned ? 1 : 0.85,
+                      width: 40,
+                      height: 40,
+                      borderRadius: 1,
+                      p: 0,
+                      '&:hover': {
+                        backgroundColor: isDarkMode ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)',
+                        opacity: 1,
+                      },
+                    }}
+                  >
+                    {widthPinned ? <PushPinIcon fontSize="small" /> : <PushPinOutlinedIcon fontSize="small" />}
                   </IconButton>
                 </Tooltip>
               </Box>

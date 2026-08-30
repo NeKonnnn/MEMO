@@ -1,4 +1,4 @@
-# SVC-RAG: логика RAG (парсинг, чанкинг, поиск). Модели — в SVC-RAG-MODELS.
+# SVC-RAG: логика RAG (парсинг, чанкинг, поиск). Локальные веса — в SVC-RAG-MODELS.
 
 server:
   host: "0.0.0.0"
@@ -34,11 +34,10 @@ urls:
 
 # Провайдер эмбеддингов/реранкера: native (SVC-RAG-MODELS) или openai-compat (Phoenix и т.п.)
 rag_models:
-  provider: "native" # native / Phoenix / ...
+  provider: "native"
   providers:
     - id: "Phoenix"
       kind: "openai-compat"
-      # Заполните base_url / api_key_env под своё окружение при provider=Phoenix
       base_url: ""
       api_key_env: "LLM_API_KEY_PHOENIX"
       timeout: 300
@@ -57,36 +56,66 @@ app:
 
 logging:
   level: "INFO"
+  noisy_level: "WARNING"
   format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+# ========================================================
+# CEF-АУДИТ
+# ========================================================
+# Пишется отдельным каналом (логгер "cef", свой обработчик, propagate=False),
+# поэтому logging.level выше на него НЕ влияет.
+audit:
+  # Фоновый поллинг интерфейса — успешные GET по /reindex/status и спискам
+  # документов. Один опрос плашки переиндексации = пять запросов сюда, то есть
+  # пять событий OBJ001 каждые несколько секунд с каждой открытой вкладки.
+  #
+  # Аудировать ли их вообще. true — да, но с прореживанием (см. интервал ниже).
+  # false — не аудировать такие чтения совсем.
+  #
+  # Изменения (POST/DELETE), ошибки и отказы доступа аудируются ВСЕГДА,
+  # независимо от обеих настроек.
+  #
+  # ENV перекрывает: CEF_AUDIT_POLLING
+  cef_polling: true
+
+  # Окно прореживания, секунд. Одно событие на (пользователь, метод, путь) в
+  # окно; в событие проставляется cn1 = сколько обращений оно представляет.
+  # При опросе раз в 5 с и окне 60 с это 3 события вместо 25 за две минуты,
+  # и по cn1 видно реальный объём.
+  #
+  # 0 — без прореживания, событие на каждое обращение (как было до правки).
+  #
+  # ⚠ Если AUDIT_CEF_ENABLED не выставлен, syslog отключён и stdout —
+  # единственный транспорт аудита. Прореживание уменьшает и его. Согласуйте
+  # с ИБ: 60 с — компромисс, факт обращений сохраняется, объём падает в разы.
+  #
+  # ENV перекрывает: CEF_AUDIT_POLLING_INTERVAL
+  cef_polling_interval_seconds: 120
 
 # ========================================================
 # ИНТЕГРАЦИИ И БАЗЫ ДАННЫХ
 # ========================================================
-# Если base_url пустой, подставляется из блока urls
+# provider=native (local/FRIDA): base_url из urls.rag_models_service_port → SVC-RAG-MODELS.
+# phoenix/… → rag_models.providers.Phoenix (LiteLLM). OCR — ocr-service из urls.
 rag_models_client:
   base_url: ""
-  # Индексация DOCX/PDF: на CPU один чанк ~секунды; 60 с мало для больших документов
   timeout: 600.0
   embed_batch_size: 24
   # Параллельные POST /embeddings при индексации (K8s: RAG_MODELS_CLIENT_EMBED_CONCURRENCY)
   embed_concurrency: 4
-  # Для native обычно пусто (дефолт берёт SVC-RAG-MODELS). Для openai-compat шлюза — имя модели.
   api_key_env: ""
   embedding_model: ""
   reranker_model: ""
 
-# Если base_url пустой, подставляется из блока urls
 llm_service:
   base_url: ""
   timeout: 120.0
   default_model: "default"
 
-# Если url пустой, подставляется из блока urls
 ocr:
   url: ""
   timeout: 300.0
 
-# PostgreSQL с pgvector
 postgresql:
   host: "postgresql"
   port: 5432
@@ -95,8 +124,6 @@ postgresql:
   password: "password"
   embedding_dim: 384
 
-# MinIO хранится в backend, но секция нужна для единообразного конфига RAG
-# и метаданных по объектам (bucket/object), которые приходят в API.
 minio:
   endpoint: "minio"
   port: 9000
@@ -106,67 +133,54 @@ minio:
   bucket_name: "astrachat-temp"
   documents_bucket_name: "astrachat-documents"
 
-# Параметры поиска
 rag:
   enabled: true
 
-  # --- Гибридный поиск (BM25 + вектор через weighted RRF) ---
   use_hybrid_search: true
   hybrid_bm25_weight: 0.35
-  # Отдельная диверсификация после RRF. Не зависит от cosine-порогов:
-  # сначала сохраняет не более N чанков одного документа, при нехватке
-  # кандидатов ослабляет лимит, чтобы вернуть запрошенный top-k.
   hybrid_diversify_results: true
-  hybrid_max_chunks_per_document: 2
-  # Максимум чанков одного документа в выдаче чистого vector-поиска (0 = выкл).
-  # 6 = половина от k=12: большой связный кусок сохраняется целиком,
-  # но половина слотов гарантированно достаётся другим документам.
-  # Приоритет: env RAG_VECTOR_MAX_CHUNKS_PER_DOCUMENT > этот ключ > дефолт.
-  vector_max_chunks_per_document: 6
+  # 0 = без лимита на документ (нет вытеснения чанков одного большого файла).
+  hybrid_max_chunks_per_document: 0
+  vector_max_chunks_per_document: 0
 
-  # --- Реранкинг (cross-encoder через SVC-RAG-MODELS) ---
+  # Сколько BM25-индексов держать в памяти одновременно. Индекс строится на
+  # (набор документов, размерность) и живёт до перезапуска пода: без предела
+  # каждый когда-либо искавшийся агент или проект держал бы свой корпус в RAM
+  # навсегда. Вытесненный собирается заново при следующем обращении.
+  #
+  # Считать так: размер типичного индекса умножить на это число.
+  #   3 тыс. чанков (30 файлов по 100)  ~  6 МБ
+  #   20 тыс. чанков                    ~ 40 МБ
+  #   50 тыс. чанков                    ~ 100 МБ
+  # Лучше, чтобы все рабочие агенты и проекты помещались: иначе кэш начнёт
+  # перестраивать их по кругу.
+  #
+  # ENV перекрывает: RAG_BM25_INDEX_CACHE_SIZE
+  bm25_index_cache_size: 32
+
   use_reranking: true
   rerank_top_k: 40
-  # Минимальный скор после реранка (0 = не отсекать; формула: 0.7*CrossEncoder + 0.3*cosine).
-  # Положительные значения могут выбросить все чанки — подбирайте осторожно.
   rerank_min_score: 0
 
-  # --- Минимальное косинусное сходство до реранка ---
-  # Отсекает явно нерелевантные чанки из pgvector до отправки в cross-encoder.
-  # 0 = не фильтровать; 0.25 = агрессивная фильтрация.
-  # Для мультиязычных / PDF/OCR корпусов рекомендуется НЕ ставить выше 0.10,
-  # иначе на «правильных» чанках с косинусом 0.12–0.18 ответ останется пустым.
-  # Если совсем всё ниже порога — сработает rescue top-N (см. filter_by_min_vector_similarity).
   min_vector_similarity: 0.05
-  # Порог минимальной длины чанка для «low_signal»-фильтра. 0 = не фильтровать вовсе.
-  # 40 — безопасный минимум, не выкидывает короткие Q/A, определения, заголовки из таблиц.
   min_chunk_length: 40
 
-  # --- Чанкинг ---
   chunk_size: 1000
   chunk_overlap: 250
 
-  # --- Sentence window (расширение найденного чанка соседями) ---
-  # 0 = выкл; 1 = чанк + по 1 соседу слева/справа.
-  # При k=5 и overlap=250 чанки уже перекрываются — window не нужен, только раздувает контекст.
   sentence_window: 0
 
-  # --- Иерархическое индексирование (только global store) ---
-  # Включается для документов длиннее hierarchical_threshold символов.
   use_hierarchical_indexing: true
   hierarchical_threshold: 8000
   hierarchical_chunk_size: 1500
   hierarchical_chunk_overlap: 200
   intermediate_summary_chunks: 8
-  # Суммаризировать документ через LLM при индексации (требует работающего llm-service).
   create_full_summary_via_llm: true
 
-  # --- Graph RAG ---
   enable_graph_rag: true
   eval_llm_judge_allowed: true
 
-  # ANN pgvector: hnsw (дефолт) | ivfflat. Env: RAG_VECTOR_INDEX_METHOD
-  # При смене метода неактивный индекс снимается; данные векторов не трогаются.
+  # ANN pgvector: hnsw (дефолт) | ivfflat. K8s: RAG_VECTOR_INDEX_METHOD
   vector_index_method: hnsw
   vector_ivfflat_lists: 100
   vector_ivfflat_probes: 10

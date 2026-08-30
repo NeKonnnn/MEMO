@@ -259,6 +259,41 @@ async def get_conversations(current_user: Annotated[dict, Depends(get_current_us
     return {"conversations": result, "count": len(result)}
 
 
+@router.get("/api/conversations/{conversation_id}")
+async def get_conversation(
+    conversation_id: str, current_user: Annotated[dict, Depends(get_current_user)]
+):
+    """Один диалог целиком — для гидратации после выгрузки сообщений из RAM на фронте."""
+    repo = get_conversation_repository()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="MongoDB repository не доступен")
+    conv = await repo.get_conversation(conversation_id)
+    if conv is None:
+        raise HTTPException(status_code=404, detail="Диалог не найден")
+    if conv.user_id != current_user["user_id"]:
+        raise HTTPException(status_code=403, detail="Нет доступа к этому диалогу")
+    return {
+        "conversation": {
+            "conversation_id": conv.conversation_id,
+            "title": conv.title,
+            "created_at": conv.created_at.isoformat() if conv.created_at else None,
+            "updated_at": conv.updated_at.isoformat() if conv.updated_at else None,
+            "project_id": conv.project_id,
+            "metadata": conv.metadata or {},
+            "messages": [
+                {
+                    "message_id": msg.message_id,
+                    "role": msg.role,
+                    "content": msg.content,
+                    "timestamp": msg.timestamp.isoformat() if msg.timestamp else None,
+                    "metadata": msg.metadata or {},
+                }
+                for msg in conv.messages or []
+            ],
+        }
+    }
+
+
 @router.delete("/api/conversations")
 async def delete_all_conversations(request: Request, current_user: Annotated[dict, Depends(get_current_user)]):
     repo = get_conversation_repository()
@@ -348,6 +383,31 @@ async def archive_conversation(
         extra={"cs2": conversation_id, "cs2Label": "ConversationId"},
     )
     return {"success": True, "conversation_id": conversation_id, "archived": True}
+
+
+@router.post("/api/conversations/{conversation_id}/unarchive")
+async def unarchive_conversation(
+    conversation_id: str, request: Request, current_user: Annotated[dict, Depends(get_current_user)]
+):
+    repo = get_conversation_repository()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="MongoDB repository не доступен")
+    conv = await repo.get_conversation(conversation_id)
+    if conv is None:
+        raise HTTPException(status_code=404, detail="Диалог не найден")
+    if conv.user_id != current_user["user_id"]:
+        raise HTTPException(status_code=403, detail="Нет доступа к этому диалогу")
+    metadata = dict(conv.metadata or {})
+    metadata["archived"] = False
+    await repo.update_conversation(conversation_id, {"metadata": metadata})
+    log_cef_event(
+        "CNV002",
+        request=request,
+        current_user=current_user,
+        status_code=200,
+        extra={"cs2": conversation_id, "cs2Label": "ConversationId"},
+    )
+    return {"success": True, "conversation_id": conversation_id, "archived": False}
 
 
 @router.post("/api/conversations/{conversation_id}/duplicate")

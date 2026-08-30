@@ -9,6 +9,7 @@ import {
 
 interface Props {
   content: string;
+  isStreaming?: boolean;
 }
 
 const MERMAID_INIT = {
@@ -67,7 +68,7 @@ async function tryRender(
   return svg;
 }
 
-export default function ArtifactMermaidPreview({ content }: Props) {
+export default function ArtifactMermaidPreview({ content, isStreaming = false }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const reactId = useId().replace(/:/g, '');
   const [error, setError] = useState<string | null>(null);
@@ -76,6 +77,8 @@ export default function ArtifactMermaidPreview({ content }: Props) {
   useEffect(() => {
     let cancelled = false;
     let renderId = `mermaid-${reactId}-pending`;
+    // На стриме ждём дольше — иначе mermaid.render на каждый кусок раздувает DOM.
+    const delay = isStreaming ? 900 : 280;
     const timer = window.setTimeout(() => {
       renderId = `mermaid-${reactId}-${Date.now()}`;
 
@@ -139,14 +142,15 @@ export default function ArtifactMermaidPreview({ content }: Props) {
       };
 
       void run();
-    }, 280);
+    }, delay);
 
     return () => {
       cancelled = true;
       window.clearTimeout(timer);
       cleanupMermaidDomJunk(renderId);
+      if (hostRef.current) hostRef.current.innerHTML = '';
     };
-  }, [content, reactId]);
+  }, [content, reactId, isStreaming]);
 
   useEffect(() => {
     cleanupMermaidDomJunk(`mermaid-${reactId}-boot`);

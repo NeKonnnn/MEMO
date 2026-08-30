@@ -67,8 +67,8 @@ export default function ModelsSettings() {
   const skipNextAutosaveRef = useRef(false);
 
   const [maxValues, setMaxValues] = useState({
-    context_size: 32768,
-    output_tokens: 8192,
+    context_size: 1000000,
+    output_tokens: 1000000,
     batch_size: 2048,
     n_threads: 24,
     temperature: 2.0,

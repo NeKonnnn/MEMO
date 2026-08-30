@@ -15,7 +15,7 @@ from app.database.project_rag_repository import (
 )
 from app.database.models import Document, DocumentVector
 from app.database.graph_repository import GraphRepository
-from app.services.bm25_index import InMemoryBm25Index
+from app.services.bm25_index import InMemoryBm25Index, Bm25IndexCache
 from app.services.chunker import (
     normalize_chunking_strategy,
     resolve_chunk_params,
@@ -83,9 +83,9 @@ class ProjectRagService:
         self.vector_repo = vector_repo
         self.rag_client = rag_models_client
         self.graph_repo = graph_repo
-        # BM25 индексы по (project_id, dim): lexical/hybrid не тянут чужие проекты
-        # и не смешивают таблицы разных размерностей.
-        self._bm25_by_key: Dict[Tuple[str, int], InMemoryBm25Index] = {}
+        # Кэш с вытеснением, а не обычный словарь: сервис - синглтон на процесс
+        # Размер - RAG_BM25_INDEX_CACHE_SIZE.
+        self._bm25_by_key = Bm25IndexCache(get_settings().rag.bm25_index_cache_size)
 
     async def _route(self, model=None, provider=None):
         """Профиль эмбеддинга (клиент + имя модели + dim) и репозиторий нужной таблицы.
@@ -115,15 +115,14 @@ class ProjectRagService:
         repo = repo or self.vector_repo
         dim = int(getattr(repo, "embedding_dim", 0) or 0)
         key = (project_id, dim)
-        idx = self._bm25_by_key.get(key)
-        if idx is None:
-
+        
+        def _make() -> InMemoryBm25Index:
             async def _fetch():
                 return await repo.get_all_contents_for_bm25(project_id=project_id)
 
-            idx = InMemoryBm25Index(_fetch)
-            self._bm25_by_key[key] = idx
-        return idx
+            return InMemoryBm25Index(_fetch)
+
+        return self._bm25_by_key.get_or_create(key, _make)
 
     def _mark_bm25_dirty(self, project_id: Optional[str] = None) -> None:
         if project_id:
@@ -213,7 +212,7 @@ class ProjectRagService:
         if doc_id is None:
             timer.log(logger)
             return {"ok": False, "error": "Ошибка сохранения документа в БД", "document_id": None}
-
+        
         # Пометка для логов гардрейла: клиент видит только список строк, имя
         # файла и id документа до него не доезжают. Ставим до ветвления, чтобы
         # покрыть и иерархическую индексацию, и обычную.
@@ -378,7 +377,6 @@ class ProjectRagService:
         prof, repo = route if route else await self._route(model, provider)
         # Удаление обходит ВСЕ таблицы (B2b) — при смене модели старые вектора
         # лежат в таблице прежней размерности и должны уйти.
-        await repo.delete_vectors_by_document(document_id)
         # Пометка для логов гардрейла: клиент видит только список строк, имя
         # файла и id документа до него не доезжают. Ставим до ветвления, чтобы
         # покрыть и иерархическую индексацию, и обычную.
@@ -389,6 +387,7 @@ class ProjectRagService:
             document_id=document_id,
             filename=filename,
         )
+        await repo.delete_vectors_by_document(document_id)
         strategy = (chunking_strategy or "universal").strip().lower()
         if strategy == "hierarchical":
             from app.services.hierarchical_indexing import index_document_hierarchically
@@ -490,7 +489,7 @@ class ProjectRagService:
                 )
                 n_docs += 1
                 n_chunks += c
-                logger.info(
+                logger.debug(
                     "[REINDEX project=%s] '%s' (id=%s, owner=%s, uploader=%s) чанков=%s",
                     project_id,
                     _doc_actors(d)[2],
@@ -576,7 +575,7 @@ class ProjectRagService:
                     pid = d.get("project_id")
                     if pid:
                         seen_projects.add(pid)
-                    logger.info(
+                    logger.debug(
                         "[REINDEX project owner=%s] '%s' doc=%s чанков=%s",
                         owner_user_id,
                         _doc_actors(d)[2],
@@ -791,6 +790,14 @@ class ProjectRagService:
                 await self.graph_repo.delete_document_graph("project", document_id)
             except Exception:
                 pass
+        # Для CEF INT005/INT006 по чанкам ставим контекст ДО удаления векторов.
+        set_embed_log_context(
+            store="project",
+            operation="delete",
+            project_id=meta.get("project_id") or doc.get("project_id"),
+            document_id=document_id,
+            filename=doc.get("filename"),
+        )
         await self.vector_repo.delete_vectors_by_document(document_id)
         await self.doc_repo.delete_document(document_id)
         self._mark_bm25_dirty(str(meta.get("project_id") or "") or None)
@@ -817,9 +824,8 @@ class ProjectRagService:
             if (d["metadata"] or {}).get("minio_object")
         ]
         deleted_count = await self.doc_repo.delete_documents_by_project(project_id)
-        self._mark_bm25_dirty(project_id)
-        for key in [k for k in self._bm25_by_key if k[0] == project_id]:
-            self._bm25_by_key.pop(key, None)
+        # Проекта больше нет - индексы не помечаем грязными, а убираем совсем
+        self._bm25_by_key.drop(lambda k: k[0] == project_id)
         logger.info(
             "project_rag: удалено %s документов для project_id=%s",
             deleted_count,

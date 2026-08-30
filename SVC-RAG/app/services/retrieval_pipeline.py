@@ -338,7 +338,7 @@ async def run_retrieval_pipeline(
         seen: set = set()
         filename_doc_ids = [d for d in filename_doc_ids if _keep_doc(d) and not (d in seen or seen.add(d))]
         if filename_doc_ids:
-            logger.info(
+            logger.debug(
                 "[%s] filename_anchor: query mentions %s → document_ids=%s",
                 store,
                 filename_mentions,
@@ -911,7 +911,7 @@ async def run_retrieval_pipeline(
                             entity_hits.append((dv, sc))
                             existing.add((dv.document_id, dv.chunk_index))
                     if ilike_hits:
-                        logger.info(
+                        logger.debug(
                             "[%s] entity_lane ILIKE(raw): tokens %s → %d чанков",
                             store,
                             lookup_tokens,
@@ -965,7 +965,7 @@ async def run_retrieval_pipeline(
                         added += 1
                 entity_filename_hits_n = added
                 if added:
-                    logger.info(
+                    logger.debug(
                         "[%s] entity_lane filename-match: tokens %s → filenames of docs %s → +%d chunks",
                         store,
                         entity_tokens,

@@ -22,6 +22,7 @@ import {
   SKILL_SELECTION_CHANGED_EVENT,
   toggleActiveSkill,
 } from '../utils/skillSelectionStorage';
+import { formatAuthorLabel } from '../utils/formatAuthorLabel';
 
 interface SkillRow {
   id: number;
@@ -34,6 +35,7 @@ interface SkillRow {
   always_apply?: boolean;
   is_shared_with_me?: boolean;
   author_name?: string;
+  author_full_name?: string | null;
 }
 
 interface ChatGearSkillsPanelProps {
@@ -249,7 +251,7 @@ export default function ChatGearSkillsPanel({ isDarkMode, chatId }: ChatGearSkil
                     >
                       ${skill.slug}
                       {skill.is_shared_with_me
-                        ? ` · от ${skill.author_name || 'коллеги'}`
+                        ? ` · от ${formatAuthorLabel(skill.author_name, skill.author_full_name) || 'коллеги'}`
                         : ''}
                     </Typography>
                   </Box>

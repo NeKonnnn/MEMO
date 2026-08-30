@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import {
   Dialog,
   DialogTitle,
@@ -31,6 +31,8 @@ import {
 import { getApiUrl, API_ENDPOINTS, getAuthFetchHeaders } from '../config/api';
 import { useAppActions } from '../contexts/AppContext';
 import { ragDocumentDisplayIndex } from '../utils/ragDocumentDisplayIndex';
+import { filterByRagFilenameQuery } from '../utils/ragFilesSearch';
+import RagFilesSearchField from './RagFilesSearchField';
 import RagUploadingFileThumb from './RagUploadingFileThumb';
 import {
   commitRagUploadUiUpdate,
@@ -85,6 +87,7 @@ export default function MemoryRagLibraryModal({ open, onClose }: Props) {
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [pendingUploads, setPendingUploads] = useState<RagPendingUpload[]>([]);
+  const [fileSearchQuery, setFileSearchQuery] = useState('');
   const [banner, setBanner] = useState<{
     message: string;
     severity: 'success' | 'error' | 'info';
@@ -94,9 +97,22 @@ export default function MemoryRagLibraryModal({ open, onClose }: Props) {
   const notifyRef = useRef(showNotification);
   notifyRef.current = showNotification;
 
+  const filteredPendingUploads = useMemo(
+    () => filterByRagFilenameQuery(pendingUploads, fileSearchQuery),
+    [pendingUploads, fileSearchQuery],
+  );
+  const filteredDocuments = useMemo(
+    () => filterByRagFilenameQuery(documents, fileSearchQuery),
+    [documents, fileSearchQuery],
+  );
+  const totalFiles = documents.length + pendingUploads.length;
+  const filteredTotal = filteredDocuments.length + filteredPendingUploads.length;
+  const hasActiveFileSearch = fileSearchQuery.trim().length > 0;
+
   useEffect(() => {
     if (!open) {
       setBanner(null);
+      setFileSearchQuery('');
       return;
     }
     let cancelled = false;
@@ -338,8 +354,17 @@ export default function MemoryRagLibraryModal({ open, onClose }: Props) {
         </Box>
 
         <Typography variant="subtitle2" gutterBottom>
-          Проиндексированные документы ({documents.length + pendingUploads.length})
+          Проиндексированные документы (
+          {hasActiveFileSearch ? `${filteredTotal} из ${totalFiles}` : totalFiles})
         </Typography>
+        {totalFiles > 0 && (
+          <RagFilesSearchField
+            value={fileSearchQuery}
+            onChange={setFileSearchQuery}
+            totalCount={totalFiles}
+            disabled={loading}
+          />
+        )}
         {loading ? (
           <LinearProgress />
         ) : documents.length === 0 && pendingUploads.length === 0 ? (
@@ -347,9 +372,13 @@ export default function MemoryRagLibraryModal({ open, onClose }: Props) {
             Пока нет документов. После загрузки включите «Учитывать в ответах чата» здесь в настройках или кнопку
             «Общий RAG» в чате.
           </Typography>
+        ) : filteredTotal === 0 ? (
+          <Typography color="text.secondary" variant="body2">
+            Ничего не найдено по запросу «{fileSearchQuery.trim()}».
+          </Typography>
         ) : (
           <List dense disablePadding>
-            {pendingUploads.map((pending) => (
+            {filteredPendingUploads.map((pending) => (
               <ListItem
                 key={pending.clientId}
                 sx={{ borderBottom: 1, borderColor: 'divider' }}
@@ -363,7 +392,7 @@ export default function MemoryRagLibraryModal({ open, onClose }: Props) {
                 />
               </ListItem>
             ))}
-            {documents.map((doc) => (
+            {filteredDocuments.map((doc) => (
               <ListItem
                 key={doc.id}
                 secondaryAction={

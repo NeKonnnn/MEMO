@@ -2,8 +2,10 @@ import React, { useMemo } from 'react';
 import { Box } from '@mui/material';
 import {
   isGpbPresentationHtml,
+  isGpbPresentationStreaming,
 } from '../../utils/presentationViewer';
 import { rewriteHtmlArtifactScriptsForOffline } from '../../utils/htmlArtifactScripts';
+import { useCommittedContent } from '../../hooks/useCommittedContent';
 import InlinePresentationViewer from '../InlinePresentationViewer';
 
 function escapeForSrcDoc(html: string): string {
@@ -39,11 +41,14 @@ interface Props {
 }
 
 export default function ArtifactHtmlPreview({ content, isStreaming = false }: Props) {
-  // Только реальные GPB-слайды → presentation viewer.
-  // Обычный HTML (графики, страницы) всегда в iframe внутри артефакта.
-  const isPresentation = isGpbPresentationHtml(content);
+  // Во время стрима — chrome презентации сразу (спиннер), не сырой HTML/код.
+  const isPresentation =
+    isGpbPresentationHtml(content) ||
+    (isStreaming && isGpbPresentationStreaming(content));
 
-  const srcDoc = useMemo(() => buildGenericHtmlSrcDoc(content || ''), [content]);
+  // Chart.js/iframe: не пересоздаём документ на каждый токен.
+  const committed = useCommittedContent(content || '', isStreaming, 500);
+  const srcDoc = useMemo(() => buildGenericHtmlSrcDoc(committed), [committed]);
 
   if (isPresentation) {
     return (

@@ -1,7 +1,24 @@
 /**
  * Прототип базы знаний для виджета поддержки.
- * Позже статьи переедут в RAG (отдельная коллекция / KB) или markdown в репозитории.
+ * Контент статей — в knowledgeArticles.json; здесь только типы и матчинг.
+ * Медиа: public/static/user_documentation/{screens|gif}/
  */
+
+import kb from './knowledgeArticles.json';
+
+/** Базовый URL статики (папка public/ раздаётся как корень сайта). */
+export const DOC_MEDIA_BASE = '/static/user_documentation';
+
+export type SupportMediaKind = 'screen' | 'gif';
+
+export type SupportMedia = {
+  /** screen → screens/, gif → gif/ */
+  kind: SupportMediaKind;
+  /** Имя файла внутри screens/ или gif/ */
+  file: string;
+  alt?: string;
+  caption?: string;
+};
 
 export type SupportArticle = {
   id: string;
@@ -12,76 +29,21 @@ export type SupportArticle = {
   steps: string[];
   /** Опционально: куда смотреть на экране */
   uiHints?: string[];
+  /** Скриншоты (png) и анимации (gif) к статье */
+  media?: SupportMedia[];
 };
 
-export const SUPPORT_ARTICLES: SupportArticle[] = [
-  {
-    id: 'create-chat',
-    keywords: ['чат', 'новый чат', 'создать чат', 'начать диалог', 'переписка'],
-    title: 'Как создать новый чат',
-    steps: [
-      'В левой панели найдите кнопку «Новый чат» (обычно вверху списка чатов).',
-      'Нажмите на неё — откроется пустой диалог.',
-      'Введите сообщение в поле ввода внизу и отправьте.',
-    ],
-    uiHints: ['Левая боковая панель → «Новый чат»', 'Поле ввода внизу рабочей зоны'],
-  },
-  {
-    id: 'settings',
-    keywords: ['настройки', 'параметры', 'тема', 'тёмная', 'светлая', 'settings'],
-    title: 'Как открыть настройки',
-    steps: [
-      'Откройте левую панель, если она скрыта.',
-      'Найдите пункт «Настройки» (или нажмите горячую клавишу Alt+S).',
-      'Выберите нужный раздел: интерфейс, модели, RAG и т.д.',
-    ],
-    uiHints: ['Левая панель → Настройки', 'Горячая клавиша Alt+S'],
-  },
-  {
-    id: 'knowledge-base',
-    keywords: ['база знаний', 'бз', 'документы', 'загрузить файл', 'rag', 'knowledge'],
-    title: 'Как работать с Базой знаний',
-    steps: [
-      'Откройте инструменты у поля ввода чата (иконка шестерёнки / «Инструменты»).',
-      'Подключите Базу знаний или загрузите документы в раздел БЗ.',
-      'Задайте вопрос в чате — модель ответит с опорой на загруженные материалы.',
-    ],
-    uiHints: ['Поле ввода → Инструменты → База знаний'],
-  },
-  {
-    id: 'agents',
-    keywords: ['агент', 'агенты', 'конструктор', 'gallery', 'галерея агентов'],
-    title: 'Как выбрать или настроить агента',
-    steps: [
-      'Откройте «Инструменты» у поля ввода.',
-      'Перейдите в раздел «Агенты».',
-      'Выберите своего агента или откройте галерею / конструктор для настройки.',
-    ],
-    uiHints: ['Поле ввода → Инструменты → Агенты'],
-  },
-  {
-    id: 'support-widget',
-    keywords: ['помощь', 'поддержка', 'справка', 'help', 'инструкция', 'как пользоваться'],
-    title: 'Как пользоваться этим помощником',
-    steps: [
-      'Нажмите круглую кнопку помощи в правом нижнем углу.',
-      'Опишите задачу своими словами, например: «как создать чат».',
-      'Следуйте шагам в ответе. Окно можно свернуть той же кнопкой.',
-    ],
-    uiHints: ['Правый нижний угол экрана → кнопка помощи'],
-  },
-];
-
-const FALLBACK: SupportArticle = {
-  id: 'fallback',
-  keywords: [],
-  title: 'Не нашёл точную инструкцию',
-  steps: [
-    'Попробуйте переформулировать вопрос короче, например: «настройки», «новый чат», «база знаний», «агент».',
-    'В прототипе поиск идёт по ключевым словам без LLM — позже ответ будет строить модель по полной базе инструкций.',
-  ],
-  uiHints: ['Правый нижний угол → виджет поддержки'],
+const MEDIA_SUBDIR: Record<SupportMediaKind, string> = {
+  screen: 'screens',
+  gif: 'gif',
 };
+
+export function mediaUrl(item: SupportMedia): string {
+  return `${DOC_MEDIA_BASE}/${MEDIA_SUBDIR[item.kind]}/${item.file}`;
+}
+
+export const SUPPORT_ARTICLES: SupportArticle[] = kb.articles as SupportArticle[];
+const FALLBACK: SupportArticle = kb.fallback as SupportArticle;
 
 /** Простой матчер для прототипа (без LLM). */
 export function findSupportArticle(question: string): SupportArticle {
@@ -115,6 +77,16 @@ export function formatArticleReply(article: SupportArticle): string {
   if (article.uiHints?.length) {
     lines.push('', '_Куда смотреть:_');
     article.uiHints.forEach((hint) => lines.push(`• ${hint}`));
+  }
+  if (article.media?.length) {
+    lines.push('');
+    for (const item of article.media) {
+      const alt = item.alt || item.caption || item.file;
+      if (item.caption) {
+        lines.push(`_${item.caption}_`);
+      }
+      lines.push(`![${alt}](${mediaUrl(item)})`, '');
+    }
   }
   return lines.join('\n');
 }

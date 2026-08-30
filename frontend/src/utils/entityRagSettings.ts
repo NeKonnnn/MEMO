@@ -28,7 +28,10 @@ export interface EntityRagDraft {
 
 export type EntityRagScope = 'agent' | 'project';
 
-type SaveResult = { ok: true } | { ok: false; message: string };
+type SaveResult =
+  /** reindexed — backend поставил перечанковку: включаем частый опрос. */
+  | { ok: true; reindexed: boolean }
+  | { ok: false; message: string };
 
 /**
  * Записать черновик в настройки сущности.
@@ -86,11 +89,15 @@ export async function saveEntityRagSettings(opts: {
   });
 
   if (response.ok) {
+    // Перечанковку решает backend, и он же сообщает о ней полем reindexed.
+    // Без этого вызывающий не знает, что пора учащать опрос статуса, и плашка
+    // всплывает только на следующем тике.
+    const saved = await response.json().catch(() => ({}));
     const label = opts.scope === 'agent' ? 'агента' : 'проекта';
     console.debug(
       `[RAG] Настройки ${label} «${opts.entityName}» (id=${opts.entityId}) сохранены`,
     );
-    return { ok: true };
+    return { ok: true, reindexed: Boolean(saved?.reindexed) };
   }
 
   if (response.status === 403) {

@@ -233,6 +233,7 @@ export function mapServerConversationToChat(conversation: any): Chat {
     createdAt: String(conversation?.created_at || new Date().toISOString()),
     updatedAt: String(conversation?.updated_at || new Date().toISOString()),
     projectId: conversation?.project_id ? String(conversation.project_id) : undefined,
+    isArchived: Boolean(conversation?.metadata?.archived),
     ...(conversation?.metadata?.hidden_from_sidebar_until_user_message
       ? { hiddenFromSidebarUntilUserMessage: true }
       : {}),

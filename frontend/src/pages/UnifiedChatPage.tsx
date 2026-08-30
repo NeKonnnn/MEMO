@@ -1,4 +1,6 @@
 import React, { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo } from 'react';
+import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso';
+import { astra185Mark, astra185MarkRender } from '../utils/debugReact185';
 import {
   Box,
   TextField,
@@ -28,6 +30,7 @@ import {
   Checkbox,
   FormControlLabel,
   Paper,
+  CircularProgress,
 } from '@mui/material';
 import { useAuth } from '../contexts/AuthContext';
 import {
@@ -87,7 +90,6 @@ import ChatGearAgentsPanel from '../components/ChatGearAgentsPanel';
 import ChatGearMcpPanel from '../components/ChatGearMcpPanel';
 import ChatGearCodingPanel from '../components/ChatGearCodingPanel';
 import ChatGearGenerationPanel from '../components/ChatGearGenerationPanel';
-import { enableCodingFromGearPanel } from '../coding/selectionStorage';
 import {
   isAnyGenerationModeEnabled,
   isImageGenerationModeEnabled,
@@ -172,6 +174,7 @@ import {
 } from '../utils/modelThinking';
 import { applyAgentMcpToChat, applyStoredAgentMcpToChat } from '../utils/applyAgentMcp';
 import AgentChainUpdate from '../components/chat/AgentChainUpdate';
+import ThinkingShimmerText from '../components/chat/ThinkingShimmerText';
 import { resolveChainRenderSegments } from '../constants/agentChain';
 
 interface UnifiedChatPageProps {
@@ -366,59 +369,9 @@ function ChatThinkingIndicator({
               </Typography>
             </Box>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, minHeight: '24px' }}>
-              <Box sx={{ display: 'flex', gap: 0.5 }}>
-                <Box
-                  sx={{
-                    width: 6,
-                    height: 6,
-                    borderRadius: '50%',
-                    bgcolor: '#2196f3',
-                    animation: 'dot1 1.4s ease-in-out infinite both',
-                    '@keyframes dot1': {
-                      '0%, 80%, 100%': { transform: 'scale(0)' },
-                      '40%': { transform: 'scale(1)' },
-                    },
-                  }}
-                />
-                <Box
-                  sx={{
-                    width: 6,
-                    height: 6,
-                    borderRadius: '50%',
-                    bgcolor: '#2196f3',
-                    animation: 'dot2 1.4s ease-in-out infinite both',
-                    animationDelay: '0.2s',
-                    '@keyframes dot2': {
-                      '0%, 80%, 100%': { transform: 'scale(0)' },
-                      '40%': { transform: 'scale(1)' },
-                    },
-                  }}
-                />
-                <Box
-                  sx={{
-                    width: 6,
-                    height: 6,
-                    borderRadius: '50%',
-                    bgcolor: '#2196f3',
-                    animation: 'dot3 1.4s ease-in-out infinite both',
-                    animationDelay: '0.4s',
-                    '@keyframes dot3': {
-                      '0%, 80%, 100%': { transform: 'scale(0)' },
-                      '40%': { transform: 'scale(1)' },
-                    },
-                  }}
-                />
-              </Box>
-              <Typography
-                variant="body2"
-                sx={{
-                  color: isDarkMode ? 'rgba(255, 255, 255, 0.8)' : 'rgba(0, 0, 0, 0.8)',
-                  fontSize: '0.875rem',
-                }}
-              >
-                думает...
-                {timerLabel ? `\u00A0${timerLabel}` : ''}
-              </Typography>
+              <ThinkingShimmerText isDarkMode={isDarkMode} fontSize="0.875rem" fontWeight={500}>
+                {timerLabel ? `думает...\u00A0${timerLabel}` : 'думает...'}
+              </ThinkingShimmerText>
             </Box>
           </CardContent>
         </Card>
@@ -507,6 +460,8 @@ interface MessageCardData {
 interface MessageCardProps {
   message: Message;
   index: number;
+  /** Индекс в полном массиве messages — для навигации по вопросам. */
+  navIndex: number;
   isPairStart: boolean;
   isSelected: boolean;
   nextMessageId: string | null;
@@ -555,12 +510,6 @@ const ReasoningBlock = React.memo(({
   };
   const isDark = isDarkMode;
   const titleColor = isDark ? 'rgba(255,255,255,0.9)' : 'rgba(0,0,0,0.85)';
-  // Серый акцент для «Думает…» (анимация волны без фиолетового).
-  const thinkDim = isDark ? 'rgba(255,255,255,0.42)' : 'rgba(0,0,0,0.38)';
-  const thinkBright = isDark ? 'rgba(255,255,255,0.88)' : 'rgba(0,0,0,0.72)';
-  const thinkGlow = isDark
-    ? '0 0 10px rgba(255,255,255,0.18)'
-    : '0 0 8px rgba(0,0,0,0.12)';
   const contentColor = isDark ? 'rgba(255,255,255,0.82)' : 'rgba(0,0,0,0.78)';
 
   const headerLabel =
@@ -585,36 +534,8 @@ const ReasoningBlock = React.memo(({
     '&:hover': { opacity: 0.75 },
   };
 
-  const thinkingSegments = isThinkingStreaming ? Array.from(headerLabel) : [];
-  const letterWavePeriodSec = 1.45;
-  const letterCount = Math.max(thinkingSegments.length, 1);
-
   return (
-    <Box
-      sx={{
-        mb: 1.5,
-        '@keyframes reasoningLetterWave': {
-          '0%, 100%': {
-            opacity: 0.42,
-            color: thinkDim,
-            textShadow: 'none',
-            transform: 'translateY(0)',
-          },
-          '22%': {
-            opacity: 1,
-            color: thinkBright,
-            textShadow: thinkGlow,
-            transform: 'translateY(-0.4px)',
-          },
-          '44%': {
-            opacity: 0.42,
-            color: thinkDim,
-            textShadow: 'none',
-            transform: 'translateY(0)',
-          },
-        },
-      }}
-    >
+    <Box sx={{ mb: 0, pb: 1.5 }}>
       {/* Заголовок — как у «Выполнен поиск по документам» */}
       <Box
         onMouseDown={pauseAutoScrollForInteraction}
@@ -629,33 +550,9 @@ const ReasoningBlock = React.memo(({
         aria-label={`${headerLabel}. ${isExpanded ? 'Свернуть' : 'Раскрыть'} блок рассуждений`}
       >
         {isThinkingStreaming ? (
-          <Box
-            component="span"
-            sx={{
-              fontWeight: 400,
-              fontSize: '0.9rem',
-              lineHeight: 1.35,
-              display: 'inline-flex',
-              flexWrap: 'wrap',
-              alignItems: 'baseline',
-              columnGap: 0,
-            }}
-          >
-            {thinkingSegments.map((ch, i) => (
-              <Box
-                key={`r-${i}`}
-                component="span"
-                sx={{
-                  display: 'inline-block',
-                  minWidth: ch === '\u00A0' ? '0.25em' : undefined,
-                  animation: `reasoningLetterWave ${letterWavePeriodSec}s ease-in-out infinite`,
-                  animationDelay: `${(i * letterWavePeriodSec) / letterCount}s`,
-                }}
-              >
-                {ch}
-              </Box>
-            ))}
-          </Box>
+          <ThinkingShimmerText isDarkMode={isDark} fontSize="0.9rem" fontWeight={400}>
+            {headerLabel}
+          </ThinkingShimmerText>
         ) : (
           <Typography variant="body2" sx={{ fontWeight: 400, fontSize: '0.9rem', lineHeight: 1.35, color: titleColor }}>
             {headerLabel}
@@ -727,71 +624,34 @@ const ReasoningBlock = React.memo(({
   );
 });
 
-function ChatImageGenerationIndicator({
-  leftAlignMessages,
-  widescreenMode,
-  startedAtMs,
-  mediaKind = 'image',
-}: {
-  isDarkMode: boolean;
-  leftAlignMessages: boolean;
-  widescreenMode: boolean;
-  startedAtMs?: number | null;
-  mediaKind?: 'image' | 'video';
-}) {
-  const elapsedSec = useElapsedSeconds(startedAtMs, true);
-  const timerLabel =
-    elapsedSec !== null && elapsedSec > 0 ? formatGenerationDuration(elapsedSec) : null;
-  const label = mediaKind === 'video' ? 'видео' : 'изображение';
+/** Обычный запас viewport (слишком большой padding сам провоцировал пустой кадр). */
+const VIRTUOSO_VIEWPORT_PADDING = { top: 200, bottom: 200 } as const;
 
+const virtuosoMessagesEndRefHolder: {
+  current: React.RefObject<HTMLDivElement | null> | null;
+} = { current: null };
+
+/** Footer Virtuoso: нижний спейсер (Grok-style) + якорь скролла. */
+type VirtuosoListContext = {
+  bottomSpacerPx: number;
+};
+
+function VirtuosoMessagesEndAnchor({ context }: { context?: VirtuosoListContext }) {
+  const spacer = context?.bottomSpacerPx ?? 0;
   return (
-    <Box
-      sx={{
-        width: '100%',
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: leftAlignMessages ? 'flex-start' : 'flex-start',
-        mb: 1.5,
-      }}
-    >
-      <Box
-        sx={{
-          display: 'flex',
-          alignItems: 'center',
-          mb: 0.75,
-          width: '100%',
-          maxWidth: widescreenMode ? '100%' : '75%',
-        }}
-      >
-        <Avatar
-          src="/astra.png"
-          sx={{ width: 24, height: 24, mr: 1, bgcolor: 'transparent' }}
-        />
-        <Typography variant="caption" sx={{ opacity: 0.8, fontSize: '0.75rem', fontWeight: 500 }}>
-          AstraChat
-        </Typography>
-        <Typography
-          variant="caption"
-          sx={{
-            ml: 1,
-            opacity: 0.65,
-            fontSize: '0.7rem',
-            fontWeight: 500,
-            color: 'text.secondary',
-          }}
-        >
-          {timerLabel ? `генерирует ${label} ${timerLabel}` : `генерирует ${label}…`}
-        </Typography>
-      </Box>
-      <Box sx={{ width: '100%', maxWidth: widescreenMode ? 520 : 420 }}>
-        <ImageGenerationPlaceholder maxWidth="100%" />
-      </Box>
-    </Box>
+    <>
+      {spacer > 0 ? (
+        <div aria-hidden style={{ height: spacer, flex: '0 0 auto', width: '100%' }} />
+      ) : null}
+      <div ref={virtuosoMessagesEndRefHolder.current ?? undefined} style={{ height: 1 }} />
+    </>
   );
 }
 
+const VIRTUOSO_LIST_COMPONENTS = { Footer: VirtuosoMessagesEndAnchor };
+
 const MessageCardComponent = ({
-  message, index, isPairStart, isSelected, nextMessageId,
+  message, index, navIndex, isPairStart, isSelected, nextMessageId,
   shareMode, isSpeaking, isDarkMode, isLastChatMessage, interfaceSettings, username, dataRef,
 }: MessageCardProps): React.ReactElement => {
   const isUser = message.role === 'user';
@@ -848,6 +708,12 @@ const MessageCardComponent = ({
   const assistantInlineAttachments = useMemo(
     () => (isUser ? undefined : getAssistantInlineAttachments(message)),
     [isUser, message],
+  );
+  const showImageGenerationPlaceholder = Boolean(
+    !isUser &&
+      (message.isImageGenerating || message.isVideoGenerating) &&
+      message.isStreaming &&
+      !assistantInlineAttachments?.length,
   );
   const isReasoningStreaming = useMemo(() => {
     if (message.isImageGenerating || message.isVideoGenerating) return false;
@@ -1043,19 +909,30 @@ const MessageCardComponent = ({
               || 'AstraChat')}
         </Typography>
         {!isUser && generationLabel ? (
-          <Typography
-            variant="caption"
-            sx={{
-              ml: 1,
-              opacity: 0.65,
-              fontSize: '0.7rem',
-              fontWeight: 500,
-              color: 'text.secondary',
-              whiteSpace: 'nowrap',
-            }}
-          >
-            {message.isStreaming ? `думает ${generationLabel}` : `думал ${generationLabel}`}
-          </Typography>
+          message.isStreaming ? (
+            <ThinkingShimmerText
+              isDarkMode={isDarkMode}
+              fontSize="0.7rem"
+              fontWeight={500}
+              sx={{ ml: 1, whiteSpace: 'nowrap' }}
+            >
+              {`думает ${generationLabel}`}
+            </ThinkingShimmerText>
+          ) : (
+            <Typography
+              variant="caption"
+              sx={{
+                ml: 1,
+                opacity: 0.65,
+                fontSize: '0.7rem',
+                fontWeight: 500,
+                color: 'text.secondary',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {`думал ${generationLabel}`}
+            </Typography>
+          )
         ) : null}
         <Typography variant="caption" sx={{ ml: 'auto', opacity: 0.6, fontSize: '0.7rem' }}>
           {dataRef.current.formatTimestamp(message.timestamp)}
@@ -1069,6 +946,12 @@ const MessageCardComponent = ({
         {!isUser && message.mcpToolCalls && message.mcpToolCalls.length > 0 && !message.multiLLMResponses?.length && (
           <McpToolCallsPanel toolCalls={message.mcpToolCalls} />
         )}
+
+        {showImageGenerationPlaceholder ? (
+          <Box sx={{ mb: parsedMessage.visibleContent.trim() ? 1 : 0 }}>
+            <ImageGenerationPlaceholder />
+          </Box>
+        ) : null}
 
         {!isUser && assistantInlineAttachments && assistantInlineAttachments.length > 0 && (
           <InlineAttachmentsList
@@ -1430,7 +1313,7 @@ const MessageCardComponent = ({
                 isDarkMode={isDarkMode}
               />
             ) : null}
-            {parsedMessage.visibleContent.trim() ? (
+            {!showImageGenerationPlaceholder || parsedMessage.visibleContent.trim() ? (
               <MessageRenderer
                 content={parsedMessage.visibleContent}
                 isStreaming={message.isStreaming && !isReasoningStreaming}
@@ -1446,9 +1329,9 @@ const MessageCardComponent = ({
 
   return (
     <Box
-      ref={(el: HTMLDivElement | null) => { dataRef.current.messageRefs.current[index] = el; }}
-      data-message-index={index}
-      sx={{ display: 'flex', flexDirection: 'row', alignItems: 'flex-start', mb: 1.5, width: '100%' }}
+      ref={(el: HTMLDivElement | null) => { dataRef.current.messageRefs.current[navIndex] = el; }}
+      data-message-index={navIndex}
+      sx={{ display: 'flex', flexDirection: 'row', alignItems: 'flex-start', mb: 1.5, width: '100%', minWidth: 0, maxWidth: '100%' }}
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
     >
@@ -1466,6 +1349,8 @@ const MessageCardComponent = ({
           flexDirection: 'column',
           alignItems: interfaceSettings.leftAlignMessages ? 'flex-start' : (isUser ? 'flex-end' : 'flex-start'),
           flex: 1,
+          minWidth: 0,
+          maxWidth: '100%',
         }}
       >
         {shouldShowBorder ? (
@@ -1474,20 +1359,21 @@ const MessageCardComponent = ({
             data-theme={isDarkMode ? 'dark' : 'light'}
             sx={{
               maxWidth: interfaceSettings.leftAlignMessages ? '100%' : (isUser ? '75%' : '100%'),
-              minWidth: '180px',
+              minWidth: isUser ? '180px' : 0,
               width: interfaceSettings.leftAlignMessages ? '100%' : (isUser ? undefined : '100%'),
+              overflowX: 'hidden',
               backgroundColor: isUser ? 'primary.main' : isDarkMode ? 'background.paper' : '#f8f9fa',
               color: isUser ? 'primary.contrastText' : isDarkMode ? 'text.primary' : '#333',
               boxShadow: isDarkMode ? '0 2px 8px rgba(0,0,0,0.15)' : '0 2px 8px rgba(0,0,0,0.1)',
             }}
           >
-            <CardContent sx={{ p: 1.2, '&:last-child': { pb: 1.2 } }}>
+            <CardContent sx={{ p: 1.2, '&:last-child': { pb: 1.2 }, minWidth: 0, overflowX: 'hidden' }}>
               {messageContent}
               {followUpBlock}
             </CardContent>
           </Card>
         ) : (
-          <Box sx={{ width: '100%', p: 1.2 }}>
+          <Box sx={{ width: '100%', minWidth: 0, maxWidth: '100%', overflowX: 'hidden', p: 1.2 }}>
             {messageContent}
             {followUpBlock}
           </Box>
@@ -1699,6 +1585,7 @@ const MessageCardComponent = ({
 // Мемоизируем: ре-рендер только когда меняется сам message, shareMode, isSelected, isSpeaking или настройки
 const MessageCard = React.memo(MessageCardComponent, (prev, next) =>
   prev.message === next.message &&
+  prev.navIndex === next.navIndex &&
   prev.shareMode === next.shareMode &&
   prev.isSelected === next.isSelected &&
   prev.isSpeaking === next.isSpeaking &&
@@ -1942,7 +1829,58 @@ export default function UnifiedChatPage({
   // Получаем текущий чат и сообщения
   const currentChat = getCurrentChat();
   const messages = getCurrentMessages();
+  const messagesHydrating = Boolean(currentChat?.messagesUnloaded);
+
+  astra185MarkRender({
+    chatId: currentChat?.id ?? null,
+    messagesLen: messages.length,
+    loadingIds: state.loadingChatIds.length,
+    hydrating: messagesHydrating,
+  });
+  const showNewChatWelcome =
+    state.isInitialized && messages.length === 0 && !messagesHydrating;
+  /** Спиннер только если реально нечего показать (переключение на выгруженный чат). */
+  const showChatHistoryLoading = messagesHydrating && messages.length === 0;
+  /** Не мелькаем спиннером при быстрой подгрузке с API/кэша. */
+  const [showChatHistoryLoadingDelayed, setShowChatHistoryLoadingDelayed] = useState(false);
+  useEffect(() => {
+    if (!showChatHistoryLoading) {
+      setShowChatHistoryLoadingDelayed(false);
+      return;
+    }
+    const timer = window.setTimeout(() => setShowChatHistoryLoadingDelayed(true), 350);
+    return () => window.clearTimeout(timer);
+  }, [showChatHistoryLoading, currentChat?.id]);
   const project = currentChat?.projectId ? getProjectById(currentChat.projectId) : null;
+  const virtuosoRef = useRef<VirtuosoHandle | null>(null);
+  const scrollerScrollHandlerRef = useRef<(() => void) | null>(null);
+  const showPlainListRef = useRef(false);
+  const virtuosoScrollerElRef = useRef<HTMLDivElement | null>(null);
+
+  const bindMessagesContainer = useCallback((el: HTMLDivElement | null) => {
+    const prev = messagesContainerRef.current;
+    if (prev && scrollerScrollHandlerRef.current) {
+      prev.removeEventListener('scroll', scrollerScrollHandlerRef.current);
+      scrollerScrollHandlerRef.current = null;
+    }
+    messagesContainerRef.current = el;
+    if (!el) return;
+    const handleScroll = () => {
+      if (isProgrammaticScrollRef.current) return;
+      const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+      isAtBottomRef.current = distanceFromBottom < 120;
+    };
+    scrollerScrollHandlerRef.current = handleScroll;
+    el.addEventListener('scroll', handleScroll, { passive: true });
+  }, []);
+
+  const setVirtuosoScrollerRef = useCallback((ref: HTMLElement | Window | null) => {
+    const el = ref instanceof HTMLElement ? (ref as HTMLDivElement) : null;
+    virtuosoScrollerElRef.current = el;
+    if (!showPlainListRef.current) {
+      bindMessagesContainer(el);
+    }
+  }, [bindMessagesContainer]);
 
   const ragSendBlocked = useMemo(
     () => shouldBlockRagSendForChat({ libraryEnabled: useKbRag }),
@@ -1968,6 +1906,221 @@ export default function UnifiedChatPage({
     () => (currentChat ? state.loadingChatIds.includes(currentChat.id) : false),
     [currentChat, state.loadingChatIds],
   );
+
+  const visibleMessages = useMemo(() => {
+    return messages.filter((message) => {
+      const isMediaGenStreamingPlaceholder =
+        message.role === 'assistant' &&
+        (message.isImageGenerating || message.isVideoGenerating) &&
+        message.isStreaming &&
+        !message.inlineAttachments?.length &&
+        !message.content.trim();
+      if (isMediaGenStreamingPlaceholder) return false;
+
+      const isEmptyAssistantPlaceholder =
+        message.role === 'assistant' &&
+        !message.content.trim() &&
+        !message.mcpToolCalls?.length &&
+        !message.multiLLMResponses?.length &&
+        !message.documentSearch &&
+        !message.isImageGenerating &&
+        !message.isVideoGenerating &&
+        !message.inlineAttachments?.length &&
+        !message.chainCurrentAgent &&
+        !message.chainSteps?.length;
+      if (!isEmptyAssistantPlaceholder) return true;
+      const parsedAssistant = extractReasoningBlock(message.content || '', message.isStreaming);
+      if (currentChatLoading && !parsedAssistant?.reasoningContent?.trim()) {
+        return false;
+      }
+      return true;
+    });
+  }, [messages, currentChatLoading]);
+
+  /**
+   * Virtuoso с полным списком. Grok-style: новый вопрос у верха экрана (спейсер в Footer),
+   * «Думает»/ответ ниже, ручной скролл свободный. Без plain/handoff/#185-петель.
+   */
+  const streamingActive = hasActiveChatStreaming || currentChatLoading;
+
+  const prevStreamingDbgRef = useRef(streamingActive);
+  if (prevStreamingDbgRef.current !== streamingActive) {
+    astra185Mark(
+      'stream:toggle',
+      `${prevStreamingDbgRef.current}→${streamingActive} hasStreaming=${hasActiveChatStreaming} loading=${currentChatLoading}`,
+    );
+    prevStreamingDbgRef.current = streamingActive;
+  }
+  const prevChatDbgRef = useRef(currentChat?.id);
+  if (prevChatDbgRef.current !== currentChat?.id) {
+    astra185Mark('chat:switch', `${prevChatDbgRef.current}→${currentChat?.id}`);
+    prevChatDbgRef.current = currentChat?.id;
+  }
+
+  const wantVirtuosoList = useMemo(() => {
+    return visibleMessages.length > 0;
+  }, [visibleMessages.length]);
+
+  const virtuosoData = visibleMessages;
+
+  const showVirtuosoList = wantVirtuosoList;
+  const showPlainList = false;
+  showPlainListRef.current = showPlainList;
+  const shouldUseVirtuosoList = wantVirtuosoList;
+  const virtuosoViewportPadding = VIRTUOSO_VIEWPORT_PADDING;
+  const virtuosoFollowOutput = false as const;
+
+  // === Grok-style: новый вопрос у верха экрана, ответ печатается вниз, скролл свободный ===
+  const grokTurnActiveRef = useRef(false);
+  const grokAnchorVisibleIndexRef = useRef<number | null>(null);
+  const prevTurnActiveForGrokRef = useRef(false);
+  const [grokBottomSpacerPx, setGrokBottomSpacerPx] = useState(0);
+
+  const lastUserVisibleIndex = useMemo(() => {
+    for (let i = visibleMessages.length - 1; i >= 0; i -= 1) {
+      if (visibleMessages[i].role === 'user') return i;
+    }
+    return -1;
+  }, [visibleMessages]);
+
+  const scrollVisibleIndexToTop = useCallback((visibleIndex: number) => {
+    if (visibleIndex < 0 || !virtuosoRef.current) return;
+    isProgrammaticScrollRef.current = true;
+    isAtBottomRef.current = false;
+    virtuosoRef.current.scrollToIndex({
+      index: visibleIndex,
+      align: 'start',
+      behavior: 'auto',
+    });
+    window.setTimeout(() => {
+      isProgrammaticScrollRef.current = false;
+    }, 80);
+  }, []);
+
+  useEffect(() => {
+    grokTurnActiveRef.current = false;
+    grokAnchorVisibleIndexRef.current = null;
+    setGrokBottomSpacerPx(0);
+  }, [currentChat?.id]);
+
+  // Старт хода → вопрос к верху (как в Grok).
+  useEffect(() => {
+    const was = prevTurnActiveForGrokRef.current;
+    prevTurnActiveForGrokRef.current = streamingActive;
+    if (streamingActive && !was) {
+      grokTurnActiveRef.current = true;
+      grokAnchorVisibleIndexRef.current = lastUserVisibleIndex;
+      isAtBottomRef.current = false;
+      const vh = messagesContainerRef.current?.clientHeight ?? 0;
+      if (vh > 0) {
+        setGrokBottomSpacerPx((prev) => Math.max(prev, Math.round(vh - 140)));
+      }
+      requestAnimationFrame(() => scrollVisibleIndexToTop(lastUserVisibleIndex));
+      window.setTimeout(() => scrollVisibleIndexToTop(lastUserVisibleIndex), 60);
+      window.setTimeout(() => scrollVisibleIndexToTop(lastUserVisibleIndex), 180);
+    } else if (!streamingActive && was) {
+      grokTurnActiveRef.current = false;
+    }
+  }, [streamingActive, lastUserVisibleIndex, scrollVisibleIndexToTop]);
+
+  // Спейсер снизу: держит вопрос у верха, пока ответ короткий (в Footer, без remount карточек).
+  useLayoutEffect(() => {
+    if (!streamingActive) return;
+    const container = messagesContainerRef.current;
+    const visibleIndex = grokAnchorVisibleIndexRef.current ?? lastUserVisibleIndex;
+    if (!container || visibleIndex < 0) return;
+
+    const anchorMsg = visibleMessages[visibleIndex];
+    if (!anchorMsg) return;
+    const navIndex = messages.findIndex((m) => m.id === anchorMsg.id);
+    const qEl =
+      (navIndex >= 0 ? messageRefs.current[navIndex] : null) ||
+      (document.querySelector(
+        `[data-message-index="${navIndex >= 0 ? navIndex : visibleIndex}"]`,
+      ) as HTMLElement | null);
+
+    const lastMsg = visibleMessages[visibleMessages.length - 1];
+    const lastNav = lastMsg ? messages.findIndex((m) => m.id === lastMsg.id) : -1;
+    const lastEl =
+      (lastNav >= 0 ? messageRefs.current[lastNav] : null) ||
+      (document.querySelector(
+        `[data-message-index="${lastNav >= 0 ? lastNav : visibleMessages.length - 1}"]`,
+      ) as HTMLElement | null);
+
+    if (!qEl || !lastEl) return;
+    const turnHeight = lastEl.getBoundingClientRect().bottom - qEl.getBoundingClientRect().top;
+    const next = Math.max(0, Math.round(container.clientHeight - turnHeight - 24));
+    setGrokBottomSpacerPx((prev) => (Math.abs(prev - next) > 8 ? next : prev));
+  }, [streamingActive, messages, visibleMessages, lastUserVisibleIndex]);
+
+  useLayoutEffect(() => {
+    if (virtuosoScrollerElRef.current) {
+      bindMessagesContainer(virtuosoScrollerElRef.current);
+    }
+  }, [bindMessagesContainer]);
+
+  const virtuosoInitialLocation = useMemo(
+    () => ({
+      index: Math.max(0, visibleMessages.length - 1),
+      align: 'end' as const,
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [currentChat?.id],
+  );
+
+  // Якорь к низу при открытии/перезагрузке чата.
+  // initialTopMostItemIndex Virtuoso ненадёжен, когда реальные карточки выше defaultItemHeight,
+  // поэтому доводим scrollToIndex несколько раз, пока высоты не измерятся.
+  const initialAnchorChatRef = useRef<string | null>(null);
+  const initialAnchorDoneRef = useRef(false);
+  useEffect(() => {
+    const chatId = currentChat?.id ?? null;
+    if (initialAnchorChatRef.current !== chatId) {
+      initialAnchorChatRef.current = chatId;
+      initialAnchorDoneRef.current = false;
+    }
+    if (!chatId) return;
+    if (visibleMessages.length === 0) return;
+    if (initialAnchorDoneRef.current) return;
+    // Живой ход (Grok): не тянем к низу при появлении первых сообщений.
+    if (streamingActive || grokTurnActiveRef.current) {
+      initialAnchorDoneRef.current = true;
+      return;
+    }
+
+    isAtBottomRef.current = true;
+    let cancelled = false;
+    const lastIndex = Math.max(0, visibleMessages.length - 1);
+    const anchor = () => {
+      if (cancelled) return;
+      if (grokTurnActiveRef.current) return;
+      // Пользователь сам проскроллил вверх — не мешаем.
+      if (!isAtBottomRef.current) return;
+      isProgrammaticScrollRef.current = true;
+      if (shouldUseVirtuosoList && virtuosoRef.current) {
+        virtuosoRef.current.scrollToIndex({ index: lastIndex, align: 'end', behavior: 'auto' });
+      } else if (messagesContainerRef.current) {
+        messagesContainerRef.current.scrollTop = messagesContainerRef.current.scrollHeight;
+      }
+      window.setTimeout(() => {
+        isProgrammaticScrollRef.current = false;
+      }, 30);
+    };
+    anchor();
+    const raf = requestAnimationFrame(anchor);
+    const timers = [60, 180, 360, 700].map((d) => window.setTimeout(anchor, d));
+    // После окна доводки помечаем чат «заякорен», дальше работает обычный автоскролл.
+    const doneTimer = window.setTimeout(() => {
+      initialAnchorDoneRef.current = true;
+    }, 750);
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(raf);
+      timers.forEach((t) => window.clearTimeout(t));
+      window.clearTimeout(doneTimer);
+    };
+  }, [currentChat?.id, visibleMessages.length, shouldUseVirtuosoList, streamingActive]);
+
   const hasRunningMcpTools = useMemo(() => {
     if (!currentChatLoading) return false;
     for (let i = messages.length - 1; i >= 0; i -= 1) {
@@ -2231,7 +2384,7 @@ export default function UnifiedChatPage({
   const chatAwaitingTokens = useMemo(() => {
     if (!currentChatLoading || hasRunningMcpTools) return false;
     if (!lastStreamingAssistant) return true;
-    // Генерация картинки: пустой пузырь скрыт, анимация — в ChatImageGenerationIndicator снизу.
+    // Генерация картинки/видео: в пузыре уже ImageGenerationPlaceholder — не дублируем «думает...»
     if (lastStreamingAssistant.isImageGenerating || lastStreamingAssistant.isVideoGenerating) return false;
     // Смотрим и content, и активный alternativeResponses[index]
     // (при перегенерации UI читает пустой слот, content тоже обнулён).
@@ -2600,32 +2753,20 @@ export default function UnifiedChatPage({
     voice_speaker: localStorage.getItem('voice_speaker') || 'baya',
   }));
 
-  // Слушаем ручной скролл пользователя: если он поднялся — отключаем автоскролл
-  useEffect(() => {
-    const container = messagesContainerRef.current;
-    if (!container) return;
-    const handleScroll = () => {
-      // Если скролл был вызван программно — игнорируем
-      if (isProgrammaticScrollRef.current) return;
-      const distanceFromBottom =
-        container.scrollHeight - container.scrollTop - container.clientHeight;
-      // Считаем «у дна», если отступ менее 120px
-      isAtBottomRef.current = distanceFromBottom < 120;
-    };
-    container.addEventListener('scroll', handleScroll, { passive: true });
-    return () => container.removeEventListener('scroll', handleScroll);
-  }, []);
-
-  // Сбрасываем «у дна» при новом отправленном сообщении (пользователь ждёт ответа)
+  // Новый вопрос пользователя → Grok (не «к низу»). Иначе при росте ленты — «у дна».
   const prevMessagesLengthRef = useRef(0);
   useEffect(() => {
     const len = messages.length;
     if (len > prevMessagesLengthRef.current) {
-      // Новое сообщение добавлено — восстанавливаем автоскролл и прокручиваем
-      isAtBottomRef.current = true;
+      const last = messages[len - 1];
+      if (last?.role === 'user' || grokTurnActiveRef.current) {
+        isAtBottomRef.current = false;
+      } else {
+        isAtBottomRef.current = true;
+      }
     }
     prevMessagesLengthRef.current = len;
-  }, [messages.length]);
+  }, [messages]);
 
   // Автоскролл к последнему сообщению — только когда пользователь у дна.
   // Не реагируем на follow-up подсказки, чтобы поле ввода не «прыгало».
@@ -2646,6 +2787,8 @@ export default function UnifiedChatPage({
   );
 
   useEffect(() => {
+    // Grok-ход: вопрос у верха — не тянем ленту к низу.
+    if (grokTurnActiveRef.current) return;
     if (!interfaceSettings.autoScrollWhileStreaming) return;
     if (Date.now() < autoScrollPauseUntilRef.current) return;
     if (!isAtBottomRef.current) return;
@@ -3448,10 +3591,18 @@ export default function UnifiedChatPage({
   };
 
   const formatTimestamp = (timestamp: string): string => {
-    return new Date(timestamp).toLocaleTimeString('ru-RU', {
+    const d = new Date(timestamp);
+    if (Number.isNaN(d.getTime())) return '';
+    const date = d.toLocaleDateString('ru-RU', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+    });
+    const time = d.toLocaleTimeString('ru-RU', {
       hour: '2-digit',
       minute: '2-digit',
     });
+    return `${date} ${time}`;
   };
 
   // Функция для определения приветствия по времени суток (Московское время)
@@ -3776,18 +3927,39 @@ export default function UnifiedChatPage({
   // ФУНКЦИИ НАВИГАЦИИ ПО СООБЩЕНИЯМ
   // ================================
 
-  const scrollToMessage = useCallback((index: number) => {
-    const messageElement = messageRefs.current[index];
-    if (messageElement) {
-      // Навигация по сообщениям — временно снимаем lock автоскролла
-      isProgrammaticScrollRef.current = true;
-      messageElement.scrollIntoView({
-        behavior: 'smooth',
-        block: 'center',
+  const scrollToMessage = useCallback((originalIndex: number) => {
+    const target = messages[originalIndex];
+    const visIndex = target
+      ? visibleMessages.findIndex((m) => m.id === target.id)
+      : originalIndex;
+    if (visIndex < 0) return;
+
+    isProgrammaticScrollRef.current = true;
+    isAtBottomRef.current = false;
+
+    const snapIntoView = () => {
+      const el =
+        messageRefs.current[originalIndex] ||
+        (document.querySelector(`[data-message-index="${originalIndex}"]`) as HTMLElement | null);
+      el?.scrollIntoView({ behavior: 'auto', block: 'start' });
+    };
+
+    // smooth + align:center на высоких карточках (презентации) часто no-op:
+    // Virtuoso ещё не измерил item (defaultItemHeight=160).
+    if (shouldUseVirtuosoList && virtuosoRef.current) {
+      virtuosoRef.current.scrollToIndex({
+        index: visIndex,
+        align: 'start',
+        behavior: 'auto',
       });
-      setTimeout(() => { isProgrammaticScrollRef.current = false; }, 600);
+      requestAnimationFrame(snapIntoView);
+      window.setTimeout(snapIntoView, 60);
+      window.setTimeout(snapIntoView, 220);
+    } else {
+      snapIntoView();
     }
-  }, []);
+    window.setTimeout(() => { isProgrammaticScrollRef.current = false; }, 800);
+  }, [messages, visibleMessages, shouldUseVirtuosoList]);
 
   // ================================
   // ФУНКЦИИ ДЛЯ РЕЖИМА "ПОДЕЛИТЬСЯ"
@@ -4006,6 +4178,50 @@ export default function UnifiedChatPage({
     currentChatId: currentChat?.id,
     messageRefs,
   };
+
+  virtuosoMessagesEndRefHolder.current = messagesEndRef;
+
+  const virtuosoContext = useMemo<VirtuosoListContext>(
+    () => ({ bottomSpacerPx: grokBottomSpacerPx }),
+    [grokBottomSpacerPx],
+  );
+
+  const renderMessageAtIndex = (
+    index: number,
+    message: (typeof visibleMessages)[number],
+    list: typeof visibleMessages = visibleMessages,
+  ) => {
+    const isUserMsg = message.role === 'user';
+    const isPairStart =
+      isUserMsg &&
+      index < list.length - 1 &&
+      list[index + 1].role === 'assistant';
+    const isSelected =
+      isPairStart &&
+      selectedMessages.has(message.id) &&
+      selectedMessages.has(list[index + 1].id);
+    const nextMessageId = isPairStart ? list[index + 1].id : null;
+    const navIndex = messages.findIndex((m) => m.id === message.id);
+    return (
+      <MessageCard
+        key={message.id || String(index)}
+        message={message}
+        index={index}
+        navIndex={navIndex >= 0 ? navIndex : index}
+        isPairStart={isPairStart}
+        isSelected={isSelected}
+        nextMessageId={nextMessageId}
+        shareMode={shareMode}
+        isSpeaking={isSpeaking}
+        isDarkMode={isDarkMode}
+        isLastChatMessage={index === list.length - 1}
+        interfaceSettings={interfaceSettings}
+        username={user?.username}
+        dataRef={messageCardDataRef}
+      />
+    );
+  };
+
 
   const renderMultiLlmModelToolbar = (): React.ReactNode => {
     if (!isMultiLlmMode) return null;
@@ -4244,7 +4460,7 @@ export default function UnifiedChatPage({
   };
 
   return (
-    <Box sx={{ display: 'flex', height: '100%', minHeight: 0, overflow: 'hidden' }}>
+    <Box sx={{ display: 'flex', height: '100%', minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
       {modelErrorBanner ? (
         <TopErrorBanner
           message={modelErrorBanner}
@@ -4264,6 +4480,8 @@ export default function UnifiedChatPage({
         sx={{ 
           flexGrow: 1,
           minHeight: 0,
+          minWidth: 0,
+          maxWidth: '100%',
           display: 'flex',
           flexDirection: 'column',
           overflow: 'hidden',
@@ -4408,7 +4626,6 @@ export default function UnifiedChatPage({
 
       {/* Область сообщений */}
       <Box
-        ref={messagesContainerRef}
         className="chat-messages-area"
                  sx={{
            border: isDragging ? '2px dashed' : 'none',
@@ -4416,7 +4633,7 @@ export default function UnifiedChatPage({
            bgcolor: isDragging ? 'action.hover' : 'transparent',
            position: 'relative',
            zIndex: workZoneAnimated ? 1 : undefined,
-           ...(messages.length === 0
+           ...(showNewChatWelcome
              ? {
                  flex: '0 0 auto',
                  minHeight: 0,
@@ -4427,14 +4644,15 @@ export default function UnifiedChatPage({
              : {
                  flex: 1,
                  minHeight: 0,
-                 overflowY: 'auto',
+                 overflow: 'hidden',
                  overflowX: 'hidden',
+                 overscrollBehavior: 'none',
                  justifyContent: 'flex-start',
-                 py: 4,
+                 py: 0,
                }),
            display: 'flex',
            flexDirection: 'column',
-           alignItems: 'center',
+           alignItems: 'stretch',
            // Селектор моделей в правом верхнем углу
            '&::before': {
              content: '""',
@@ -4443,128 +4661,94 @@ export default function UnifiedChatPage({
              right: 16,
              zIndex: 10,
            },
-           // Кастомные стили для скроллбара
-           '&::-webkit-scrollbar': {
-             width: '8px',
-           },
-           '&::-webkit-scrollbar-track': {
-             background: isDarkMode 
-               ? 'rgba(30, 30, 30, 0.5)' 
-               : 'rgba(245, 245, 245, 0.5)',
-             borderRadius: '4px',
-           },
-           '&::-webkit-scrollbar-thumb': {
-             background: isDarkMode 
-               ? 'rgba(45, 45, 45, 0.8)' 
-               : 'rgba(200, 200, 200, 0.8)',
-             borderRadius: '4px',
-             '&:hover': {
-               background: isDarkMode 
-                 ? 'rgba(60, 60, 60, 0.9)' 
-                 : 'rgba(180, 180, 180, 0.9)',
-             },
-           },
-           // Для Firefox
-           scrollbarWidth: 'thin',
-           scrollbarColor: isDarkMode 
-             ? 'rgba(45, 45, 45, 0.8) rgba(30, 30, 30, 0.5)' 
-             : 'rgba(200, 200, 200, 0.8) rgba(245, 245, 245, 0.5)',
+          ...SIDEBAR_HIDE_SCROLLBAR_SX,
          }}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
+        onWheel={(e) => {
+          // Wheel над пустыми полями рабочей зоны (не над scroller Virtuoso) — крутим ленту.
+          const scroller = virtuosoScrollerElRef.current;
+          if (!scroller) return;
+          if (scroller.contains(e.target as Node)) return;
+          const t = e.target as HTMLElement | null;
+          if (t?.closest?.('textarea, input, [contenteditable="true"], .MuiPopover-root, .MuiModal-root')) {
+            return;
+          }
+          scroller.scrollTop += e.deltaY;
+        }}
       >
-          {messages.length === 0 ? (
+          {showChatHistoryLoadingDelayed ? (
+            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1.5, py: 6, width: '100%' }}>
+              <CircularProgress size={28} />
+              <Typography variant="body2" color="text.secondary">
+                Загрузка переписки…
+              </Typography>
+            </Box>
+          ) : messages.length === 0 ? (
             null
           ) : (
-            <Box sx={{ 
-              width: '100%', 
-              maxWidth: interfaceSettings.widescreenMode ? '100%' : '1000px', 
-              mx: 'auto',
-              px: interfaceSettings.widescreenMode ? 4 : 2,
-            }}>
-              {messages.map((message, index) => {
-                const isMediaGenStreamingPlaceholder =
-                  message.role === 'assistant' &&
-                  (message.isImageGenerating || message.isVideoGenerating) &&
-                  message.isStreaming &&
-                  !message.inlineAttachments?.length &&
-                  !message.content.trim();
-                if (isMediaGenStreamingPlaceholder) {
-                  return null;
-                }
-                const isEmptyAssistantPlaceholder =
-                  message.role === 'assistant' &&
-                  !message.content.trim() &&
-                  !message.mcpToolCalls?.length &&
-                  !message.multiLLMResponses?.length &&
-                  !message.documentSearch &&
-                  !message.isImageGenerating &&
-                  !message.isVideoGenerating &&
-                  !message.inlineAttachments?.length &&
-                  !message.chainCurrentAgent &&
-                  !message.chainSteps?.length;
-                const parsedAssistant = isEmptyAssistantPlaceholder
-                  ? extractReasoningBlock(message.content || '', message.isStreaming)
-                  : null;
-                // Прячем пустой пузырь только пока ждём обычный LLM-стрим («думает...» снизу).
-                if (
-                  isEmptyAssistantPlaceholder &&
-                  currentChatLoading &&
-                  !parsedAssistant?.reasoningContent?.trim()
-                ) {
-                  return null;
-                }
-                const isUserMsg = message.role === 'user';
-                const isPairStart = isUserMsg && index < messages.length - 1 && messages[index + 1].role === 'assistant';
-                const isSelected = isPairStart &&
-                  selectedMessages.has(message.id) &&
-                  selectedMessages.has(messages[index + 1].id);
-                const nextMessageId = isPairStart ? messages[index + 1].id : null;
-                return (
-                  <MessageCard
-                    key={message.id || index}
-                    message={message}
-                    index={index}
-                    isPairStart={isPairStart}
-                    isSelected={isSelected}
-                    nextMessageId={nextMessageId}
-                    shareMode={shareMode}
-                    isSpeaking={isSpeaking}
-                    isDarkMode={isDarkMode}
-                    isLastChatMessage={index === messages.length - 1}
-                    interfaceSettings={interfaceSettings}
-                    username={user?.username}
-                    dataRef={messageCardDataRef}
+            <Box
+              sx={{
+                width: '100%',
+                flex: 1,
+                minHeight: 0,
+                minWidth: 0,
+                maxWidth: '100%',
+                alignSelf: 'stretch',
+                display: 'flex',
+                flexDirection: 'column',
+                overflow: 'hidden',
+              }}
+            >
+              {/* Virtuoso на всю ширину рабочей зоны — wheel работает везде, не только над баблами.
+                  Контент сообщений центрируется внутри item (maxWidth 1000px). */}
+              {showVirtuosoList ? (
+                <Box sx={{ flex: 1, minHeight: 0, minWidth: 0, maxWidth: '100%', width: '100%', display: 'flex', flexDirection: 'column', py: 4, overflow: 'hidden' }}>
+                  <Virtuoso
+                    key={currentChat?.id || 'chat'}
+                    ref={virtuosoRef}
+                    style={{ height: '100%', width: '100%' }}
+                    scrollerRef={setVirtuosoScrollerRef}
+                    data={virtuosoData}
+                    defaultItemHeight={160}
+                    increaseViewportBy={virtuosoViewportPadding}
+                    initialTopMostItemIndex={virtuosoInitialLocation}
+                    followOutput={virtuosoFollowOutput}
+                    computeItemKey={(index, message) => message.id || String(index)}
+                    components={VIRTUOSO_LIST_COMPONENTS}
+                    context={virtuosoContext}
+                    itemContent={(index, message) => (
+                      <Box
+                        sx={{
+                          width: '100%',
+                          maxWidth: interfaceSettings.widescreenMode ? '100%' : '1000px',
+                          minWidth: 0,
+                          mx: 'auto',
+                          px: interfaceSettings.widescreenMode ? 4 : 2,
+                          boxSizing: 'border-box',
+                          overflowX: 'hidden',
+                        }}
+                      >
+                        {renderMessageAtIndex(index, message, virtuosoData)}
+                        {/* «Думает» — сразу после последнего сообщения (место ответа), обычный item списка:
+                            при скролле вверх уезжает из вьюпорта вместе с лентой. */}
+                        {chatAwaitingTokens && index === virtuosoData.length - 1 ? (
+                          <ChatThinkingIndicator
+                            isDarkMode={isDarkMode}
+                            leftAlignMessages={interfaceSettings.leftAlignMessages}
+                            widescreenMode={interfaceSettings.widescreenMode}
+                            startedAtMs={chatAwaitingStartedAtMs}
+                            agentName={chainThinkingName}
+                          />
+                        ) : null}
+                      </Box>
+                    )}
                   />
-                );
-              })}
-              
-              {(lastStreamingAssistant?.isImageGenerating || lastStreamingAssistant?.isVideoGenerating) &&
-              lastStreamingAssistant.isStreaming &&
-              !getAssistantInlineAttachments(lastStreamingAssistant)?.length ? (
-                <ChatImageGenerationIndicator
-                  isDarkMode={isDarkMode}
-                  leftAlignMessages={interfaceSettings.leftAlignMessages}
-                  widescreenMode={interfaceSettings.widescreenMode}
-                  startedAtMs={lastStreamingAssistant.generationStartedAtMs}
-                  mediaKind={lastStreamingAssistant.isVideoGenerating ? 'video' : 'image'}
-                />
+                </Box>
               ) : null}
-
-              {/* Индикатор размышления - показывается только до начала потоковой генерации, сразу после сообщений */}
-              {chatAwaitingTokens && !chainThinkingName && (
-                <ChatThinkingIndicator
-                  isDarkMode={isDarkMode}
-                  leftAlignMessages={interfaceSettings.leftAlignMessages}
-                  widescreenMode={interfaceSettings.widescreenMode}
-                  startedAtMs={chatAwaitingStartedAtMs}
-                  agentName={chainThinkingName}
-                />
-              )}
             </Box>
           )}
-          <div ref={messagesEndRef} />
           
           {/* Подсказка о перетаскивании в области сообщений */}
           {isDragging && (
@@ -4604,7 +4788,7 @@ export default function UnifiedChatPage({
               zIndex: workZoneAnimated ? 2 : undefined,
               borderColor: isDragging ? 'primary.main' : 'divider',
               bgcolor: isDragging ? 'action.hover' : 'transparent',
-              ...(messages.length === 0 && {
+              ...(showNewChatWelcome && {
                 flex: 1,
                 minHeight: 0,
                 display: 'flex',
@@ -4616,7 +4800,7 @@ export default function UnifiedChatPage({
            onDrop={handleDrop}
          >
           
-                     {messages.length === 0 ? (
+                     {showNewChatWelcome ? (
                        <Box
                          sx={{
                            flex: 1,
@@ -4702,8 +4886,8 @@ export default function UnifiedChatPage({
                        </Box>
                      ) : null}
 
-                     {/* Объединенное поле ввода с кнопками (есть сообщения) */}
-           {messages.length > 0 ? (
+                     {/* Поле ввода снизу (есть сообщения или идёт загрузка истории) */}
+           {!showNewChatWelcome && (messages.length > 0 || showChatHistoryLoadingDelayed) ? (
            <>
              {renderMultiLlmModelToolbar()}
              <ChatInputBar
@@ -4929,13 +5113,7 @@ export default function UnifiedChatPage({
             </Box>
             <Box
               onClick={() => {
-                setGearToolsPanel((p) => {
-                  const next = p === 'coding' ? 'main' : 'coding';
-                  if (next === 'coding') {
-                    enableCodingFromGearPanel(state.currentChatId);
-                  }
-                  return next;
-                });
+                setGearToolsPanel((p) => (p === 'coding' ? 'main' : 'coding'));
               }}
               sx={{
                 ...dropdownItemSx,

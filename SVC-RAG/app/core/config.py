@@ -39,7 +39,6 @@ def _pick_service_url(urls: dict, docker_key: str, port_key: str) -> str:
 
 
 _URLS_CORS_KEYS: Tuple[str, ...] = (
-    # GPB naming
     "frontend_port",
     "frontend_port_ipv4",
     "frontend_port_2",
@@ -107,9 +106,9 @@ def _embedding_gateway_from_providers(data: dict) -> Tuple[str, str]:
     section = data.get("rag_models") or {}
     providers = section.get("providers") or []
     preferred = (
-        os.environ.get("RAG_MODELS_PROVIDER") or section.get("provider") or "PHOENIX"
+        os.environ.get("RAG_MODELS_PROVIDER") or section.get("provider") or "CORSUR"
     )
-    preferred_ids = [str(preferred).strip(), "PHOENIX", "CORSUR"]
+    preferred_ids = [str(preferred).strip(), "CORSUR", "PHOENIX"]
     seen: set[str] = set()
     for pid in preferred_ids:
         key = pid.lower()
@@ -204,7 +203,6 @@ def _sanitize_rag_models_client_url(data: dict) -> dict:
     """Не направлять эмбеддинги на chat-шлюз помеченный chat-only (там 404 на /v1/embeddings)."""
     out = dict(data)
     rmc = dict(out.get("rag_models_client") or {})
-    llm = dict(out.get("llm_service") or {})
     base = str(rmc.get("base_url") or "").strip().rstrip("/")
     # Совпадение с llm_service.base_url больше НЕ считаем ошибкой: единый шлюз
     # (litellm/bifrost) обслуживает и chat, и эмбеддинги с одного адреса.
@@ -276,6 +274,8 @@ def _apply_rag_env_overrides(data: dict) -> dict:
     overrides = {
         "RAG_HYBRID_MAX_CHUNKS_PER_DOCUMENT": ("hybrid_max_chunks_per_document", int),
         "RAG_VECTOR_MAX_CHUNKS_PER_DOCUMENT": ("vector_max_chunks_per_document", int),
+        # Ручка на случай нехватки памяти. 
+        "RAG_BM25_INDEX_CACHE_SIZE": ("bm25_index_cache_size", int),
     }
     out = dict(data)
     rag = dict(out.get("rag") or {})
@@ -339,6 +339,31 @@ class AppConfig(BaseModel):
 class LoggingConfig(BaseModel):
     level: str = "INFO"
     format: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    noisy_level: str = "WARNING"
+
+
+class AuditConfig(BaseModel):
+    """CEF-аудит. Пишется отдельным каналом (логгер cef, свой обработчик,
+    propagate=False), поэтому уровень логирования на него не влияет."""
+
+    # Аудировать ли фоновый поллинг интерфейса: успешные GET по
+    # /reindex/status и спискам документов. Один опрос плашки переиндексации -
+    # пять запросов в SVC-RAG, то есть пять событий OBJ001 каждые несколько
+    # секунд с каждой открытой вкладки.
+    #
+    # true (по умолчанию) - аудируем, но не каждое обращение, а не чаще
+    # cef_polling_interval_seconds. false - не аудируем такие чтения вовсе.
+    # Изменения (POST/DELETE), ошибки и отказы доступа аудируются ВСЕГДА,
+    # независимо от обоих полей. ENV перекрывает: CEF_AUDIT_POLLING.
+    cef_polling: bool = True
+
+    # Окно троттлинга, секунд. Одно событие на (пользователь, метод, путь) в
+    # окно; в нём проставляется cn1 = сколько обращений оно представляет.
+    # 0 - без троттлинга, событие на каждое обращение (поведение до правки).
+    # Пользователь входит в ключ намеренно: аудит должен показывать, КТО
+    # обращался, иначе событие приписывалось бы тому, кто попал первым.
+    # ENV перекрывает: CEF_AUDIT_POLLING_INTERVAL.
+    cef_polling_interval_seconds: int = 120
 
 
 class RagModelsClientConfig(BaseModel):
@@ -442,6 +467,20 @@ class RagServiceConfig(BaseModel):
         os.environ.get("RAG_VECTOR_MAX_CHUNKS_PER_DOCUMENT", "0")
     )
 
+    # Сколько BM25-индексов держать в памяти одновременно. Индекс строится на
+    # (набор документов, размерность) и живёт в синглтоне сервиса, то есть до
+    # перезапуска пода: без предела каждый когда-либо искавшийся агент или
+    # проект держал бы свой корпус в RAM навсегда. Вытесненный собирается
+    # заново при следующем обращении.
+    #
+    # Считать так: размер типичного индекса умножить на это число.
+    #   3 тыс. чанков (30 файлов по 100)  ~  6 МБ
+    #   20 тыс. чанков                    ~ 40 МБ
+    #   50 тыс. чанков                    ~ 100 МБ
+    # Значение подбирают под число сущностей: лучше, чтобы все рабочие агенты
+    # и проекты помещались, иначе кэш начнёт перестраивать их по кругу.
+    bm25_index_cache_size: int = int(os.environ.get("RAG_BM25_INDEX_CACHE_SIZE", "32"))
+
     # Реранкинг через SVC-RAG-MODELS
     use_reranking: bool = os.environ.get("RAG_USE_RERANKING", "false").lower() == "true"
     rerank_top_k: int = int(os.environ.get("RAG_RERANK_TOP_K", "20"))
@@ -470,7 +509,7 @@ class RagServiceConfig(BaseModel):
     # Разрешить LLM-as-a-Judge в POST /search (доп. вызов llm-service; только при eval_llm_judge=true в теле)
     eval_llm_judge_allowed: bool = os.environ.get("RAG_EVAL_LLM_JUDGE_ALLOWED", "false").lower() == "true"
 
-    # ANN-индекс pgvector: hnsw (дефолт) | ivfflat. Свап через env без смены dim/стратегий.
+    # ANN-индекс pgvector: hnsw (дефолт) | ivfflat. Свап через K8s env без смены dim/стратегий.
     # RAG_VECTOR_INDEX_METHOD=hnsw|ivfflat
     vector_index_method: str = (
         os.environ.get("RAG_VECTOR_INDEX_METHOD", "hnsw") or "hnsw"
@@ -502,6 +541,7 @@ class Settings(BaseModel):
     cors: CorsConfig = Field(default_factory=CorsConfig)
     app: AppConfig = Field(default_factory=AppConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    audit: AuditConfig = Field(default_factory=AuditConfig)
 
     # Эти секции содержат обязательные адреса/учётные данные. Не создаём их
     # пустыми при импорте модуля: значения сначала загружаются из config.yml/env,

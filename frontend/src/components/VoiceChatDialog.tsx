@@ -28,6 +28,8 @@ import { useAppActions, useAppContext } from '../contexts/AppContext';
 import { useSocket } from '../contexts/SocketContext';
 import { getApiUrl, getAuthFetchHeaders, getAuthWsUrl, API_ENDPOINTS } from '../config/api';
 import VoiceVisualization3D from './VoiceVisualization3D';
+import ThinkingShimmerText from './chat/ThinkingShimmerText';
+import { useTheme } from '@mui/material/styles';
 
 export interface VoiceChatDialogProps {
   open: boolean;
@@ -46,6 +48,8 @@ const voiceTestMessages: Record<string, string> = {
 };
 
 export default function VoiceChatDialog({ open, onClose }: VoiceChatDialogProps) {
+  const theme = useTheme();
+  const isDarkMode = theme.palette.mode === 'dark';
   const { state } = useAppContext();
   const { showNotification, setRecording, setSpeaking, getCurrentMessages } = useAppActions();
   const { isConnected } = useSocket();
@@ -924,12 +928,9 @@ export default function VoiceChatDialog({ open, onClose }: VoiceChatDialogProps)
 
         {isProcessing && (
           <Box sx={{ mb: 2, textAlign: 'center' }}>
-            <Typography variant="body2" color="primary" sx={{ mb: 1 }}>Ассистент думает...</Typography>
-            <Box sx={{ display: 'flex', justifyContent: 'center', gap: 0.5 }}>
-              {[0, 0.2, 0.4].map((delay, i) => (
-                <Box key={i} sx={{ width: 8, height: 8, borderRadius: '50%', backgroundColor: 'primary.main', animation: 'thinkingDot 1.4s ease-in-out infinite both', animationDelay: `${delay}s`, '@keyframes thinkingDot': { '0%, 80%, 100%': { transform: 'scale(0)' }, '40%': { transform: 'scale(1)' } } }} />
-              ))}
-            </Box>
+            <ThinkingShimmerText isDarkMode={isDarkMode} fontSize="0.875rem" fontWeight={500}>
+              Ассистент думает...
+            </ThinkingShimmerText>
           </Box>
         )}
 

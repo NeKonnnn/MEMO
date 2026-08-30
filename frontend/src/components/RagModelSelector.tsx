@@ -21,6 +21,7 @@ import {
   HelpOutline as HelpOutlineIcon,
 } from '@mui/icons-material';
 import { useAppActions } from '../contexts/AppContext';
+import { useRagReindexStatus } from '../contexts/RagReindexStatusContext';
 import { getApiUrl, getAuthFetchHeaders } from '../config/api';
 import {
   getDropdownItemSx,
@@ -81,14 +82,15 @@ interface RagModelSelectorProps {
 const SOURCE_LABELS: Record<string, string> = {
   local: 'Локальные',
   corsur: 'CORSUR',
+  corsur_rag: 'CORSUR',
   phoenix: 'PHOENIX',
-  phoenix_embeddings: 'PHOENIX_Embeddings',
+  phoenix_embeddings: 'PHOENIX',
 };
 
-/** Порядок вкладок: локальные (наш rag-models) первыми, затем внешние шлюзы. */
-const SOURCE_ORDER = ['Локальные', 'CORSUR', 'PHOENIX', 'PHOENIX_Embeddings'];
+/** Порядок вкладок: локальные первыми, затем внешние шлюзы. */
+const SOURCE_ORDER = ['Локальные', 'CORSUR', 'PHOENIX'];
 
-const ALLOWED_SOURCES = new Set(['local', 'corsur', 'phoenix', 'phoenix_embeddings']);
+const sourceLabel = (src: string) => SOURCE_LABELS[src] || (src ? src.toUpperCase() : '');
 
 const sourceRank = (label: string) => {
   const i = SOURCE_ORDER.indexOf(label);
@@ -125,6 +127,7 @@ export default function RagModelSelector({
   const [activeSource, setActiveSource] = useState<string | null>(null);
   const outlinedRef = useRef<HTMLDivElement>(null);
   const { showNotification } = useAppActions();
+  const { notifyReindexStarted } = useRagReindexStatus();
 
   const { menuItemColor, menuItemHover, menuDividerBorder } = getMenuColors(isDarkMode);
   const windowSx = { ...getDropdownPanelSx(isDarkMode) } as Record<string, unknown>;
@@ -171,7 +174,7 @@ export default function RagModelSelector({
       if (!response.ok) return;
       const data = await response.json();
       const rows: RagModelRow[] = (data?.models?.[kind] ?? []).filter(
-        (m: RagModelRow) => Boolean(m.path) && ALLOWED_SOURCES.has(String(m.source || '').toLowerCase()),
+        (m: RagModelRow) => Boolean(m.path),
       );
       setModels(rows);
       // offline=true в ответе rag-models = только локальные веса; для UI — подсказка.
@@ -220,8 +223,7 @@ export default function RagModelSelector({
     const map = new Map<string, RagModelRow[]>();
     for (const m of models) {
       const src = String(m.source || '').toLowerCase();
-      if (!ALLOWED_SOURCES.has(src)) continue;
-      const label = SOURCE_LABELS[src] || m.source;
+      const label = sourceLabel(src);
       const bucket = map.get(label);
       if (bucket) bucket.push(m);
       else map.set(label, [m]);
@@ -299,6 +301,9 @@ export default function RagModelSelector({
       }
       setSelectedPath(modelPath);
       const reindexed = Boolean(data?.reindexed);
+      if (reindexed) {
+        notifyReindexStarted();
+      }
       showNotification(
         'success',
         reindexed

@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import {
   Box,
   Typography,
@@ -31,6 +31,8 @@ import {
 } from '../constants/ragEntityDefaults';
 import { useRagEntityReadyMessage } from '../hooks/useRagEntityReadyMessage';
 import { ragDocumentDisplayIndex } from '../utils/ragDocumentDisplayIndex';
+import { filterByRagFilenameQuery } from '../utils/ragFilesSearch';
+import RagFilesSearchField from './RagFilesSearchField';
 import RagUploadingFileThumb from './RagUploadingFileThumb';
 import {
   commitRagUploadUiUpdate,
@@ -93,6 +95,7 @@ export default function ProjectRagLibraryInline({
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [pendingUploads, setPendingUploads] = useState<RagPendingUpload[]>([]);
+  const [fileSearchQuery, setFileSearchQuery] = useState('');
   const [banner, setBanner] = useState<{
     message: string;
     severity: 'success' | 'error' | 'info' | 'warning';
@@ -102,9 +105,22 @@ export default function ProjectRagLibraryInline({
 
   useEffect(() => {
     setResolvedId(projectId);
+    setFileSearchQuery('');
   }, [projectId]);
 
   const effectiveId = resolvedId ?? projectId;
+
+  const filteredPendingUploads = useMemo(
+    () => filterByRagFilenameQuery(pendingUploads, fileSearchQuery),
+    [pendingUploads, fileSearchQuery],
+  );
+  const filteredDocuments = useMemo(
+    () => filterByRagFilenameQuery(documents, fileSearchQuery),
+    [documents, fileSearchQuery],
+  );
+  const totalFiles = documents.length + pendingUploads.length;
+  const filteredTotal = filteredDocuments.length + filteredPendingUploads.length;
+  const hasActiveFileSearch = fileSearchQuery.trim().length > 0;
 
   const { readyMessage: ragReadyMessage, clearReadyMessage: clearRagReadyMessage } =
     useRagEntityReadyMessage('project', effectiveId);
@@ -523,7 +539,8 @@ export default function ProjectRagLibraryInline({
 
       <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
         <Typography variant="subtitle2">
-          Проиндексированные документы ({documents.length + pendingUploads.length})
+          Проиндексированные документы (
+          {hasActiveFileSearch ? `${filteredTotal} из ${totalFiles}` : totalFiles})
         </Typography>
         <Button
           size="small"
@@ -535,6 +552,15 @@ export default function ProjectRagLibraryInline({
         </Button>
       </Box>
 
+      {totalFiles > 0 && (
+        <RagFilesSearchField
+          value={fileSearchQuery}
+          onChange={setFileSearchQuery}
+          totalCount={totalFiles}
+          disabled={loading}
+        />
+      )}
+
       {!effectiveId ? (
         <Typography color="text.secondary" variant="body2">
           После выбора файлов будет создан черновик проекта (если его ещё нет), и документы сразу попадут в хранилище.
@@ -545,9 +571,13 @@ export default function ProjectRagLibraryInline({
         <Typography color="text.secondary" variant="body2">
           Пока нет документов. Загрузите файлы выше — они станут доступны для поиска в рамках этого проекта.
         </Typography>
+      ) : filteredTotal === 0 ? (
+        <Typography color="text.secondary" variant="body2">
+          Ничего не найдено по запросу «{fileSearchQuery.trim()}».
+        </Typography>
       ) : (
         <List dense disablePadding>
-          {pendingUploads.map((pending) => (
+          {filteredPendingUploads.map((pending) => (
             <ListItem
               key={pending.clientId}
               sx={{ borderBottom: 1, borderColor: 'divider' }}
@@ -561,7 +591,7 @@ export default function ProjectRagLibraryInline({
               />
             </ListItem>
           ))}
-          {documents.map((doc) => (
+          {filteredDocuments.map((doc) => (
             <ListItem
               key={doc.id}
               secondaryAction={

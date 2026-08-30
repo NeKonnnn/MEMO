@@ -508,6 +508,7 @@ class CodingAgentConfig(BaseModel):
     """Локальный coding agent (workspace tools, паттерн Odysseus)."""
 
     enabled: bool = True
+    auto_enable_on_file_intent: bool = False
     max_rounds: int = 50
     max_tool_calls: int = 40
     bash_timeout_sec: int = 60

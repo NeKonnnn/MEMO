@@ -12,8 +12,9 @@ from typing import Any, Dict, List, Optional, Tuple
 import httpx
 
 from app.core.http_verify import resolve_httpx_verify
+from app.core.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # Повторы на стороне клиента. Зачем они нужны именно здесь: шлюз отвечает
 # 500 не только когда «нельзя», но и когда у него самого что-то отвалилось —
@@ -205,9 +206,18 @@ def set_embed_log_context(**fields: Any) -> None:
     """
     _embed_ctx.set({k: v for k, v in fields.items() if v is not None})
 
+
+def get_embed_log_context() -> Optional[Dict[str, Any]]:
+    """Вернуть текущий контекст операции для логов (store/operation/документ/файл).
+
+    Используется для обогащения CEF-меток при сохранении/удалении чанков.
+    """
+    ctx = _embed_ctx.get()
+    return dict(ctx) if ctx else None
+
 def _ctx_line() -> str:
     ctx = _embed_ctx.get()
-    return json.dumps(ctx, ensure_ascii=False) if ctx else "— (не задан вызывающим)"
+    return json.dumps(ctx, ensure_ascii=False) if ctx else "— (не задан вызывающим)"    
 
 
 class OpenAICompatModelsClient:
@@ -578,7 +588,7 @@ class OpenAICompatModelsClient:
                     f"батча ({expected}). Структура ответа: "
                     f"{json.dumps(cls._describe(data), ensure_ascii=False)[:400]}"
                 )
-            logger.info(
+            logger.debug(
                 "[EMBED-PARSE] вектора найдены не в 'data'/'embeddings'. Структура: %s",
                 json.dumps(cls._describe(data), ensure_ascii=False)[:400],
             )
@@ -614,6 +624,18 @@ class OpenAICompatModelsClient:
         url = f"{self.base_url}{self.embed_path}"
         from app.clients.embed_parallel import embed_texts_in_batches
 
+        try:
+            from app.core.cef_logger import log_cef_int003_model_request
+
+            log_cef_int003_model_request(
+                base_url=self.base_url,
+                model=use_model,
+                provider=str(self.provider_id or "openai-compat"),
+                method_name=f"POST {self.embed_path}",
+            )
+        except Exception:
+            pass
+
         async with self._client() as client:
 
             async def _one_batch(start: int, batch: List[str]) -> List[List[float]]:
@@ -627,6 +649,21 @@ class OpenAICompatModelsClient:
                     data = resp.json()
                 except Exception as e:
                     self._log_http_error(f"POST {self.embed_path}", e)
+                    try:
+                        from app.core.cef_logger import log_cef_int006_outbound_failure
+                        import httpx as _httpx
+
+                        sc = e.response.status_code if isinstance(e, _httpx.HTTPStatusError) else None
+                        log_cef_int006_outbound_failure(
+                            base_url=self.base_url,
+                            model=use_model,
+                            provider=str(self.provider_id or "openai-compat"),
+                            method_name=f"POST {self.embed_path}",
+                            status_code=sc,
+                            text_status=str(e),
+                        )
+                    except Exception:
+                        pass
                     if isinstance(e, httpx.HTTPStatusError) and _is_permanent_refusal(
                         e.response
                     ):
@@ -665,7 +702,7 @@ class OpenAICompatModelsClient:
             )
 
         if all_embeddings and not self._logged_dim:
-            logger.info(
+            logger.debug(
                 "[%s] embed dim=%s (model=%s concurrency=%s batch=%s)",
                 self.provider_id,
                 len(all_embeddings[0]),
@@ -835,6 +872,17 @@ class OpenAICompatModelsClient:
         url = f"{self.base_url}{self.rerank_path}"
         payload = self._rerank_payload(query, passages, use_model,top_k)
         try:
+            from app.core.cef_logger import log_cef_int003_model_request
+
+            log_cef_int003_model_request(
+                base_url=self.base_url,
+                model=use_model,
+                provider=str(self.provider_id or "openai-compat"),
+                method_name=f"POST {self.rerank_path}",
+            )
+        except Exception:
+            pass
+        try:
             async with self._client() as client:
                 resp = await self._post_with_retry(
                     client,
@@ -845,6 +893,21 @@ class OpenAICompatModelsClient:
                 data = resp.json()
         except Exception as e:
             self._log_http_error(f"POST {self.rerank_path}", e)
+            try:
+                from app.core.cef_logger import log_cef_int006_outbound_failure
+                import httpx as _httpx
+
+                sc = e.response.status_code if isinstance(e, _httpx.HTTPStatusError) else None
+                log_cef_int006_outbound_failure(
+                    base_url=self.base_url,
+                    model=use_model,
+                    provider=str(self.provider_id or "openai-compat"),
+                    method_name=f"POST {self.rerank_path}",
+                    status_code=sc,
+                    text_status=str(e),
+                )
+            except Exception:
+                pass
             raise self._readable(f"POST {self.rerank_path}", e) from e
 
         pairs = self._parse_rerank(data, len(passages))
@@ -856,7 +919,7 @@ class OpenAICompatModelsClient:
                 f"[{self.provider_id}] реранк не разобран. Структура ответа: "
                 f"{json.dumps(self._describe(data), ensure_ascii=False)[:400]}"
             )
-        logger.info(
+        logger.debug(
             "[%s] rerank: ok, вернулось %s из %s (model=%s, стиле=%s)",
             self.provider_id,
             len(pairs),

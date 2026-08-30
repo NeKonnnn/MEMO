@@ -88,7 +88,6 @@ import ChatInputStatusCluster from '../components/ChatInputStatusCluster';
 import ChatGearAgentsPanel from '../components/ChatGearAgentsPanel';
 import ChatGearMcpPanel from '../components/ChatGearMcpPanel';
 import ChatGearCodingPanel from '../components/ChatGearCodingPanel';
-import { enableCodingFromGearPanel } from '../coding/selectionStorage';
 import ChatGearSkillsPanel from '../components/ChatGearSkillsPanel';
 import ChatInputSuggestions from '../components/ChatInputSuggestions';
 import {
@@ -1279,13 +1278,7 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
               </Box>
               <Box
                 onClick={() => {
-                  setGearToolsPanel((p) => {
-                    const next = p === 'coding' ? 'main' : 'coding';
-                    if (next === 'coding') {
-                      enableCodingFromGearPanel(selectedChatId);
-                    }
-                    return next;
-                  });
+                  setGearToolsPanel((p) => (p === 'coding' ? 'main' : 'coding'));
                 }}
                 sx={{
                   ...dropdownItemSx,

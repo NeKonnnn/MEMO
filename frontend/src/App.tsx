@@ -9,6 +9,12 @@ import GlobalKeyboardShortcuts from './components/GlobalKeyboardShortcuts';
 import SettingsModal from './components/SettingsModal';
 import { ASTRA_FOCUS_CHAT_SEARCH, ASTRA_OPEN_SETTINGS, ASTRA_OPEN_SETTINGS_SECTION } from './constants/hotkeys';
 import { useRightSidebarInsetCssVar } from './hooks/useRightSidebarInsetCssVar';
+import {
+  readRightSidebarWidthPinned,
+  readRightSidebarWidthPx,
+  RIGHT_SIDEBAR_WIDTH_PINNED_STORAGE_KEY,
+  RIGHT_SIDEBAR_WIDTH_STORAGE_KEY,
+} from './hooks/useRightSidebarWidth';
 import UnifiedChatPage from './pages/UnifiedChatPage';
 import VoicePage from './pages/VoicePage';
 import DocumentsPage from './pages/DocumentsPage';
@@ -163,6 +169,8 @@ function App() {
     const saved = localStorage.getItem('rightSidebarHidden');
     return saved !== null ? saved === 'true' : false;
   });
+  const [rightSidebarWidthPx, setRightSidebarWidthPx] = useState(() => readRightSidebarWidthPx());
+  const [rightSidebarWidthPinned, setRightSidebarWidthPinned] = useState(() => readRightSidebarWidthPinned());
 
   const setRightOpenStable = useCallback(
     (v: boolean | ((prev: boolean) => boolean)) => setRightSidebarOpen(v),
@@ -172,8 +180,16 @@ function App() {
     (v: boolean | ((prev: boolean) => boolean)) => setRightSidebarHidden(v),
     [],
   );
+  const setRightWidthStable = useCallback(
+    (v: number | ((prev: number) => number)) => setRightSidebarWidthPx(v),
+    [],
+  );
+  const setRightWidthPinnedStable = useCallback(
+    (v: boolean | ((prev: boolean) => boolean)) => setRightSidebarWidthPinned(v),
+    [],
+  );
 
-  useRightSidebarInsetCssVar(rightSidebarOpen, rightSidebarHidden);
+  useRightSidebarInsetCssVar(rightSidebarOpen, rightSidebarHidden, rightSidebarWidthPx);
 
   /** Счётчик для фокуса поля «Поиск в чатах» (в т.ч. после показа скрытого сайдбара). */
   const [searchFocusNonce, setSearchFocusNonce] = useState(0);
@@ -233,6 +249,14 @@ function App() {
     localStorage.setItem('rightSidebarHidden', String(rightSidebarHidden));
   }, [rightSidebarHidden]);
 
+  useEffect(() => {
+    localStorage.setItem(RIGHT_SIDEBAR_WIDTH_STORAGE_KEY, String(rightSidebarWidthPx));
+  }, [rightSidebarWidthPx]);
+
+  useEffect(() => {
+    localStorage.setItem(RIGHT_SIDEBAR_WIDTH_PINNED_STORAGE_KEY, String(rightSidebarWidthPinned));
+  }, [rightSidebarWidthPinned]);
+
   // CSS-переменные для меню: единый серый hover, скругление, подушечка подсветки (перебивают глобальные стили в App.css)
   useEffect(() => {
     const root = document.documentElement;
@@ -267,8 +291,12 @@ function App() {
   const rightBarLayout = {
     open: rightSidebarOpen,
     hidden: rightSidebarHidden,
+    expandedWidthPx: rightSidebarWidthPx,
+    widthPinned: rightSidebarWidthPinned,
     setOpen: setRightOpenStable,
     setHidden: setRightHiddenStable,
+    setExpandedWidthPx: setRightWidthStable,
+    setWidthPinned: setRightWidthPinnedStable,
   };
 
   return (
@@ -402,6 +430,8 @@ function App() {
                         <RightBar
                           open={rightSidebarOpen}
                           hidden={rightSidebarHidden}
+                          expandedWidthPx={rightSidebarWidthPx}
+                          widthPinned={rightSidebarWidthPinned}
                           isDarkMode={isDarkMode}
                           onToggleOpen={toggleRightSidebar}
                           onHide={() => startTransition(() => setRightSidebarHidden(true))}
@@ -413,6 +443,8 @@ function App() {
                           }}
                           setOpen={setRightOpenStable}
                           setHidden={setRightHiddenStable}
+                          setExpandedWidthPx={setRightWidthStable}
+                          setWidthPinned={setRightWidthPinnedStable}
                         />
                       </Box>
                       </RightBarProvider>

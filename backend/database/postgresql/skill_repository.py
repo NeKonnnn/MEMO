@@ -570,15 +570,14 @@ class SkillRepository:
                 if data.slug is not None:
                     new_slug = slugify_skill_id(data.slug)
                     if not new_slug:
-                        return None
+                        raise ValueError("Пустое служебное имя (slug)")
                     clash = await conn.fetchval(
                         "SELECT id FROM skills WHERE LOWER(slug) = LOWER($1) AND id <> $2",
                         new_slug,
                         skill_id,
                     )
-                    if clash is not None:
-                        logger.warning("Skill slug уже занят: %s", new_slug)
-                        raise ValueError(f"Служебное имя «{new_slug}» уже занято")
+                    if clash:
+                        raise ValueError(f"Служебное имя уже занято: {new_slug}")
                     fields.append(f"slug = ${n}")
                     params.append(new_slug)
                     n += 1

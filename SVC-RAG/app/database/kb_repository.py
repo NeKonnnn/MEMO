@@ -43,20 +43,40 @@ class KbDocumentRepository:
         meta = json.dumps(document.metadata) if document.metadata else "{}"
         fn = strip_null_bytes(document.filename)
         body = strip_null_bytes(document.content)
-        async with await self.db.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                INSERT INTO kb_documents (filename, content, metadata, created_at, updated_at)
-                VALUES ($1, $2, $3::jsonb, $4, $5)
-                RETURNING id
-                """,
-                fn,
-                body,
-                meta,
-                document.created_at,
-                document.updated_at,
+        try:
+            async with await self.db.acquire() as conn:
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO kb_documents (filename, content, metadata, created_at, updated_at)
+                    VALUES ($1, $2, $3::jsonb, $4, $5)
+                    RETURNING id
+                    """,
+                    fn,
+                    body,
+                    meta,
+                    document.created_at,
+                    document.updated_at,
+                )
+            doc_id = row["id"] if row else None
+            if doc_id is not None:
+                from app.core.cef_logger.storage_audit import log_postgres_success
+
+                log_postgres_success(
+                    "PostgreSQL.insert(kb_documents)",
+                    db=self.db,
+                    request_uuid=str(doc_id),
+                )
+            return doc_id
+        except Exception as e:
+            from app.core.cef_logger.storage_audit import log_postgres_failure
+
+            log_postgres_failure(
+                "PostgreSQL.insert(kb_documents)",
+                str(e),
+                db=self.db,
+                request_uuid=fn,
             )
-        return row["id"] if row else None
+            raise
 
     async def get_document(self, document_id: int) -> Optional[Document]:
         async with await self.db.acquire() as conn:
@@ -185,9 +205,27 @@ class KbDocumentRepository:
         return out
 
     async def delete_document(self, document_id: int) -> bool:
-        async with await self.db.acquire() as conn:
-            await conn.execute("DELETE FROM kb_documents WHERE id = $1", document_id)
-        return True
+        try:
+            async with await self.db.acquire() as conn:
+                await conn.execute("DELETE FROM kb_documents WHERE id = $1", document_id)
+            from app.core.cef_logger.storage_audit import log_postgres_success
+
+            log_postgres_success(
+                "PostgreSQL.delete(kb_documents)",
+                db=self.db,
+                request_uuid=str(document_id),
+            )
+            return True
+        except Exception as e:
+            from app.core.cef_logger.storage_audit import log_postgres_failure
+
+            log_postgres_failure(
+                "PostgreSQL.delete(kb_documents)",
+                str(e),
+                db=self.db,
+                request_uuid=str(document_id),
+            )
+            raise
 
     async def find_document_ids_by_filename(self, name_or_stem: str, limit: int = 10) -> List[int]:
         """Поиск document_id по имени файла через ILIKE. См. project_rag_repository."""
@@ -253,16 +291,50 @@ class KbVectorRepository:
             base = i * 5
             placeholders.append(f"(${base+1}, ${base+2}, ${base+3}, ${base+4}, ${base+5}::jsonb)")
             flat.extend([doc_id, idx, emb, content, meta])
-        async with await self.db.acquire() as conn:
-            table = await self._table(conn)
-            await conn.execute(
-                f"""
-                INSERT INTO {table} (document_id, chunk_index, embedding, content, metadata)
-                VALUES {", ".join(placeholders)}
-                """,
-                *flat,
+        doc_id0 = vectors[0].document_id
+        try:
+            async with await self.db.acquire() as conn:
+                table = await self._table(conn)
+                await conn.execute(
+                    f"""
+                    INSERT INTO {table} (document_id, chunk_index, embedding, content, metadata)
+                    VALUES {", ".join(placeholders)}
+                    """,
+                    *flat,
+                )
+            from app.core.cef_logger.storage_audit import log_postgres_success
+
+            from app.clients.openai_models_compat_client import get_embed_log_context
+
+            ctx = get_embed_log_context() or {}
+            op = ctx.get("operation")
+            filename = ctx.get("filename")
+            op_part = f" op={op}" if op else ""
+            file_part = f" file={str(filename)[:120]}" if filename else ""
+
+            log_postgres_success(
+                f"PostgreSQL.insert(kb_vectors) document_id={doc_id0} n={len(vectors)}{op_part}{file_part}",
+                db=self.db,
+                request_uuid=str(doc_id0),
             )
-        return len(vectors)
+            return len(vectors)
+        except Exception as e:
+            from app.core.cef_logger.storage_audit import log_postgres_failure
+            from app.clients.openai_models_compat_client import get_embed_log_context
+
+            ctx = get_embed_log_context() or {}
+            op = ctx.get("operation")
+            filename = ctx.get("filename")
+            op_part = f" op={op}" if op else ""
+            file_part = f" file={str(filename)[:120]}" if filename else ""
+
+            log_postgres_failure(
+                f"PostgreSQL.insert(kb_vectors) document_id={doc_id0} n={len(vectors)}{op_part}{file_part}",
+                str(e),
+                db=self.db,
+                request_uuid=str(doc_id0),
+            )
+            raise
 
     async def similarity_search(
         self,
@@ -546,12 +618,49 @@ class KbVectorRepository:
         Иначе при смене модели старые вектора остались бы в таблице прежней
         размерности навсегда — и всплывали бы в поиске у тех, кто на той модели.
         """
-        async with await self.db.acquire() as conn:
-            for t in await self._all_tables(conn):
-                await conn.execute(
-                    f"DELETE FROM {t} WHERE document_id = $1", document_id
-                )
-        return True
+        try:
+            n_deleted = 0
+            async with await self.db.acquire() as conn:
+                for t in await self._all_tables(conn):
+                    row = await conn.fetchrow(
+                        f"SELECT COUNT(*) AS c FROM {t} WHERE document_id = $1",
+                        document_id,
+                    )
+                    n_deleted += int(row["c"] if row and row.get("c") is not None else 0)
+                    await conn.execute(
+                        f"DELETE FROM {t} WHERE document_id = $1",
+                        document_id,
+                    )
+
+            from app.core.cef_logger.storage_audit import log_postgres_success
+
+            from app.clients.openai_models_compat_client import get_embed_log_context
+
+            ctx = get_embed_log_context() or {}
+            op_part = f" op={ctx.get('operation')}" if ctx.get("operation") else ""
+            file_part = f" file={str(ctx.get('filename'))[:120]}" if ctx.get("filename") else ""
+
+            log_postgres_success(
+                f"PostgreSQL.delete(kb_vectors) document_id={document_id} n_deleted={n_deleted}{op_part}{file_part}",
+                db=self.db,
+                request_uuid=str(document_id),
+            )
+            return True
+        except Exception as e:
+            from app.core.cef_logger.storage_audit import log_postgres_failure
+            from app.clients.openai_models_compat_client import get_embed_log_context
+
+            ctx = get_embed_log_context() or {}
+            op_part = f" op={ctx.get('operation')}" if ctx.get("operation") else ""
+            file_part = f" file={str(ctx.get('filename'))[:120]}" if ctx.get("filename") else ""
+
+            log_postgres_failure(
+                f"PostgreSQL.delete(kb_vectors) document_id={document_id}{op_part}{file_part}",
+                str(e),
+                db=self.db,
+                request_uuid=str(document_id),
+            )
+            raise
 
     async def get_all_document_ids(self) -> List[int]:
         """Уникальные document_id в KB."""
@@ -563,13 +672,28 @@ class KbVectorRepository:
             rows = await conn.fetch(f"SELECT DISTINCT document_id FROM ({union}) ORDER BY document_id")
         return [r["document_id"] for r in rows]
 
-    async def get_all_contents_for_bm25(self) -> List[Tuple[int, int, str]]:
-        """Возвращает (document_id, chunk_index, content) для всех чанков KB — для BM25."""
+    async def get_all_contents_for_bm25(
+        self, document_ids: Optional[List[int]] = None
+    ) -> List[Tuple[int, int, str]]:
+        """Возвращает (document_id, chunk_index, content) для BM25
+
+        document_ids сужает корпус до перечисленных документов. Без него
+        берётся вся таблица - это нужно, только когда белого списка нет
+        """
         async with await self.db.acquire() as conn:
             table = await self._table(conn)
-            rows = await conn.fetch(
-                f"SELECT document_id, chunk_index, content FROM {table} ORDER BY document_id, chunk_index"
-            )
+            if document_ids:
+                rows = await conn.fetch(
+                    f"SELECT document_id, chunk_index, content FROM {table} "
+                    "WHERE document_id = ANY($1::int[]) "
+                    "ORDER BY document_id, chunk_index",
+                    [int(d) for d in document_ids if d is not None],
+                )
+            else:
+                rows = await conn.fetch(
+                    f"SELECT document_id, chunk_index, content FROM {table} "
+                    "ORDER BY document_id, chunk_index"
+                )
         return [(r["document_id"], r["chunk_index"], r["content"]) for r in rows]
 
     async def get_vector_by_document_and_chunk(self, document_id: int, chunk_index: int) -> Optional[DocumentVector]:

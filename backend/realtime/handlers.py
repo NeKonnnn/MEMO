@@ -75,6 +75,7 @@ from backend.rag_query.context_budget import rag_context_max_chars
 from backend.rag_query.relevance import hits_to_relevance_percents
 from backend.services.memory_rag_env import get_memory_similarity_threshold
 from backend.settings.cef_logger.cef_audit_context import cef_socket_remote_from_environ
+from backend.settings import get_settings
 from backend.settings.logging import get_logger
 from backend.settings.logging.errors import logged_suppress
 from backend.mcp.resolvers import resolve_chat_tool_ids
@@ -2427,7 +2428,9 @@ async def _handle_direct(
     coding_mode = bool(data.get("coding_mode"))
     plan_mode = bool(data.get("plan_mode"))
     workspace_path = str(data.get("workspace_path") or "").strip()
-    if not coding_mode and not plan_mode:
+    coding_cfg = getattr(get_settings(), "coding_agent", None)
+    auto_coding = bool(getattr(coding_cfg, "auto_enable_on_file_intent", False))
+    if not coding_mode and not plan_mode and auto_coding:
         from backend.coding_agent.loop import message_wants_coding_agent
 
         if message_wants_coding_agent(user_message):

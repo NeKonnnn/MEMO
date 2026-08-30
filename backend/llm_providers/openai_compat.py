@@ -742,15 +742,30 @@ class OpenAICompatProvider(LLMProvider):
                             or delta.get("message")
                         )
                         if not chunk:
-                            continue
-                        accumulated += chunk
-                        # Если модель начала «галлюцинировать» служебные теги — останавливаемся.
-                        if "<|im_start|>" in accumulated or "<|im_end|>" in accumulated:
-                            logger.info("[%s] обнаружен chat-template tag, обрезаем поток", self.id)
+                            pass
+                        else:
+                            accumulated += chunk
+                            # Если модель начала «галлюцинировать» служебные теги — останавливаемся.
+                            if "<|im_start|>" in accumulated or "<|im_end|>" in accumulated:
+                                logger.info("[%s] обнаружен chat-template tag, обрезаем поток", self.id)
+                                break
+                            if _invoke_stream_callback(callback, chunk, accumulated, "content") is False:
+                                logger.info("[%s] поток прерван callback'ом", self.id)
+                                return clean_llm_response(accumulated)
+                        # finish_reason (в т.ч. length = лимит токенов) — конец стрима.
+                        # Часть провайдеров не присылает [DONE] после этого и httpx ждёт
+                        # read-timeout минутами, а UI остаётся в «генерации».
+                        finish_reason = choices[0].get("finish_reason") or choices[0].get("stop_reason")
+                        if finish_reason:
+                            if str(finish_reason).lower() not in ("stop", "tool_calls", "function_call"):
+                                logger.info(
+                                    "[%s] stream finish_reason=%r model=%r (накоплено %s симв.)",
+                                    self.id,
+                                    finish_reason,
+                                    model,
+                                    len(accumulated),
+                                )
                             break
-                        if _invoke_stream_callback(callback, chunk, accumulated, "content") is False:
-                            logger.info("[%s] поток прерван callback'ом", self.id)
-                            return clean_llm_response(accumulated)
         except httpx.HTTPStatusError as e:
             stream_body = _safe_response_text(e.response)
             logger.error("[%s] stream HTTP %s: %s", self.id, e.response.status_code, e)

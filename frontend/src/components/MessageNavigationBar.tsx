@@ -26,22 +26,12 @@ function resolveActiveUserMessageIndex(messages: Message[], messageIndex: number
   return null;
 }
 
-function findFirstUserMessageIndex(messages: Message[]): number | null {
-  const idx = messages.findIndex((m) => m.role === 'user');
-  return idx >= 0 ? idx : null;
-}
-
 /**
  * Активная секция = вопрос пользователя + все ответы до следующего вопроса.
  * Так первый пункт остаётся активным, пока читаем длинный ответ под ним.
  */
 function findActiveUserMessageBySections(messages: Message[]): number | null {
-  const scrollContainer = document.querySelector('.chat-messages-area');
   const viewportMiddle = window.innerHeight / 2;
-
-  if (scrollContainer && scrollContainer.scrollTop < 64) {
-    return findFirstUserMessageIndex(messages);
-  }
 
   let fallbackUserIndex: number | null = null;
   let fallbackDistance = Infinity;
@@ -90,7 +80,11 @@ export const MessageNavigationBar: React.FC<MessageNavigationBarProps> = ({
   isDarkMode,
   onNavigate,
 }) => {
-  const { open: rightSidebarOpen, hidden: rightSidebarHidden } = useRightBarLayout();
+  const {
+    open: rightSidebarOpen,
+    hidden: rightSidebarHidden,
+    expandedWidthPx,
+  } = useRightBarLayout();
   const [activeMessageIndex, setActiveMessageIndex] = useState<number | null>(null);
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   const [showListPanel, setShowListPanel] = useState(false);
@@ -189,15 +183,15 @@ export const MessageNavigationBar: React.FC<MessageNavigationBarProps> = ({
   };
 
   const handleNavigationMouseLeave = () => {
-    // Проверяем что курсор не над панелью списка
-    setTimeout(() => {
-      if (!listPanelRef.current?.matches(':hover')) {
-        setShowListPanel(false);
-        setHoveredListItemIndex(null);
-        setTooltipState({ show: false, content: '', fullContent: '', top: 0 });
-        setShowFullTooltip(false);
-      }
-    }, 100);
+    if (hoverTimeoutRef.current) {
+      clearTimeout(hoverTimeoutRef.current);
+      hoverTimeoutRef.current = null;
+    }
+    setShowListPanel(false);
+    setHoveredListItemIndex(null);
+    setHoveredIndex(null);
+    setTooltipState({ show: false, content: '', fullContent: '', top: 0 });
+    setShowFullTooltip(false);
   };
 
   // Обработка наведения на элемент списка
@@ -237,7 +231,7 @@ export const MessageNavigationBar: React.FC<MessageNavigationBarProps> = ({
     setShowFullTooltip(false);
   };
 
-  // Обработка клика на черточку / пункт списка
+  // Клик сразу (mousedown): не ждём hover и не теряем событие, если панель закрывается.
   const handleClick = (originalIndex: number) => {
     pinnedActiveRef.current = { index: originalIndex, until: Date.now() + 1200 };
     setActiveMessageIndex(originalIndex);
@@ -245,191 +239,203 @@ export const MessageNavigationBar: React.FC<MessageNavigationBarProps> = ({
     setShowListPanel(false);
   };
 
-  // Вычисляем правую позицию в зависимости от состояния боковой панели
-  const getRightPosition = () => {
-    if (rightSidebarHidden) {
-      return '50px'; // Если панель полностью скрыта - оставляем место для стрелки
-    }
-    if (rightSidebarOpen) {
-      return '300px'; // Если панель открыта - прямо у края панели (панель 400px + 8px отступ)
-    }
-    return '95px'; // Если панель свернута - оставляем место для узкой полоски и стрелки
-  };
+  // Привязка к правой панели: inset = реальная ширина (в т.ч. при resize).
+  // CSS-переменная --right-sidebar-inset обновляется из App; дублируем через expandedWidthPx
+  // на случай рассинхрона при первом кадре.
+  const sidebarInsetPx = rightSidebarHidden
+    ? 0
+    : rightSidebarOpen
+      ? expandedWidthPx
+      : 64;
+  /** Отступ дашей/меню от левого края правой панели (или от края экрана, если панель скрыта). */
+  const NAV_EDGE_GAP_PX = 16;
+  const navRightPx = rightSidebarHidden
+    ? 50 // место под стрелку «показать панель»
+    : sidebarInsetPx + NAV_EDGE_GAP_PX;
+  /** Тултип слева от списка (~280) + дашей (~40) + gap. */
+  const tooltipRightPx = navRightPx + 320;
 
   return (
     <>
-      {/* Навигационная панель с черточками */}
+      {/* Даши + список в одном hover-контейнере: клик сразу, без «зависнуть, чтобы попасть». */}
       <Box
         ref={navigationRef}
         onMouseEnter={handleNavigationMouseEnter}
         onMouseLeave={handleNavigationMouseLeave}
         sx={{
           position: 'fixed',
-          right: getRightPosition(),
+          right: `${navRightPx}px`,
           top: '50%',
           transform: 'translateY(-50%)',
           display: 'flex',
           flexDirection: 'row',
-          gap: 1,
-          padding: 1,
-          writingMode: 'vertical-lr',
+          alignItems: 'center',
+          gap: 1.5,
           zIndex: 1000,
           pointerEvents: 'all',
           transition: 'right 0.3s ease',
         }}
       >
-        {userMessages.map(({ msg, originalIndex }, index) => {
-          const isActive = activeMessageIndex === originalIndex;
-          const isHovered = hoveredIndex === originalIndex;
-          const isLong = index % 2 === 0; // Четные индексы - длинные, нечетные - короткие
-
-          return (
-            <Box
-              key={originalIndex}
-              onClick={() => handleClick(originalIndex)}
-              sx={{
-                width: isLong ? '24px' : '16px',
-                height: isActive ? '3px' : '2px',
-                alignSelf: isLong ? 'stretch' : 'center',
-                backgroundColor: isActive
-                  ? '#2196f3'
-                  : isHovered
-                  ? '#64b5f6'
-                  : isDarkMode
-                  ? 'rgba(255, 255, 255, 0.25)'
-                  : 'rgba(0, 0, 0, 0.15)',
-                borderRadius: '2px',
-                cursor: 'pointer',
-                transition: 'all 0.15s ease',
-                boxShadow: isActive 
-                  ? '0 0 8px rgba(33, 150, 243, 0.5)' 
-                  : 'none',
-                '&:hover': {
-                  height: '4px',
-                  backgroundColor: '#2196f3',
-                  boxShadow: '0 0 8px rgba(33, 150, 243, 0.4)',
-                },
-              }}
-            />
-          );
-        })}
-      </Box>
-
-      {/* Панель со списком всех вопросов */}
-      {showListPanel && (
-        <Paper
-          ref={listPanelRef}
-          onMouseLeave={() => {
-            setShowListPanel(false);
-            setHoveredListItemIndex(null);
-            setTooltipState({ show: false, content: '', fullContent: '', top: 0 });
-            setShowFullTooltip(false);
-            if (hoverTimeoutRef.current) {
-              clearTimeout(hoverTimeoutRef.current);
-              hoverTimeoutRef.current = null;
-            }
-          }}
-          sx={{
-            position: 'fixed',
-            right: rightSidebarHidden ? '90px' : (rightSidebarOpen ? '360px' : '154px'),
-            top: '50%',
-            transform: 'translateY(-50%)',
-            minWidth: '220px',
-            maxWidth: '280px',
-            maxHeight: `calc(5 * 56px + 8px)`, // Максимум 5 элементов (высота элемента ~56px + отступы)
-            overflow: 'auto',
-            padding: '4px',
-            zIndex: 1001,
-            backgroundColor: isDarkMode ? '#2d2d2d' : '#ffffff',
-            boxShadow: isDarkMode 
-              ? '0 8px 32px rgba(0, 0, 0, 0.6)' 
-              : '0 8px 32px rgba(0, 0, 0, 0.12)',
-            borderRadius: '12px',
-            border: 'none',
-            pointerEvents: 'all',
-            transition: 'right 0.3s ease',
-            // Стили для скроллбара
-            '&::-webkit-scrollbar': {
-              width: '6px',
-            },
-            '&::-webkit-scrollbar-track': {
-              background: 'transparent',
-            },
-            '&::-webkit-scrollbar-thumb': {
-              background: isDarkMode ? 'rgba(255, 255, 255, 0.2)' : 'rgba(0, 0, 0, 0.2)',
-              borderRadius: '3px',
-              '&:hover': {
-                background: isDarkMode ? 'rgba(255, 255, 255, 0.3)' : 'rgba(0, 0, 0, 0.3)',
+        {showListPanel ? (
+          <Paper
+            ref={listPanelRef}
+            sx={{
+              minWidth: '220px',
+              maxWidth: '280px',
+              maxHeight: `calc(5 * 56px + 8px)`,
+              overflow: 'auto',
+              padding: '4px',
+              backgroundColor: isDarkMode ? '#2d2d2d' : '#ffffff',
+              boxShadow: isDarkMode
+                ? '0 8px 32px rgba(0, 0, 0, 0.6)'
+                : '0 8px 32px rgba(0, 0, 0, 0.12)',
+              borderRadius: '12px',
+              border: 'none',
+              pointerEvents: 'all',
+              '&::-webkit-scrollbar': {
+                width: '6px',
               },
-            },
-            scrollbarWidth: 'thin',
-            scrollbarColor: isDarkMode 
-              ? 'rgba(255, 255, 255, 0.2) transparent' 
-              : 'rgba(0, 0, 0, 0.2) transparent',
+              '&::-webkit-scrollbar-track': {
+                background: 'transparent',
+              },
+              '&::-webkit-scrollbar-thumb': {
+                background: isDarkMode ? 'rgba(255, 255, 255, 0.2)' : 'rgba(0, 0, 0, 0.2)',
+                borderRadius: '3px',
+                '&:hover': {
+                  background: isDarkMode ? 'rgba(255, 255, 255, 0.3)' : 'rgba(0, 0, 0, 0.3)',
+                },
+              },
+              scrollbarWidth: 'thin',
+              scrollbarColor: isDarkMode
+                ? 'rgba(255, 255, 255, 0.2) transparent'
+                : 'rgba(0, 0, 0, 0.2) transparent',
+            }}
+          >
+            {userMessages.map(({ msg, originalIndex }, index) => {
+              const isActive = activeMessageIndex === originalIndex;
+              const isListItemHovered = hoveredListItemIndex === index;
+              const shortText = getShortText(msg.content);
+
+              return (
+                <Box
+                  key={originalIndex}
+                  onMouseEnter={(e) => handleListItemMouseEnter(index, e)}
+                  onMouseLeave={handleListItemMouseLeave}
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    handleClick(originalIndex);
+                  }}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    handleClick(originalIndex);
+                  }}
+                  sx={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    padding: '12px 16px',
+                    marginBottom: '2px',
+                    borderRadius: '8px',
+                    cursor: 'pointer',
+                    backgroundColor: isListItemHovered
+                      ? isDarkMode ? 'rgba(255, 255, 255, 0.08)' : 'rgba(0, 0, 0, 0.04)'
+                      : 'transparent',
+                    transition: 'background-color 0.2s ease',
+                    '&:hover': {
+                      backgroundColor: isDarkMode ? 'rgba(255, 255, 255, 0.08)' : 'rgba(0, 0, 0, 0.04)',
+                    },
+                  }}
+                >
+                  <Box
+                    sx={{
+                      width: '6px',
+                      height: '6px',
+                      borderRadius: '50%',
+                      backgroundColor: isActive ? '#2196f3' : 'transparent',
+                      marginRight: '12px',
+                      flexShrink: 0,
+                      boxShadow: isActive ? '0 0 6px rgba(33, 150, 243, 0.5)' : 'none',
+                    }}
+                  />
+                  <Typography
+                    variant="body2"
+                    sx={{
+                      color: isDarkMode ? 'rgba(255, 255, 255, 0.9)' : 'rgba(0, 0, 0, 0.87)',
+                      fontSize: '0.875rem',
+                      lineHeight: 1.5,
+                      fontWeight: 400,
+                      flex: 1,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      display: '-webkit-box',
+                      WebkitLineClamp: 2,
+                      WebkitBoxOrient: 'vertical',
+                    }}
+                  >
+                    {shortText}
+                  </Typography>
+                </Box>
+              );
+            })}
+          </Paper>
+        ) : null}
+
+        <Box
+          sx={{
+            display: 'flex',
+            flexDirection: 'row',
+            gap: 1,
+            padding: 1,
+            writingMode: 'vertical-lr',
           }}
         >
-          {userMessages.map(({ msg, originalIndex }, index) => {
+          {userMessages.map(({ originalIndex }, index) => {
             const isActive = activeMessageIndex === originalIndex;
-            const isListItemHovered = hoveredListItemIndex === index;
-            const shortText = getShortText(msg.content);
+            const isHovered = hoveredIndex === originalIndex;
+            const isLong = index % 2 === 0;
 
             return (
               <Box
                 key={originalIndex}
-                onMouseEnter={(e) => handleListItemMouseEnter(index, e)}
-                onMouseLeave={handleListItemMouseLeave}
-                onClick={() => handleClick(originalIndex)}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  handleClick(originalIndex);
+                }}
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  handleClick(originalIndex);
+                }}
                 sx={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  padding: '12px 16px',
-                  marginBottom: '2px',
-                  borderRadius: '8px',
+                  width: isLong ? '24px' : '16px',
+                  height: isActive ? '3px' : '2px',
+                  alignSelf: isLong ? 'stretch' : 'center',
+                  backgroundColor: isActive
+                    ? '#2196f3'
+                    : isHovered
+                    ? '#64b5f6'
+                    : isDarkMode
+                    ? 'rgba(255, 255, 255, 0.25)'
+                    : 'rgba(0, 0, 0, 0.15)',
+                  borderRadius: '2px',
                   cursor: 'pointer',
-                  backgroundColor: isListItemHovered
-                    ? isDarkMode ? 'rgba(255, 255, 255, 0.08)' : 'rgba(0, 0, 0, 0.04)'
-                    : 'transparent',
-                  transition: 'background-color 0.2s ease',
+                  transition: 'all 0.15s ease',
+                  boxShadow: isActive
+                    ? '0 0 8px rgba(33, 150, 243, 0.5)'
+                    : 'none',
                   '&:hover': {
-                    backgroundColor: isDarkMode ? 'rgba(255, 255, 255, 0.08)' : 'rgba(0, 0, 0, 0.04)',
+                    height: '4px',
+                    backgroundColor: '#2196f3',
+                    boxShadow: '0 0 8px rgba(33, 150, 243, 0.4)',
                   },
                 }}
-              >
-                {/* Индикатор активности — слот фиксирован, чтобы текст не прыгал */}
-                <Box
-                  sx={{
-                    width: '6px',
-                    height: '6px',
-                    borderRadius: '50%',
-                    backgroundColor: isActive ? '#2196f3' : 'transparent',
-                    marginRight: '12px',
-                    flexShrink: 0,
-                    boxShadow: isActive ? '0 0 6px rgba(33, 150, 243, 0.5)' : 'none',
-                  }}
-                />
-                
-                <Typography
-                  variant="body2"
-                  sx={{
-                    color: isDarkMode ? 'rgba(255, 255, 255, 0.9)' : 'rgba(0, 0, 0, 0.87)',
-                    fontSize: '0.875rem',
-                    lineHeight: 1.5,
-                    fontWeight: 400,
-                    flex: 1,
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    display: '-webkit-box',
-                    WebkitLineClamp: 2,
-                    WebkitBoxOrient: 'vertical',
-                  }}
-                >
-                  {shortText}
-                </Typography>
-              </Box>
+              />
             );
           })}
-        </Paper>
-      )}
+        </Box>
+      </Box>
 
       {/* Всплывающее окно с полным текстом сообщения (появляется через 2 секунды) */}
       {tooltipState.show && showListPanel && showFullTooltip && (
@@ -440,9 +446,7 @@ export const MessageNavigationBar: React.FC<MessageNavigationBarProps> = ({
           }}
           sx={{
             position: 'fixed',
-            right: rightSidebarHidden 
-              ? '380px' 
-              : (rightSidebarOpen ? '788px' : '444px'), // Слева от панели со списком
+            right: `${tooltipRightPx}px`,
             top: tooltipState.top,
             maxWidth: '400px',
             maxHeight: '300px',

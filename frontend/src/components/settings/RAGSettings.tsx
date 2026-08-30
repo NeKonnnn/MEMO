@@ -24,6 +24,7 @@ import {
 } from '@mui/icons-material';
 import { getSidebarPanelBackground } from '../../constants/sidebarPanelColor';
 import { useAppActions } from '../../contexts/AppContext';
+import { useRagReindexStatus } from '../../contexts/RagReindexStatusContext';
 import { getApiUrl, getAuthFetchHeaders } from '../../config/api';
 import ClampedNumberField from '../ClampedNumberField';
 import {
@@ -262,6 +263,7 @@ export default function RAGSettings({
   );
   const isInitializedRef = useRef(false);
   const { showNotification } = useAppActions();
+  const { notifyReindexStarted } = useRagReindexStatus();
 
   const entityLogLabel = useMemo(() => {
     const name = (entityName || '').trim();
@@ -342,6 +344,7 @@ export default function RAGSettings({
       );
     }
     if (Boolean(data?.reindexed)) {
+      notifyReindexStarted();
       showNotification(
         'success',
         'Модель загружена. Запущена переиндексация ваших документов (без Memory RAG).',
@@ -523,6 +526,9 @@ export default function RAGSettings({
           draft: collected,
         });
         if (saved.ok) {
+          if (saved.reindexed) {
+            notifyReindexStarted();
+          }
           showNotification('success', 'Настройки РАГ сохранены');
           notifyEntitySettingsApplied(
             projectsAgentsScope,
@@ -587,6 +593,12 @@ export default function RAGSettings({
       });
 
       if (response.ok) {
+        // Правка нарезки или эмбеддера тоже запускает перечанковку — сервер
+        // сообщает об этом полем reindexed.
+        const saved = await response.json().catch(() => ({}));
+        if (Boolean(saved?.reindexed)) {
+          notifyReindexStarted();
+        }
         syncLocalStorageCache(selectedStrategy, ragChunkingStrategy);
         setDraftEmbeddingPath(null);
         setDraftRerankerPath(null);

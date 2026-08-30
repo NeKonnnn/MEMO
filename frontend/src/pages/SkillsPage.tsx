@@ -23,6 +23,7 @@ import { useTheme } from '@mui/material/styles';
 import { getApiUrl, API_ENDPOINTS } from '../config/api';
 import { useAuth } from '../contexts/AuthContext';
 import { useAppActions, useAppContext } from '../contexts/AppContext';
+import { formatAuthorLabel } from '../utils/formatAuthorLabel';
 import SkillFilesEditor from '../components/skills/SkillFilesEditor';
 import {
   GalleryEntityCard,
@@ -55,6 +56,7 @@ interface SkillItem {
   file_count?: number;
   author_id: string;
   author_name: string;
+  author_full_name?: string | null;
   created_at: string;
   updated_at: string;
   write_access?: boolean;
@@ -99,7 +101,7 @@ function toCardItem(skill: SkillItem): GalleryCardItem {
   return {
     id: skill.id,
     title,
-    authorName: skill.author_name,
+    authorName: formatAuthorLabel(skill.author_name, skill.author_full_name, skill.author_id),
     preview,
     metaLine: metaParts.join(' · ') || undefined,
     viewsCount: skill.views_count,

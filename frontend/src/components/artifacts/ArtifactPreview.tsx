@@ -28,20 +28,22 @@ export default function ArtifactPreview({ artifact, isStreaming = false }: Props
     return <Box sx={{ height: '100%', minHeight: 240, bgcolor: '#e8eaed' }} />;
   }
 
+  const streaming = isStreaming && !closed;
+
   if (isHtmlArtifactType(type)) {
-    return <ArtifactHtmlPreview content={content} isStreaming={isStreaming && !closed} />;
+    return <ArtifactHtmlPreview content={content} isStreaming={streaming} />;
   }
   if (isSvgArtifactType(type)) {
-    return <ArtifactSvgPreview content={content} />;
+    return <ArtifactSvgPreview content={content} isStreaming={streaming} />;
   }
   if (isMarkdownArtifactType(type)) {
     return <ArtifactMarkdownPreview content={content} />;
   }
   if (isMermaidArtifactType(type)) {
-    return <ArtifactMermaidPreview content={content} />;
+    return <ArtifactMermaidPreview content={content} isStreaming={streaming} />;
   }
   if (isReactArtifactType(type)) {
-    return <ArtifactReactPreview content={content} />;
+    return <ArtifactReactPreview content={content} isStreaming={streaming} />;
   }
 
   return (

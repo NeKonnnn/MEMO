@@ -16,11 +16,6 @@ ANN-индекс (HNSW или IVFFlat) выбирается через env/confi
   dim <= 2000   -> vector(dim)  + ANN (vector_cosine_ops)
   2001..4000    -> halfvec(dim) + ANN (halfvec_cosine_ops)
   dim > 4000    -> vector(dim), без ANN (точный скан)
-
-Что НЕЛЬЗЯ делать (и почему тут этого нет по умолчанию): приводить одну общую таблицу
-к новой размерности через ALTER — это требует TRUNCATE, то есть стирает вектора ВСЕХ
-пользователей из-за выбора одного. Старая функция migrate_vector_tables оставлена, но
-только для явного админского вызова.
 """
 
 from __future__ import annotations
@@ -125,8 +120,8 @@ def vector_cast(dim: int) -> str:
     return "vector"
 
 
-async def get_column_embedding_type(conn, table: str) -> Optional[Tuple[int, str]]:
-    """(dim, 'vector'|'halfvec') колонки embedding или None, если таблицы нет."""
+async def get_column_vector_dim(conn, table: str) -> Optional[int]:
+    """Текущая размерность колонки embedding или None, если таблицы нет."""
     row = await conn.fetchrow(
         """
         SELECT format_type(a.atttypid, a.atttypmod) AS ft
@@ -142,17 +137,8 @@ async def get_column_embedding_type(conn, table: str) -> Optional[Tuple[int, str
     )
     if not row or not row["ft"]:
         return None
-    ft = str(row["ft"]).lower()
-    m = re.search(r"(halfvec|vector)\((\d+)\)", ft)
-    if not m:
-        return None
-    return int(m.group(2)), m.group(1)
-
-
-async def get_column_vector_dim(conn, table: str) -> Optional[int]:
-    """Текущая размерность колонки embedding или None, если таблицы нет."""
-    info = await get_column_embedding_type(conn, table)
-    return info[0] if info else None
+    m = re.search(r"(?:half)?vec(?:tor)?\((\d+)\)", str(row["ft"]))
+    return int(m.group(1)) if m else None
 
 
 async def table_exists(conn, table: str) -> bool:
@@ -206,20 +192,13 @@ async def create_embedding_index(conn, table: str, dim: int) -> bool:
     """Создать ANN-индекс активного метода; неактивный снять.
 
     Возвращает True, если активный индекс есть (или уже был).
-    Размерность и тип (vector/halfvec) берём из БД — колонка могла разойтись с конфигом.
-    Legacy-таблицы часто ``vector(2048+)``: для них HNSW/IVFFlat с vector_ops
-    недоступны при dim>2000 (нужен halfvec).
+    Размерность берём из БД (колонка могла разойтись с конфигом).
     """
     method = resolve_index_method()
     params = _index_params()
     index_name = index_name_for(table, method)
-    info = await get_column_embedding_type(conn, table)
-    if info:
-        effective_dim, col_kind = info
-    else:
-        effective_dim, col_kind = int(dim or 0), (
-            "halfvec" if int(dim or 0) > HNSW_MAX_DIM else "vector"
-        )
+    column_dim = await get_column_vector_dim(conn, table)
+    effective_dim = int(column_dim or dim or 0)
     if effective_dim < 1:
         return False
 
@@ -233,18 +212,9 @@ async def create_embedding_index(conn, table: str, dim: int) -> bool:
         await drop_embedding_index(conn, table)
         return False
 
-    # ANN для vector только до 2000; для halfvec — до 4000.
-    if col_kind == "vector" and effective_dim > HNSW_MAX_DIM:
-        logger.warning(
-            "%s: колонка vector(%s) > %s — ANN недоступен (нужен halfvec), работаем без ANN",
-            table,
-            effective_dim,
-            HNSW_MAX_DIM,
-        )
-        await drop_embedding_index(conn, table)
-        return False
-
-    ops = "halfvec_cosine_ops" if col_kind == "halfvec" else "vector_cosine_ops"
+    ops = (
+        "halfvec_cosine_ops" if effective_dim > HNSW_MAX_DIM else "vector_cosine_ops"
+    )
 
     # Свап: убрать индекс другого метода, чтобы не держать два ANN на одной колонке.
     other = INDEX_METHOD_IVFFLAT if method == INDEX_METHOD_HNSW else INDEX_METHOD_HNSW
@@ -252,9 +222,7 @@ async def create_embedding_index(conn, table: str, dim: int) -> bool:
     try:
         await conn.execute(f"DROP INDEX IF EXISTS {other_name}")
     except Exception:
-        logger.debug(
-            "%s: не удалось снять неактивный индекс %s", table, other_name, exc_info=True
-        )
+        logger.debug("%s: не удалось снять неактивный индекс %s", table, other_name, exc_info=True)
 
     try:
         if method == INDEX_METHOD_IVFFLAT:
@@ -267,14 +235,13 @@ async def create_embedding_index(conn, table: str, dim: int) -> bool:
                 """
             )
             logger.info(
-                "%s: ANN=ivfflat index=%s dim=%s lists=%s probes=%s ops=%s kind=%s",
+                "%s: ANN=ivfflat index=%s dim=%s lists=%s probes=%s ops=%s",
                 table,
                 index_name,
                 effective_dim,
                 lists,
                 params["ivfflat_probes"],
                 ops,
-                col_kind,
             )
         else:
             m = int(params["hnsw_m"])
@@ -287,7 +254,7 @@ async def create_embedding_index(conn, table: str, dim: int) -> bool:
                 """
             )
             logger.info(
-                "%s: ANN=hnsw index=%s dim=%s m=%s ef_construction=%s ef_search=%s ops=%s kind=%s",
+                "%s: ANN=hnsw index=%s dim=%s m=%s ef_construction=%s ef_search=%s ops=%s",
                 table,
                 index_name,
                 effective_dim,
@@ -295,16 +262,14 @@ async def create_embedding_index(conn, table: str, dim: int) -> bool:
                 efc,
                 params["hnsw_ef_search"],
                 ops,
-                col_kind,
             )
         return True
     except Exception:
         logger.exception(
-            "%s: не удалось создать ANN=%s (dim=%s, kind=%s, ops=%s) — работаем без ANN",
+            "%s: не удалось создать ANN=%s (dim=%s, ops=%s) — работаем без ANN",
             table,
             method,
             effective_dim,
-            col_kind,
             ops,
         )
         return False

@@ -1,13 +1,16 @@
 import React, { useMemo } from 'react';
 import { Box } from '@mui/material';
+import { useCommittedContent } from '../../hooks/useCommittedContent';
 
 interface Props {
   content: string;
+  isStreaming?: boolean;
 }
 
-export default function ArtifactSvgPreview({ content }: Props) {
+export default function ArtifactSvgPreview({ content, isStreaming = false }: Props) {
+  const committed = useCommittedContent(content || '', isStreaming, 400);
   const srcDoc = useMemo(() => {
-    const svg = (content || '').trim();
+    const svg = (committed || '').trim();
     if (!svg) return '';
     if (/<svg[\s>]/i.test(svg)) {
       return `<!DOCTYPE html><html><head><meta charset="UTF-8"/><style>
@@ -16,7 +19,7 @@ export default function ArtifactSvgPreview({ content }: Props) {
       </style></head><body>${svg}</body></html>`;
     }
     return `<!DOCTYPE html><html><body><pre>${svg.replace(/</g, '&lt;')}</pre></body></html>`;
-  }, [content]);
+  }, [committed]);
 
   return (
     <Box

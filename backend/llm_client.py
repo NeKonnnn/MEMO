@@ -1463,25 +1463,43 @@ class LLMService:
                                         or delta.get("message")
                                     )
                                     if not chunk:
-                                        continue
-                                    if "<|im_start|>" in chunk or "<|im_end|>" in chunk:
+                                        pass
+                                    elif "<|im_start|>" in chunk or "<|im_end|>" in chunk:
                                         logger.info("[_stream_generation] Обнаружен im_start/im_end тег, обрезаем")
                                         break
-                                    for role, piece in prompt_think.feed(chunk):
-                                        if role == "reasoning":
-                                            reasoning_accumulated += piece
-                                            if _invoke_stream_callback_safe(
-                                                stream_callback, piece, reasoning_accumulated, "reasoning"
-                                            ) is False:
-                                                logger.info("[_stream_generation] Прервано колбэком (reasoning/content)")
-                                                return prompt_think.finalize_combined()
-                                        else:
-                                            accumulated_text += piece
-                                            if _invoke_stream_callback_safe(
-                                                stream_callback, piece, accumulated_text, "content"
-                                            ) is False:
-                                                logger.info("[_stream_generation] Прервано колбэком")
-                                                return prompt_think.finalize_combined()
+                                    else:
+                                        for role, piece in prompt_think.feed(chunk):
+                                            if role == "reasoning":
+                                                reasoning_accumulated += piece
+                                                if _invoke_stream_callback_safe(
+                                                    stream_callback, piece, reasoning_accumulated, "reasoning"
+                                                ) is False:
+                                                    logger.info("[_stream_generation] Прервано колбэком (reasoning/content)")
+                                                    return prompt_think.finalize_combined()
+                                            else:
+                                                accumulated_text += piece
+                                                if _invoke_stream_callback_safe(
+                                                    stream_callback, piece, accumulated_text, "content"
+                                                ) is False:
+                                                    logger.info("[_stream_generation] Прервано колбэком")
+                                                    return prompt_think.finalize_combined()
+                                    # Конец стрима по finish_reason (length = лимит токенов и т.п.).
+                                    # Без этого при отсутствии [DONE] зависаем на read-timeout,
+                                    # а фронт держит кнопку «Остановить» часами.
+                                    choice0 = data["choices"][0]
+                                    finish_reason = choice0.get("finish_reason") or choice0.get("stop_reason")
+                                    if finish_reason:
+                                        if str(finish_reason).lower() not in (
+                                            "stop",
+                                            "tool_calls",
+                                            "function_call",
+                                        ):
+                                            logger.info(
+                                                "[_stream_generation] finish_reason=%r (накоплено %s симв.)",
+                                                finish_reason,
+                                                len(accumulated_text),
+                                            )
+                                        break
                             except json.JSONDecodeError:
                                 continue
             if thinking_requested:

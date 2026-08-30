@@ -289,7 +289,7 @@ def note_dim(provider: Optional[str], model: Optional[str], dim: int) -> None:
     key = _key(p, m)
     if _dims.get(key) != d:
         _dims[key] = d
-        logger.info("[EMBED-ROUTE] provider=%s model=%s dim=%s", p or "cluster", m, d)
+        logger.debug("[EMBED-ROUTE] provider=%s model=%s dim=%s", p or "cluster", m, d)
 
 def _provider_entry(provider_id: str):
     from app.core.config import get_settings

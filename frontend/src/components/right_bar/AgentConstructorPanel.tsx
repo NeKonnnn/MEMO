@@ -56,6 +56,7 @@ import {
 import { getApiUrl, API_ENDPOINTS, getAuthFetchHeaders } from '../../config/api';
 import { useAuth } from '../../contexts/AuthContext';
 import { useAppActions } from '../../contexts/AppContext';
+import { useRagReindexStatus } from '../../contexts/RagReindexStatusContext';
 import { loadAgentModelOnly } from '../../utils/applyAgentServer';
 import { saveEntityRagSettings, type EntityRagDraft } from '../../utils/entityRagSettings';
 import {
@@ -96,6 +97,8 @@ import { useRagEntityReadyMessage } from '../../hooks/useRagEntityReadyMessage';
 import { fetchMergedUserAgents } from '../../utils/fetchMergedUserAgents';
 import { getSidebarPanelBackground, getSidebarPanelChrome, getSidebarSecondaryButtonSx } from '../../constants/sidebarPanelColor';
 import RagUploadingFileThumb from '../RagUploadingFileThumb';
+import RagFilesSearchField from '../RagFilesSearchField';
+import { filterByRagFilenameQuery } from '../../utils/ragFilesSearch';
 import AgentChainEditor from './AgentChainEditor';
 import { fetchAgentChainConfig, parseAgentIds } from '../../constants/agentChain';
 import {
@@ -253,6 +256,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
   const { token, user } = useAuth();
   const ragUserId = String(user?.user_id || user?.username || '').trim().toLowerCase();
   const { showNotification } = useAppActions();
+  const { notifyReindexStarted } = useRagReindexStatus();
   const [panelBg, setPanelBg] = useState(() => getSidebarPanelBackground());
   const panelChrome = useMemo(() => getSidebarPanelChrome(panelBg), [panelBg]);
   const secondaryBtnSx = useMemo(() => getSidebarSecondaryButtonSx(panelChrome), [panelChrome]);
@@ -399,6 +403,7 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
   const [isLoadingKb, setIsLoadingKb] = useState(false);
   const [isUploadingKb, setIsUploadingKb] = useState(false);
   const [pendingKbUploads, setPendingKbUploads] = useState<RagPendingUpload[]>([]);
+  const [kbFileSearchQuery, setKbFileSearchQuery] = useState('');
 
   // Skills attached to agent (config.skill_ids — slugs)
   const [availableSkills, setAvailableSkills] = useState<Array<{ id: number; slug: string; name: string; description?: string }>>([]);
@@ -1215,6 +1220,9 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
         });
         if (ragApplied.ok) {
           setRagDraft(null);
+          if (ragApplied.reindexed) {
+            notifyReindexStarted();
+          }
         } else {
           showNotification(
             'warning',
@@ -1318,6 +1326,22 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
       );
     });
   }, [kbDocuments, kbDocumentIds, selectedAgentId]);
+
+  const filteredPendingKbUploads = useMemo(
+    () => filterByRagFilenameQuery(pendingKbUploads, kbFileSearchQuery),
+    [pendingKbUploads, kbFileSearchQuery],
+  );
+  const filteredSelectedKbDocuments = useMemo(
+    () => filterByRagFilenameQuery(selectedKbDocuments, kbFileSearchQuery),
+    [selectedKbDocuments, kbFileSearchQuery],
+  );
+  const kbTotalFiles = selectedKbDocuments.length + pendingKbUploads.length;
+  const kbFilteredTotal = filteredSelectedKbDocuments.length + filteredPendingKbUploads.length;
+  const hasActiveKbFileSearch = kbFileSearchQuery.trim().length > 0;
+
+  useEffect(() => {
+    setKbFileSearchQuery('');
+  }, [selectedAgentId]);
 
   // Подтянуть id из RAG в локальный список (и при необходимости в config).
   useEffect(() => {
@@ -2249,140 +2273,164 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
               <Box sx={{ display: 'flex', justifyContent: 'center', py: 1 }}>
                 <CircularProgress size={16} sx={{ color: panelChrome.fgSubtle }} />
               </Box>
-            ) : fileSearchEnabled && (selectedKbDocuments.length > 0 || pendingKbUploads.length > 0) ? (
-              <Box
-                sx={{
-                  mt: 0.5,
-                  mb: 1,
-                  display: 'grid',
-                  gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
-                  gap: 0.75,
-                  minWidth: 0,
-                  width: '100%',
-                }}
-              >
-                {pendingKbUploads.map((pending) => (
+            ) : fileSearchEnabled && kbTotalFiles > 0 ? (
+              <Box sx={{ mt: 0.5, mb: 1, minWidth: 0, width: '100%' }}>
+                <RagFilesSearchField
+                  value={kbFileSearchQuery}
+                  onChange={setKbFileSearchQuery}
+                  totalCount={kbTotalFiles}
+                  variant="sidebar"
+                  size="small"
+                />
+                {hasActiveKbFileSearch && (
+                  <Typography
+                    variant="caption"
+                    sx={{ color: 'rgba(255,255,255,0.45)', fontSize: '0.65rem', display: 'block', mb: 0.5 }}
+                  >
+                    {kbFilteredTotal} из {kbTotalFiles}
+                  </Typography>
+                )}
+                {kbFilteredTotal === 0 ? (
+                  <Typography
+                    variant="caption"
+                    sx={{ color: 'rgba(255,255,255,0.45)', fontSize: '0.72rem', display: 'block', py: 0.5 }}
+                  >
+                    Ничего не найдено
+                  </Typography>
+                ) : (
                   <Box
-                    key={pending.clientId}
                     sx={{
-                      position: 'relative',
-                      borderRadius: 1,
-                      bgcolor: '#2a2d3a',
-                      border: '1px solid rgba(255,255,255,0.08)',
-                      p: 0.5,
+                      display: 'grid',
+                      gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+                      gap: 0.75,
                       minWidth: 0,
-                      display: 'flex',
-                      flexDirection: 'column',
-                      justifyContent: 'center',
+                      width: '100%',
                     }}
                   >
-                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, minWidth: 0, pr: 2 }}>
-                      <RagUploadingFileThumb filename={pending.filename} size={32} />
-                      <Box sx={{ minWidth: 0, flex: 1 }}>
-                        <Typography
-                          variant="caption"
-                          noWrap
-                          component="span"
-                          sx={{ color: 'white', fontSize: '0.68rem', display: 'block', fontWeight: 500, lineHeight: 1.3 }}
-                          title={pending.filename}
-                        >
-                          {shortFileName(pending.filename, 16)}
-                        </Typography>
-                        <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.45)', fontSize: '0.62rem', lineHeight: 1.2 }}>
-                          {getFileTypeLabel(pending.filename)}
-                        </Typography>
-                      </Box>
-                    </Box>
-                  </Box>
-                ))}
-                {selectedKbDocuments.map(doc => (
-                  <Box
-                    key={doc.id}
-                    sx={{
-                      position: 'relative',
-                      borderRadius: 1,
-                      bgcolor: '#2a2d3a',
-                      border: '1px solid rgba(255,255,255,0.08)',
-                      p: 0.5,
-                      minWidth: 0,
-                      display: 'flex',
-                      flexDirection: 'column',
-                      justifyContent: 'center',
-                    }}
-                  >
-                    {/* Крестик удаления */}
-                    {!readOnly && (
-                    <IconButton
-                      size="small"
-                      onClick={() => handleKbDelete(doc.id)}
-                      sx={{
-                        position: 'absolute',
-                        top: 3,
-                        right: 3,
-                        p: 0.2,
-                        color: 'rgba(255,255,255,0.45)',
-                        '&:hover': { color: '#ef5350', bgcolor: 'rgba(239,83,80,0.12)' },
-                      }}
-                    >
-                      <CloseIcon sx={{ fontSize: 11 }} />
-                    </IconButton>
-                    )}
-
-                    {/* Иконка + имя в строку */}
-                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, minWidth: 0, pr: 2 }}>
-                      {/* Цветной квадратик с иконкой */}
+                    {filteredPendingKbUploads.map((pending) => (
                       <Box
+                        key={pending.clientId}
                         sx={{
-                          width: 32,
-                          height: 32,
+                          position: 'relative',
                           borderRadius: 1,
-                          bgcolor: getFileIconBg(doc.filename),
+                          bgcolor: '#2a2d3a',
+                          border: '1px solid rgba(255,255,255,0.08)',
+                          p: 0.5,
+                          minWidth: 0,
                           display: 'flex',
-                          alignItems: 'center',
+                          flexDirection: 'column',
                           justifyContent: 'center',
-                          flexShrink: 0,
                         }}
                       >
-                        {getFileIcon(doc.filename)}
+                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, minWidth: 0, pr: 2 }}>
+                          <RagUploadingFileThumb filename={pending.filename} size={32} />
+                          <Box sx={{ minWidth: 0, flex: 1 }}>
+                            <Typography
+                              variant="caption"
+                              noWrap
+                              component="span"
+                              sx={{ color: 'white', fontSize: '0.68rem', display: 'block', fontWeight: 500, lineHeight: 1.3 }}
+                              title={pending.filename}
+                            >
+                              {shortFileName(pending.filename, 16)}
+                            </Typography>
+                            <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.45)', fontSize: '0.62rem', lineHeight: 1.2 }}>
+                              {getFileTypeLabel(pending.filename)}
+                            </Typography>
+                          </Box>
+                        </Box>
                       </Box>
-
-                      {/* Имя + тип */}
-                      <Box sx={{ minWidth: 0, flex: 1 }}>
-                        <Tooltip
-                          title={doc.filename}
-                          placement="top"
-                          slotProps={{
-                            tooltip: {
-                              sx: {
-                                bgcolor: 'rgba(42, 45, 58, 0.98)',
-                                color: '#fff',
-                                borderRadius: 3,
-                                border: '1px solid rgba(255,255,255,0.12)',
-                                fontSize: '0.75rem',
-                                fontWeight: 500,
-                                py: 0.75,
-                                px: 1.25,
-                                boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
-                              },
-                            },
+                    ))}
+                    {filteredSelectedKbDocuments.map(doc => (
+                      <Box
+                        key={doc.id}
+                        sx={{
+                          position: 'relative',
+                          borderRadius: 1,
+                          bgcolor: '#2a2d3a',
+                          border: '1px solid rgba(255,255,255,0.08)',
+                          p: 0.5,
+                          minWidth: 0,
+                          display: 'flex',
+                          flexDirection: 'column',
+                          justifyContent: 'center',
+                        }}
+                      >
+                        {/* Крестик удаления */}
+                        {!readOnly && (
+                        <IconButton
+                          size="small"
+                          onClick={() => handleKbDelete(doc.id)}
+                          sx={{
+                            position: 'absolute',
+                            top: 3,
+                            right: 3,
+                            p: 0.2,
+                            color: 'rgba(255,255,255,0.45)',
+                            '&:hover': { color: '#ef5350', bgcolor: 'rgba(239,83,80,0.12)' },
                           }}
                         >
-                          <Typography
-                            variant="caption"
-                            noWrap
-                            component="span"
-                            sx={{ color: 'white', fontSize: '0.68rem', display: 'block', fontWeight: 500, lineHeight: 1.3 }}
+                          <CloseIcon sx={{ fontSize: 11 }} />
+                        </IconButton>
+                        )}
+
+                        {/* Иконка + имя в строку */}
+                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, minWidth: 0, pr: 2 }}>
+                          {/* Цветной квадратик с иконкой */}
+                          <Box
+                            sx={{
+                              width: 32,
+                              height: 32,
+                              borderRadius: 1,
+                              bgcolor: getFileIconBg(doc.filename),
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              flexShrink: 0,
+                            }}
                           >
-                            {shortFileName(doc.filename, 16)}
-                          </Typography>
-                        </Tooltip>
-                        <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.45)', fontSize: '0.62rem', lineHeight: 1.2 }}>
-                          {getFileTypeLabel(doc.filename)}
-                        </Typography>
+                            {getFileIcon(doc.filename)}
+                          </Box>
+
+                          {/* Имя + тип */}
+                          <Box sx={{ minWidth: 0, flex: 1 }}>
+                            <Tooltip
+                              title={doc.filename}
+                              placement="top"
+                              slotProps={{
+                                tooltip: {
+                                  sx: {
+                                    bgcolor: 'rgba(42, 45, 58, 0.98)',
+                                    color: '#fff',
+                                    borderRadius: 3,
+                                    border: '1px solid rgba(255,255,255,0.12)',
+                                    fontSize: '0.75rem',
+                                    fontWeight: 500,
+                                    py: 0.75,
+                                    px: 1.25,
+                                    boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+                                  },
+                                },
+                              }}
+                            >
+                              <Typography
+                                variant="caption"
+                                noWrap
+                                component="span"
+                                sx={{ color: 'white', fontSize: '0.68rem', display: 'block', fontWeight: 500, lineHeight: 1.3 }}
+                              >
+                                {shortFileName(doc.filename, 16)}
+                              </Typography>
+                            </Tooltip>
+                            <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.45)', fontSize: '0.62rem', lineHeight: 1.2 }}>
+                              {getFileTypeLabel(doc.filename)}
+                            </Typography>
+                          </Box>
+                        </Box>
                       </Box>
-                    </Box>
+                    ))}
                   </Box>
-                ))}
+                )}
               </Box>
             ) : null}
 

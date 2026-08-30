@@ -1,24 +1,52 @@
 import { useEffect, useState } from 'react';
+import {
+  RIGHT_SIDEBAR_DEFAULT_WIDTH_PX,
+  clampRightSidebarWidthPx,
+} from './useRightSidebarWidth';
 
 /** Ширина правой панели в развёрнутом и rail-состоянии (как у Drawer). */
-export const RIGHT_SIDEBAR_EXPANDED_WIDTH_PX = 240;
+export const RIGHT_SIDEBAR_EXPANDED_WIDTH_PX = RIGHT_SIDEBAR_DEFAULT_WIDTH_PX;
 export const RIGHT_SIDEBAR_COLLAPSED_WIDTH_PX = 64;
 export const RIGHT_SIDEBAR_INSET_CSS_VAR = '--right-sidebar-inset';
+/** Доп. padding контента только при margin-right:-64px у main (свёрнутый rail). */
+export const RIGHT_SIDEBAR_RAIL_OVERLAP_CSS_VAR = '--right-sidebar-rail-overlap';
 
-export function getRightSidebarInsetPx(open: boolean, hidden: boolean): number {
+export function getRightSidebarInsetPx(
+  open: boolean,
+  hidden: boolean,
+  expandedWidthPx: number = RIGHT_SIDEBAR_DEFAULT_WIDTH_PX,
+): number {
   if (hidden) return 0;
-  return open ? RIGHT_SIDEBAR_EXPANDED_WIDTH_PX : RIGHT_SIDEBAR_COLLAPSED_WIDTH_PX;
+  return open ? clampRightSidebarWidthPx(expandedWidthPx) : RIGHT_SIDEBAR_COLLAPSED_WIDTH_PX;
 }
 
-/** Публикует ширину правой панели в CSS-переменную для fixed-элементов (виджет помощи и т.п.). */
-export function useRightSidebarInsetCssVar(open: boolean, hidden: boolean) {
+/** Перекрытие main под свёрнутым rail — не путать с полной шириной панели. */
+export function getRightSidebarRailOverlapPx(open: boolean, hidden: boolean): number {
+  if (hidden || open) return 0;
+  return RIGHT_SIDEBAR_COLLAPSED_WIDTH_PX;
+}
+
+/** Публикует ширину правой панели в CSS-переменную для fixed-элементов. */
+export function useRightSidebarInsetCssVar(
+  open: boolean,
+  hidden: boolean,
+  expandedWidthPx: number = RIGHT_SIDEBAR_DEFAULT_WIDTH_PX,
+) {
   useEffect(() => {
     const root = document.documentElement;
-    root.style.setProperty(RIGHT_SIDEBAR_INSET_CSS_VAR, `${getRightSidebarInsetPx(open, hidden)}px`);
+    root.style.setProperty(
+      RIGHT_SIDEBAR_INSET_CSS_VAR,
+      `${getRightSidebarInsetPx(open, hidden, expandedWidthPx)}px`,
+    );
+    root.style.setProperty(
+      RIGHT_SIDEBAR_RAIL_OVERLAP_CSS_VAR,
+      `${getRightSidebarRailOverlapPx(open, hidden)}px`,
+    );
     return () => {
       root.style.setProperty(RIGHT_SIDEBAR_INSET_CSS_VAR, '0px');
+      root.style.setProperty(RIGHT_SIDEBAR_RAIL_OVERLAP_CSS_VAR, '0px');
     };
-  }, [open, hidden]);
+  }, [open, hidden, expandedWidthPx]);
 }
 
 function readDockedRightRailWidthPx(): number {

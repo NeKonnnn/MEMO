@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import ProjectRagLibraryInline from './ProjectRagLibraryInline';
 import RAGSettings from './settings/RAGSettings';
 import { saveEntityRagSettings, type EntityRagDraft } from '../utils/entityRagSettings';
+import { useRagReindexStatus } from '../contexts/RagReindexStatusContext';
 import { syncProjectCreate } from '../utils/projectsApi';
 import {
   Dialog,
@@ -152,6 +153,7 @@ export default function NewProjectModal({
   cancelDraftProject,
 }: NewProjectModalProps) {
   const theme = useTheme();
+  const { notifyReindexStarted } = useRagReindexStatus();
   const [projectName, setProjectName] = useState('');
   const [selectedIcon, setSelectedIcon] = useState<string | null>(null);
   const [selectedEmoji, setSelectedEmoji] = useState<string | null>(null);
@@ -264,6 +266,8 @@ export default function NewProjectModal({
       });
       if (!ragApplied.ok) {
         console.warn(`[RAG] Проект создан; настройки РАГ не применены: ${ragApplied.message}`);
+      } else if (ragApplied.reindexed) {
+        notifyReindexStarted();
       }
     }
 

@@ -37,6 +37,7 @@ import {
   getDropdownItemSx,
   MENU_ACTION_TEXT_SIZE,
 } from '../../constants/menuStyles';
+import { useInViewport } from '../../hooks/useInViewport';
 
 const DOWNLOAD_PANEL_W = 160;
 
@@ -84,6 +85,12 @@ export default function ArtifactCard({ artifact, isStreaming = false }: Props) {
   const downloadItemSx = useMemo(() => getDropdownItemSx(isDarkMode), [isDarkMode]);
   const downloadTextColor = isDarkMode ? 'rgba(255,255,255,0.85)' : 'rgba(0,0,0,0.85)';
   const previewRootRef = React.useRef<HTMLDivElement>(null);
+  const { ref: cardViewportRef, inView } = useInViewport<HTMLDivElement>(
+    '280px 0px',
+    // Только текущая генерация сразу с preview; старые — после IO,
+    // иначе при Virtuoso→map все iframe/Sandpack встают разом.
+    Boolean(isStreaming && !artifact.closed),
+  );
   const editorPath = useMemo(
     () => `artifact://${artifact.id || artifact.identifier || 'src'}.${extensionForType(artifact.type)}`,
     [artifact.id, artifact.identifier, artifact.type],
@@ -179,6 +186,7 @@ export default function ArtifactCard({ artifact, isStreaming = false }: Props) {
 
   return (
     <Box
+      ref={cardViewportRef}
       sx={{
         my: 2,
         borderRadius: 2,
@@ -356,7 +364,11 @@ export default function ArtifactCard({ artifact, isStreaming = false }: Props) {
             visibility: pending && !(localContent || '').trim() ? 'hidden' : 'visible',
           }}
         >
-          <ArtifactPreview artifact={displayArtifact} isStreaming={pending} />
+          {inView || pending ? (
+            <ArtifactPreview artifact={displayArtifact} isStreaming={pending} />
+          ) : (
+            <Box sx={{ height: '100%', minHeight: 320, bgcolor: '#e8eaed' }} />
+          )}
         </Box>
 
         {/* Полноэкранный лоадер — как у презентаций; цвета не из темы */}
@@ -502,6 +514,12 @@ export default function ArtifactCard({ artifact, isStreaming = false }: Props) {
                 value={localContent}
                 path={editorPath}
                 theme="vs-dark"
+                onMount={(editor) => {
+                  requestAnimationFrame(() => {
+                    editor.layout();
+                    requestAnimationFrame(() => editor.layout());
+                  });
+                }}
                 options={{
                   readOnly: false,
                   minimap: { enabled: false },

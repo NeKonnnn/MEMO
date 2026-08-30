@@ -6,7 +6,6 @@ import { useAppActions } from '../contexts/AppContext';
 import { fetchCodingAgentStatus } from '../coding/api';
 import WorkspacePicker from './WorkspacePicker';
 import {
-  enableCodingFromGearPanel,
   isCodingModeEnabled,
   isCodingPlanModeEnabled,
   setCodingModeEnabled,
@@ -112,12 +111,8 @@ export default function ChatGearCodingPanel({ isDarkMode, chatId, projectId }: C
       if (project) {
         updateProject(project.id, { workspacePath: path.trim() || undefined });
       }
-      if (path.trim()) {
-        enableCodingFromGearPanel(chatId);
-        setCodingOn(true);
-      }
     },
-    [project, updateProject, chatId],
+    [project, updateProject],
   );
 
   if (!chatId) {
@@ -191,6 +186,7 @@ export default function ChatGearCodingPanel({ isDarkMode, chatId, projectId }: C
           isDarkMode={isDarkMode}
           compact
           showGlobalDefault
+          autoPickDefault={codingOn}
         />
 
         <Typography variant="caption" sx={{ color: muted }}>

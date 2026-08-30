@@ -1033,6 +1033,7 @@ async def update_rag_settings(
 
         # Пересобираем только когда изменилось то, что лежит в индексе: нарезка
         # и эмбеддер. top_k, порог и тумблеры препроцесса применяются на лету.
+        reindex_started = False
         if _rechunk_on_settings_change() and index_params_changed(before, merged):
             logger.info(
                 # Печатаем "было -> стало" по каждому индексному ключу
@@ -1045,6 +1046,7 @@ async def update_rag_settings(
                     if before.get(k) != merged.get(k)
                 },
             )
+            reindex_started = True
             asyncio.create_task(
                 _run_background_rechunk_for_user(
                     user_id,
@@ -1057,6 +1059,11 @@ async def update_rag_settings(
         return {
             "message": "Настройки RAG обновлены",
             "success": True,
+            # Фронт по этому полю учащает опрос статуса: задача фоновая, и
+            # плашка иначе всплывёт только на следующем тике опроса. Здесь
+            # именно "поставили задачу": пересобирать может оказаться нечего,
+            # тогда фон выйдет молча и флаг так и не поднимется.
+            "reindexed": reindex_started,
             **settings_response_dict(merged),
             "scope": scope,
             "project_id": settings_data.project_id if scope == "project" else None,
@@ -1186,6 +1193,44 @@ PHOENIX_EMBEDDINGS_PROVIDER_ID = os.getenv(
 _dangling_default_warned: set = set()
 
 
+async def _rag_gateway_catalog() -> list:
+    """Записи каталога по провайдерам, объявившим себя шлюзом RAG-моделей.
+
+    ```path_prefix``` = id провайдера в нижнем регистре. По нему SVC-RAG ищет
+    провайдера в своём ```rag_models.providers``` (сравнение регистронезависимое),
+    поэтому имя должно совпадать по обе стороны — это и есть весь контракт.
+
+    ```rag_only=True``` для всех: сюда попадают только выделенные шлюзы моделей,
+    у них незнакомое по имени — эмбеддер, а не чат-модель.
+    """
+    from backend.llm_providers.registry import get_registry
+
+    registry = await get_registry()
+    entries: list = []
+    for provider in registry.all():
+        extra = getattr(getattr(provider, "config", None), "extra", None) or {}
+        if not bool(extra.get("rag_gateway")):
+            continue
+        pid = str(getattr(provider, "id", "") or "").strip()
+        if not pid:
+            continue
+        entries.append(
+            {
+                "provider_id": pid,
+                "path_prefix": pid.lower(),
+                "source": pid.lower(),
+                "description": f"Модель {pid}",
+                "rag_only": True,
+            }
+        )
+    if not entries:
+        logger.debug(
+            "[RAG-CATALOG] ни один провайдер не объявил extra.rag_gateway: true — "
+            "используем встроенный каталог CORSUR/PHOENIX"
+        )
+    return entries
+
+
 def _warn_if_dangling_cluster_default(catalog_rows: list) -> None:
     """Кластерный дефолт указывает на шлюз, которого нет в каталоге.
 
@@ -1247,6 +1292,13 @@ _EXTERNAL_RAG_CATALOG = (
         "rag_only": True,
     },
 )
+
+async def _effective_rag_gateway_catalog() -> list:
+    """Динамический каталог из config.yml; при пустом — legacy CORSUR/PHOENIX."""
+    dynamic = await _rag_gateway_catalog()
+    if dynamic:
+        return dynamic
+    return list(_EXTERNAL_RAG_CATALOG)
 
 # Подсказки к типу модели. Это СЕМЕЙСТВА, а не конкретные id: список моделей
 # приходит из /v1/models и нигде не хардкодится. Дополняются переменными
@@ -1604,7 +1656,7 @@ async def _phoenix_rag_models(model_type: Optional[str] = None) -> list:
 
 
 async def _external_rag_models(model_type: Optional[str] = None) -> list:
-    """Phoenix + CORSUR (и другие из _EXTERNAL_RAG_CATALOG). Шлюзы — параллельно."""
+    """Все шлюзы RAG-моделей из конфига. Опрашиваются параллельно."""
 
     async def _one(entry: dict) -> list:
         try:
@@ -1622,7 +1674,8 @@ async def _external_rag_models(model_type: Optional[str] = None) -> list:
             )
             return []
 
-    parts = await asyncio.gather(*(_one(entry) for entry in _EXTERNAL_RAG_CATALOG))
+    catalog = await _effective_rag_gateway_catalog()
+    parts = await asyncio.gather(*(_one(entry) for entry in catalog))
     rows: list = []
     for part in parts:
         rows.extend(part)
@@ -1910,39 +1963,24 @@ async def select_rag_model(
     if model_path.lower().startswith("huggingface/"):
         raise HTTPException(
             status_code=400,
-            detail="Источник huggingface отключён: выберите CORSUR / PHOENIX / PHOENIX_Embeddings",
+            detail="Источник huggingface отключён: выберите модель из каталога RAG",
         )
-    if model_path.lower().startswith("phoenix_embeddings/"):
+    prefix = model_path.split("/", 1)[0].strip().lower() if "/" in model_path else ""
+    gateway = next(
+        (
+            e
+            for e in await _effective_rag_gateway_catalog()
+            if str(e.get("path_prefix") or "").lower() == prefix
+        ),
+        None,
+    )
+    if gateway:
         return await _select_external_rag_model(
             model_type,
             model_path,
             user_id,
-            path_prefix="phoenix_embeddings",
-            source_label="PHOENIX_Embeddings",
-            scope=scope,
-            entity_id=entity_id,
-            project_id=body.project_id,
-            agent_id=body.agent_id,
-        )
-    if model_path.lower().startswith("phoenix/"):
-        return await _select_external_rag_model(
-            model_type,
-            model_path,
-            user_id,
-            path_prefix="phoenix",
-            source_label="PHOENIX",
-            scope=scope,
-            entity_id=entity_id,
-            project_id=body.project_id,
-            agent_id=body.agent_id,
-        )
-    if model_path.lower().startswith("corsur/"):
-        return await _select_external_rag_model(
-            model_type,
-            model_path,
-            user_id,
-            path_prefix="corsur",
-            source_label="CORSUR",
+            path_prefix=str(gateway["path_prefix"]),
+            source_label=str(gateway["provider_id"]),
             scope=scope,
             entity_id=entity_id,
             project_id=body.project_id,

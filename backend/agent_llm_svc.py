@@ -129,8 +129,8 @@ class ModelSettings:
     def get_max_values(self):
         """Получение максимальных значений для настроек"""
         return {
-            "context_size": 32768,
-            "output_tokens": 100000,  # Увеличено для снятия ограничения на длину генерации
+            "context_size": 1000000,
+            "output_tokens": 1000000,  # Увеличено для снятия ограничения на длину генерации
             "batch_size": 2048,
             "n_threads": 24,
             "temperature": 2.0,

@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import httpx
 
 from app.clients.rag_models_client import RagModelsClient
+from app.clients.openai_models_compat_client import set_embed_log_context
 from app.core.config import get_settings
 from app.core.http_verify import resolve_httpx_verify
 from app.database.models import Document, DocumentVector
@@ -113,8 +114,9 @@ class RagService:
         return self._bm25.index
 
     @property
-    def bm25_texts(self) -> List[str]:
-        return self._bm25.texts
+    def bm25_chunk_count(self) -> int:
+        """Сколько чанков в индексе. Раньше отдавался их полный текст."""
+        return self._bm25.chunk_count
 
     async def warm_up(self) -> None:
         """Прогрев сервиса на старте SVC-RAG.
@@ -124,7 +126,7 @@ class RagService:
         """
         try:
             await self._bm25.ensure_built()
-            logger.info("[SVC-RAG] warm_up: BM25-индекс готов (chunks=%d)", len(self._bm25.texts))
+            logger.info("[SVC-RAG] warm_up: BM25-индекс готов (chunks=%d)", len(self._bm25.chunk_count))
         except Exception as e:
             logger.warning("[SVC-RAG] warm_up: BM25 не построен: %s", e)
 
@@ -178,7 +180,7 @@ class RagService:
             if ftype == "pdf":
                 return {
                     "ok": False,
-                    "error": "PDF без извлекаемого текста (скан без OCR или сбой ocr-service/poppler). См. логи svc-rag.",
+                    "error": "PDF без извлекаемого текста (скан: ни локальный OCR (ocr-service/poppler), ни OCR через backend не дали текста). См. логи svc-rag.",
                     "document_id": None,
                 }
             return {"ok": False, "error": "Не удалось извлечь текст или формат не поддерживается", "document_id": None}
@@ -226,6 +228,13 @@ class RagService:
             doc_id = await self.document_repo.create_document(doc)
             if not doc_id:
                 return {"ok": False, "error": "Не удалось сохранить документ в БД", "document_id": None}
+            # Контекст операции для CEF-логов чанков в PostgreSQL.
+            set_embed_log_context(
+                store="global",
+                operation="upload",
+                document_id=doc_id,
+                filename=filename,
+            )
             ok = await self._optimized_index.index_document_hierarchical_async(hierarchical_doc, doc_id)
             if not ok:
                 await self.document_repo.delete_document(doc_id)
@@ -271,6 +280,13 @@ class RagService:
         if not doc_id:
             timer.log(logger)
             return {"ok": False, "error": "Не удалось сохранить документ в БД", "document_id": None}
+        # Контекст операции для CEF-логов чанков в PostgreSQL.
+        set_embed_log_context(
+            store="global",
+            operation="upload",
+            document_id=doc_id,
+            filename=filename,
+        )
 
         try:
             with timer.stage("embed"):
@@ -1042,7 +1058,7 @@ class RagService:
                     existing.add(key)
                     taken += 1
             if sibling_rows_by_key:
-                logger.info(
+                logger.debug(
                     "[global] parent-expansion: +%s sibling-чанков " "(pin_whole=%s, entity_anchor=%s, enum_anchor=%s)",
                     len(sibling_rows_by_key),
                     sorted(list(pin_whole_doc_ids)),
@@ -1202,7 +1218,7 @@ class RagService:
                         prior_norm = 1.0 - (prior_order.get(idx, n_p - 1) / n_p)
                         final_score = float(sc) + 1e-6 * prior_norm - 1e-9 * rr_rank
                         out.append((v.content, final_score, v.document_id, v.chunk_index))
-                logger.info("[SVC-RAG] search store=global rerank=ok hits=%s", len(out))
+                logger.debug("[SVC-RAG] search store=global rerank=ok hits=%s", len(out))
                 final_out = await self._finalize_hit_rows(_cut_with_entity_pin(out), used_rerank=True)
                 await log_retrieval_with_eval(
                     store="global (глобальные документы)",
@@ -1223,7 +1239,7 @@ class RagService:
 
         out_pairs_all = [(v.content, score, v.document_id, v.chunk_index) for v, score in pairs]
         out_pairs = _cut_with_entity_pin(out_pairs_all)
-        logger.info(
+        logger.debug(
             "[SVC-RAG] search store=global done hits=%s (final order без rerank или после сбоя rerank)", len(out_pairs)
         )
         final_pairs = await self._finalize_hit_rows(out_pairs, used_rerank=False)
@@ -1357,7 +1373,7 @@ class RagService:
                         final_score = float(sc) + 1e-6 * prior_norm - 1e-9 * rr_rank
                         out.append((v.content, final_score, v.document_id, v.chunk_index))
                 if out:
-                    logger.info(
+                    logger.debug(
                         "[SVC-RAG] search store=global strategy=graph done hits=%s rerank=ok seeds=%s graph_nodes=%s",
                         len(out[:k]),
                         len(seed_chunk_indexes),
@@ -1386,7 +1402,7 @@ class RagService:
                 logger.warning("Graph rerank failed: %s", e)
 
         out_final = [(v.content, score, v.document_id, v.chunk_index) for v, score in scored[:k]]
-        logger.info(
+        logger.debug(
             "[SVC-RAG] search store=global strategy=graph done hits=%s rerank=no seeds=%s graph_nodes=%s",
             len(out_final),
             len(seed_chunk_indexes),
@@ -1418,6 +1434,8 @@ class RagService:
                 await self.graph_repo.delete_document_graph("global", document_id)
             except Exception:
                 pass
+        # Контекст операции для CEF-логов чанков в PostgreSQL.
+        set_embed_log_context(store="global", operation="delete", document_id=document_id)
         await self.vector_repo.delete_vectors_by_document(document_id)
         await self.document_repo.delete_document(document_id)
         self._bm25.mark_dirty()

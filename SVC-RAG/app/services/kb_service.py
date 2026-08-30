@@ -13,7 +13,7 @@ from app.database.search_filters import DocumentVectorSearchFilters
 from app.database.kb_repository import KbDocumentRepository, KbVectorRepository
 from app.database.models import Document, DocumentVector
 from app.database.graph_repository import GraphRepository
-from app.services.bm25_index import InMemoryBm25Index
+from app.services.bm25_index import InMemoryBm25Index, Bm25IndexCache
 from app.services.chunker import (
     describe_embed_client,
     normalize_chunking_strategy,
@@ -80,10 +80,10 @@ class KbService:
         self.vector_repo = vector_repo
         self.rag_client = rag_models_client
         self.graph_repo = graph_repo
-        self._bm25 = InMemoryBm25Index(self.vector_repo.get_all_contents_for_bm25)
-        # BM25 строится по ВСЕЙ таблице векторов, а таблиц теперь несколько
-        # (по одной на размерность) — держим индекс на каждую.
-        self._bm25_by_dim = {int(self.vector_repo.embedding_dim or 0): self._bm25}
+        # Индексы BM25 по (размерность, набор документов).
+        # Корпус сужается до белого списка документов, а кэш вытесняет
+        # давно не использованные. Размер - RAG_BM25_INDEX_CACHE_SIZE.
+        self._bm25_by_key = Bm25IndexCache(get_settings().rag.bm25_index_cache_size)
 
     async def _route(self, model=None, provider=None):
         """Профиль эмбеддинга (клиент + имя модели + dim) и репозиторий нужной таблицы.
@@ -94,16 +94,30 @@ class KbService:
 
         return await resolve_for(self.rag_client, self.vector_repo, provider, model)
 
-    def _bm25_for(self, repo) -> InMemoryBm25Index:
+    def _bm25_for(
+        self, repo, document_ids: Optional[List[int]] = None
+    ) -> InMemoryBm25Index:
+        """Индекс по документам белого списка; без него - по всей таблице.
+
+        document_ids - тот же белый список, которым потом фильтруется
+        выдача (см. allowed_doc_ids в retrieval_pipeline)
+        """
         dim = int(getattr(repo, "embedding_dim", 0) or 0)
-        idx = self._bm25_by_dim.get(dim)
-        if idx is None:
-            idx = InMemoryBm25Index(repo.get_all_contents_for_bm25)
-            self._bm25_by_dim[dim] = idx
-        return idx
+        scope = frozenset(int(d) for d in document_ids if d is not None) if document_ids else None
+        key = (dim, scope)
+
+        def _make() -> InMemoryBm25Index:
+            ids = sorted(scope) if scope else None
+
+            async def _fetch():
+                return await repo.get_all_contents_for_bm25(document_ids=ids)
+
+            return InMemoryBm25Index(_fetch)
+
+        return self._bm25_by_key.get_or_create(key, _make)
 
     def _mark_bm25_dirty(self) -> None:
-        for idx in self._bm25_by_dim.values():
+        for idx in self._bm25_by_key.values():
             idx.mark_dirty()
 
     async def _rebuild_graph_for_document(self, document_id: int) -> None:
@@ -383,7 +397,6 @@ class KbService:
         prof, repo = route if route else await self._route(model, provider)
         # Удаление обходит ВСЕ таблицы (B2b) — при смене модели старые вектора
         # лежат в таблице прежней размерности и должны уйти.
-        await repo.delete_vectors_by_document(document_id)
         # Пометка для логов гардрейла: клиент видит только список строк, имя
         # файла и id документа до него не доезжают. Ставим до ветвления, чтобы
         # покрыть и иерархическую индексацию, и обычную.
@@ -393,6 +406,7 @@ class KbService:
             document_id=document_id,
             filename=getattr(doc, "filename", None),
         )
+        await repo.delete_vectors_by_document(document_id)
         strategy = (chunking_strategy or "universal").strip().lower()
         if strategy == "hierarchical":
             from app.services.hierarchical_indexing import index_document_hierarchically
@@ -519,7 +533,7 @@ class KbService:
                 n_docs += 1
                 n_chunks += c
                 _own, _up, _name = _doc_actors(doc)
-                logger.info(
+                logger.debug(
                     "[REINDEX kb] '%s' (id=%s, owner=%s, uploader=%s) чанков=%s",
                     _name,
                     doc.id,
@@ -638,7 +652,9 @@ class KbService:
             fetch_document_chunks=_fetch_doc,
             find_docs_by_filename=_find_docs_by_filename,
             vector_repo_for_window=repo,
-            bm25_index=self._bm25_for(repo),
+            bm25_index=self._bm25_for(
+                repo, [document_id] if document_id is not None else document_ids
+            ),
             eval_gold_document_ids=eval_gold_document_ids,
             eval_gold_chunks=eval_gold_chunks,
             eval_llm_judge=eval_llm_judge,
@@ -672,6 +688,13 @@ class KbService:
                 await self.graph_repo.delete_document_graph("kb", document_id)
             except Exception:
                 pass
+        # Для CEF INT005/INT006 по чанкам ставим контекст ДО удаления векторов.
+        set_embed_log_context(
+            store="kb",
+            operation="delete",
+            document_id=document_id,
+            filename=doc.filename,
+        )
         await self.vector_repo.delete_vectors_by_document(document_id)
         await self.doc_repo.delete_document(document_id)
         self._mark_bm25_dirty()

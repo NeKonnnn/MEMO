@@ -3,6 +3,7 @@ import type { Message } from '../contexts/AppContext';
 import { fetchFollowUpSuggestions } from '../chat/fetchFollowUpSuggestions';
 import type { FollowUpShowScope } from '../chat/followUpSettings';
 import { LAST_SELECTED_MODEL_PATH_STORAGE_KEY } from '../utils/modelThinking';
+import { astra185Mark } from '../utils/debugReact185';
 
 /** Задержка: не занимать LLM follow-up сразу после ответа — иначе «Перегенерировать» ждёт gen_lock. */
 const FOLLOW_UP_START_DELAY_MS = 2500;
@@ -85,8 +86,17 @@ export function useFollowUpSuggestions(params: {
       const wasStreaming = prevStreamingRef.current.get(message.id) ?? false;
       const nowStreaming = Boolean(message.isStreaming);
       const key = requestKey(chatId, message.id);
+      const hasFollowUpFields =
+        message.followUpSuggestions !== undefined ||
+        message.followUpSuggestionsLoading !== undefined;
 
-      if (nowStreaming && message.role === 'assistant') {
+      // Важно: НЕ вызывать patch на каждом токене стрима — PATCH всегда создаёт
+      // новый объект message → messages меняется → effect снова → React #185.
+      if (!wasStreaming && nowStreaming && message.role === 'assistant') {
+        astra185Mark(
+          'stream:follow-up-clear',
+          `enter msg=${message.id} hadFields=${hasFollowUpFields}`,
+        );
         const delayTimer = delayTimersRef.current.get(key);
         if (delayTimer) {
           clearTimeout(delayTimer);
@@ -97,16 +107,26 @@ export function useFollowUpSuggestions(params: {
         abortControllersRef.current.delete(key);
         inflightRef.current.delete(key);
         fetchedRef.current.delete(key);
-        patchMessageFields(chatId, message.id, {
-          followUpSuggestions: undefined,
-        });
+        if (hasFollowUpFields) {
+          patchMessageFields(chatId, message.id, {
+            followUpSuggestions: undefined,
+            followUpSuggestionsLoading: undefined,
+          });
+        }
       }
 
       if (wasStreaming && !nowStreaming && message.role === 'assistant') {
+        astra185Mark(
+          'stream:follow-up-clear',
+          `leave msg=${message.id} hadFields=${hasFollowUpFields}`,
+        );
         fetchedRef.current.delete(key);
-        patchMessageFields(chatId, message.id, {
-          followUpSuggestions: undefined,
-        });
+        if (hasFollowUpFields) {
+          patchMessageFields(chatId, message.id, {
+            followUpSuggestions: undefined,
+            followUpSuggestionsLoading: undefined,
+          });
+        }
       }
 
       prevStreamingRef.current.set(message.id, nowStreaming);
