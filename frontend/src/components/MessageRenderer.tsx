@@ -1,23 +1,36 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { Box, IconButton, Typography, Tooltip, Paper, Table, TableBody, TableCell, TableContainer, TableHead, TableRow } from '@mui/material';
+import { Box, IconButton, Typography, Tooltip, Link, Paper, Table, TableBody, TableCell, TableContainer, TableHead, TableRow } from '@mui/material';
 import { ContentCopy as CopyIcon, Check as CheckIcon, Info as InfoIcon, Warning as WarningIcon, Error as ErrorIcon, CheckCircle as SuccessIcon, GetApp as DownloadIcon } from '@mui/icons-material';
 import {
+  artifactMetaLooksLikePresentation,
+  extractUnfencedPresentationHtml,
+  hasGpbSlideClass,
   isGpbPresentationHtml,
   isGpbPresentationStreaming,
+  isHtmlFenceBlock,
   isHtmlFenceLanguage,
+  shouldOpenPresentationViewer,
+  shouldTreatHtmlFenceAsPresentationStream,
 } from '../utils/presentationViewer';
 import InlinePresentationViewer from './InlinePresentationViewer';
 import ArtifactCard from './artifacts/ArtifactCard';
+import { sanitizeMermaidSource, splitContentWithArtifacts, hoistPresentationArtifacts, guessCodeLanguage } from '../utils/artifacts';
 import {
-  hoistPresentationArtifacts,
-  sanitizeMermaidSource,
-  splitContentWithArtifacts,
-} from '../utils/artifacts';
-import { normalizeChatInlineHtml } from '../utils/chatInlineHtml';
+  looksLikeAsciiArtTable,
+  splitTextWithMarkdownTables,
+} from '../utils/markdownTables';
+import { normalizeChatInlineHtml, extractPreservedHtmlBlocks } from '../utils/chatInlineHtml';
 import Editor, { loader } from '@monaco-editor/react';
 import * as XLSX from 'xlsx';
 import CodeSelectionMenu from './CodeSelectionMenu';
 import ChatInlineHtml from './ChatInlineHtml';
+import {
+  useArtifactsViewerAllowed,
+  useArtifactsViewerLiveGate,
+  usePresentationViewerExpected,
+} from '../hooks/useArtifactsViewerGate';
+import { pinMessageArtifactsViewer } from '../utils/messageArtifactsViewerStorage';
+import { useAppContext } from '../contexts/AppContext';
 import { useChatFontSize } from '../hooks/useChatFontSize';
 
 // Monaco загружается как статические файлы (не через webpack-бандл).
@@ -36,6 +49,13 @@ interface MessageRendererProps {
   onSendMessage?: (message: string) => void;
   /** Стабильный id сообщения — для ключей артефактов. */
   messageId?: string;
+  /** Чат для per-chat skills / viewer gate. */
+  chatId?: string | null;
+  /**
+   * Принудительно разрешить viewer (шаринг и т.п.).
+   * Иначе: агент.artifacts_enabled, presentation skill, или уже закреплённый показ.
+   */
+  forceArtifacts?: boolean;
 }
 
 /** Markdown-заголовки: чуть крупнее body, без MUI h1–h6 (там 2–3rem). */
@@ -125,7 +145,56 @@ function markdownHeadingFontSize(level: string, baseFontSize: string): string {
   return `calc(${baseFontSize} * ${scale})`;
 }
 
-const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isStreaming = false, onSendMessage, messageId }) => {
+const MessageRendererComponent: React.FC<MessageRendererProps> = ({
+  content,
+  isStreaming = false,
+  onSendMessage,
+  messageId,
+  chatId: chatIdProp,
+  forceArtifacts = false,
+}) => {
+  const { state: appState } = useAppContext();
+  const chatId = chatIdProp ?? appState.currentChatId;
+  const liveGate = useArtifactsViewerLiveGate(chatId);
+  const presentationExpected = usePresentationViewerExpected(chatId);
+  const artifactsAllowed = useArtifactsViewerAllowed({
+    chatId,
+    messageId,
+    content,
+    force: forceArtifacts,
+  });
+  /** Presentation skill/агент + стрим: viewer с первого ```html, не ждём pin/effect. */
+  const presentationStreamActive = Boolean(isStreaming && presentationExpected);
+  const viewerAllowed = artifactsAllowed || presentationStreamActive;
+
+  // Если viewer сейчас разрешён «живым» гейтом — закрепляем показ за сообщением (один раз на messageId).
+  const artifactsViewerPinnedRef = useRef(false);
+
+  const tryPinArtifactsViewer = useCallback(() => {
+    if (!messageId || !liveGate || artifactsViewerPinnedRef.current) return;
+    const text = content || '';
+    if (
+      text.includes(':::artifact{') ||
+      /```(?:html|htm|xhtml|mermaid|mmd|svg)\b/i.test(text) ||
+      hasGpbSlideClass(text) ||
+      isGpbPresentationHtml(text) ||
+      (presentationExpected && /```/i.test(text)) ||
+      (presentationExpected && /<!DOCTYPE\s+html\b|<html\b/i.test(text))
+    ) {
+      queueMicrotask(() => {
+        if (artifactsViewerPinnedRef.current) return;
+        pinMessageArtifactsViewer(messageId);
+        artifactsViewerPinnedRef.current = true;
+      });
+    }
+  }, [messageId, liveGate, presentationExpected, content]);
+
+  useEffect(() => {
+    artifactsViewerPinnedRef.current = false;
+  }, [messageId]);
+  useEffect(() => {
+    tryPinArtifactsViewer();
+  }, [tryPinArtifactsViewer]);
 
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
   const { fontSizeValue } = useChatFontSize();
@@ -144,6 +213,24 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
   const containerRef = useRef<HTMLDivElement>(null);
   // Стабильные пути для Monaco-моделей: назначаются один раз и не меняются при стриминге
   const codeBlockPathsRef = useRef<Map<string, string>>(new Map());
+  // Раз уже показали presentation viewer — не откатываемся на HTML/Monaco при следующих чанках.
+  const presentationStickyKeysRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    return () => {
+      codeBlockPathsRef.current.clear();
+    };
+  }, []);
+
+  const markPresentationSticky = useCallback((key: string, isPresentation: boolean): boolean => {
+    if (isPresentation) {
+      presentationStickyKeysRef.current.add(key);
+      return true;
+    }
+    // Не держим presentation «навсегда» после ложного ```html + skill — иначе Excel не вернётся в ArtifactCard.
+    presentationStickyKeysRef.current.delete(key);
+    return false;
+  }, []);
 
   const sanitizeRawContent = useCallback((raw: string): string => {
     if (!raw) return raw;
@@ -154,8 +241,32 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
         .replace(/[`*]/g, '');
       return `\`$${label}\``;
     });
-    // Инлайн HTML от LLM (em/strong/i/b/del/…): отдельный whitelist-парсер.
-    return normalizeChatInlineHtml(withSkills);
+    // Не трогаем fence-блоки и GPB HTML: normalizeChatInlineHtml иначе разносит теги,
+    // и презентация утекает в ChatInlineHtml (иконки/разметка в тексте вместо viewer).
+    const fences: string[] = [];
+    const withoutFences = withSkills.replace(/```[\s\S]*?(?:```|$)/g, (block) => {
+      const token = `\n__ASTRA_FENCE_${fences.length}__\n`;
+      fences.push(block);
+      return token;
+    });
+    const presentations: string[] = [];
+    const withoutPresentations = withoutFences.replace(
+      /(?:<!DOCTYPE\s+html\b[\s\S]*<\/html>)|(?:<html\b[\s\S]*<\/html>)/gi,
+      (block) => {
+        if (!isGpbPresentationHtml(block) && !hasGpbSlideClass(block)) return block;
+        const token = `\n__ASTRA_PRES_${presentations.length}__\n`;
+        presentations.push(block);
+        return token;
+      },
+    );
+    let normalized = normalizeChatInlineHtml(withoutPresentations);
+    presentations.forEach((block, i) => {
+      normalized = normalized.split(`__ASTRA_PRES_${i}__`).join(block);
+    });
+    fences.forEach((block, i) => {
+      normalized = normalized.split(`__ASTRA_FENCE_${i}__`).join(block);
+    });
+    return normalized;
   }, []);
 
   const getSelectionClipboardPayload = useCallback((): { plain: string; html: string } => {
@@ -372,6 +483,7 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
     return { plain, html: richHtml };
   }, []);
 
+  // Слушаем изменения размера шрифта
   // Обработчики для меню
   const handleMenuClose = useCallback(() => {
     menuAnchorRef.current = null;
@@ -574,21 +686,8 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
     }
   };
 
-  // Функция для определения ASCII таблицы
-  const isAsciiTable = (text: string): boolean => {
-    const lines = text.split('\n').filter(line => line.trim());
-    if (lines.length < 3) return false;
-    
-    // Проверяем наличие характерных символов ASCII таблиц
-    const hasTableChars = lines.some(line => 
-      (line.includes('+---') || line.includes('|---') || line.includes('==='))
-    );
-    
-    // Проверяем, что большинство строк содержат |
-    const linesWithPipe = lines.filter(line => line.includes('|')).length;
-    
-    return hasTableChars && linesWithPipe >= lines.length * 0.6;
-  };
+  // Функция для определения ASCII таблицы (бордюры +---+), не GFM pipe-таблицы
+  const isAsciiTable = (text: string): boolean => looksLikeAsciiArtTable(text);
 
   // Парсинг ASCII таблицы в структурированные данные
   const parseAsciiTable = (text: string) => {
@@ -665,28 +764,6 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
     
     // Возвращаем также количество использованных строк для правильного парсинга остального текста
     return { headers, rows, linesUsed: lastTableLineIndex + 1 };
-  };
-
-  // Парсинг Markdown таблицы
-  const parseMarkdownTable = (text: string) => {
-    const lines = text.split('\n').filter(line => line.trim());
-    if (lines.length < 2) return null;
-    
-    const parseCells = (line: string): string[] => {
-      return line
-        .split('|')
-        .map(cell => cell.trim())
-        .filter(cell => cell.length > 0);
-    };
-    
-    const headers = parseCells(lines[0]);
-    
-    // Проверяем строку разделителя (должна содержать --- или :---: и т.п.)
-    if (!lines[1].includes('---')) return null;
-    
-    const rows = lines.slice(2).map(parseCells);
-    
-    return { headers, rows };
   };
 
   // Обработка Markdown внутри ячейки таблицы
@@ -847,7 +924,7 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
     return (
       <Box key={index} sx={{ my: 2, position: 'relative', maxWidth: '100%', minWidth: 0 }}>
         <TableContainer component={Paper} sx={tableScrollSx}>
-          <Table size="small" sx={{ minWidth: 650, width: '100%' }}>
+          <Table size="small" sx={{ width: '100%', tableLayout: 'fixed' }}>
             {headers.length > 0 && (
               <TableHead>
                 <TableRow sx={{ backgroundColor: 'primary.dark' }}>
@@ -928,7 +1005,7 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
   // Извлечение ASCII таблицы и остального текста
   const extractAsciiTable = (text: string): { table: string; remaining: string } | null => {
     const allLines = text.split('\n');
-    let tableLines: string[] = [];
+    const tableLines: string[] = [];
     let tableEndIndex = -1;
     
     for (let i = 0; i < allLines.length; i++) {
@@ -938,7 +1015,7 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
                          line.includes('+---') || 
                          line.includes('|---') || 
                          line.includes('===') ||
-                         line.match(/^[\s]*[-=+|]+[\s]*$/);
+                         Boolean(line.match(/^[\s]*[-=+|]+[\s]*$/));
       
       if (isTableLine && line) {
         tableLines.push(allLines[i]);
@@ -957,43 +1034,33 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
     return { table, remaining };
   };
 
-  // Извлечение Markdown таблицы из текста
-  const extractMarkdownTable = (text: string): { table: string; before: string; after: string } | null => {
-    const lines = text.split('\n');
-    let tableStart = -1;
-    let tableEnd = -1;
-    
-    // Ищем начало таблицы (строка с |)
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i].trim();
-      if (line.startsWith('|') && line.endsWith('|')) {
-        // Проверяем следующую строку - должна быть разделитель
-        if (i + 1 < lines.length && lines[i + 1].trim().includes('---')) {
-          tableStart = i;
-          // Ищем конец таблицы
-          for (let j = i + 2; j < lines.length; j++) {
-            const nextLine = lines[j].trim();
-            // Таблица заканчивается, если строка не начинается с |
-            if (nextLine && !nextLine.startsWith('|')) {
-              tableEnd = j;
-              break;
-            }
-          }
-          if (tableEnd === -1) {
-            tableEnd = lines.length;
-          }
-          break;
-        }
-      }
+  /** Рендер текстового куска с любым числом GFM/pipe-таблиц внутри. */
+  const renderTextWithTables = (part: string, keyBase: number) => {
+    const blocks = splitTextWithMarkdownTables(part);
+    if (!blocks.length) return renderMarkdownText(part, keyBase);
+    if (blocks.length === 1 && blocks[0].kind === 'text') {
+      return renderMarkdownText(blocks[0].text, keyBase);
     }
-    
-    if (tableStart === -1) return null;
-    
-    const before = lines.slice(0, tableStart).join('\n');
-    const table = lines.slice(tableStart, tableEnd).join('\n');
-    const after = lines.slice(tableEnd).join('\n');
-    
-    return { table, before, after };
+
+    return (
+      <React.Fragment key={keyBase}>
+        {blocks.map((block, bi) => {
+          if (block.kind === 'table') {
+            return (
+              <React.Fragment key={`${keyBase}-tbl-${bi}`}>
+                {renderTable(block.headers, block.rows, keyBase * 100 + bi)}
+              </React.Fragment>
+            );
+          }
+          if (!(block.text || '').trim()) return null;
+          return (
+            <React.Fragment key={`${keyBase}-txt-${bi}`}>
+              {renderMarkdownText(block.text, keyBase * 100 + bi + 50)}
+            </React.Fragment>
+          );
+        })}
+      </React.Fragment>
+    );
   };
 
   // Функция для парсинга Markdown
@@ -1003,17 +1070,40 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
     // Презентация сверху, остальные артефакты (Mermaid/HTML/…) под ней.
     const segments = hoistPresentationArtifacts(rawSegments, (content) =>
       isGpbPresentationHtml(content) ||
-      (Boolean(isStreaming) && isGpbPresentationStreaming(content, 'html')),
+      (Boolean(isStreaming) &&
+        presentationExpected &&
+        isGpbPresentationStreaming(content || '')),
     );
 
     return segments.map((segment, segIndex) => {
       if (segment.kind === 'artifact') {
         const art = segment.artifact;
-        // GPB-презентация отдельным окном «Презентация», не внутри ArtifactCard.
+        // Без флага агента — только код, без ArtifactCard / presentation viewer.
+        if (!viewerAllowed) {
+          const lang = guessCodeLanguage(art.type) || 'text';
+          return (
+            <React.Fragment key={`artifact-raw-${art.id}-${segIndex}`}>
+              {renderCodeBlock(`\`\`\`${lang}\n${art.content}\n\`\`\``, segIndex * 10000 + 9000)}
+            </React.Fragment>
+          );
+        }
+        // GPB-презентация всегда отдельным окном «Презентация», не внутри ArtifactCard —
+        // иначе двойной chrome при включённых артефактах + skill.
         const presentationPending = Boolean(isStreaming && !art.closed);
-        const isPresentationArtifact =
+        const stickyKey = `artifact:${art.id || art.identifier || segIndex}`;
+        let isPresentationArtifact =
           isGpbPresentationHtml(art.content) ||
-          (presentationPending && isGpbPresentationStreaming(art.content, 'html'));
+          (presentationPending &&
+            presentationExpected &&
+            isGpbPresentationStreaming(art.content || '')) ||
+          (presentationPending &&
+            presentationExpected &&
+            artifactMetaLooksLikePresentation({
+              title: art.title,
+              identifier: art.identifier,
+              type: art.type,
+            }));
+        isPresentationArtifact = markPresentationSticky(stickyKey, isPresentationArtifact);
         if (isPresentationArtifact) {
           return (
             <InlinePresentationViewer
@@ -1044,7 +1134,8 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
             }
 
             if (part.startsWith('```') && !part.endsWith('```') && isStreaming) {
-              return renderCodeBlock(part + '\n```', segIndex * 10000 + index);
+              // Парсинг — с синтетическим ```; streamFenceOpen=true, иначе closed=true → iframe на стриме → #185.
+              return renderCodeBlock(part + '\n```', segIndex * 10000 + index, { streamFenceOpen: true });
             }
 
             if (isAsciiTable(part)) {
@@ -1055,39 +1146,44 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
                   <React.Fragment key={segIndex * 10000 + index}>
                     {renderTable(headers, rows, segIndex * 10000 + index)}
                     {extraction.remaining.trim() &&
-                      renderMarkdownText(extraction.remaining, segIndex * 10000 + index + 1000)}
+                      renderTextWithTables(extraction.remaining, segIndex * 10000 + index + 1000)}
                   </React.Fragment>
                 );
               }
             }
 
-            const tableExtraction = extractMarkdownTable(part);
-            if (tableExtraction) {
-              const tableData = parseMarkdownTable(tableExtraction.table);
-              if (tableData) {
+            // Unfenced GPB HTML (без ```html) → presentation viewer, не ChatInlineHtml с иконками.
+            if (artifactsAllowed) {
+              const extracted = extractUnfencedPresentationHtml(part);
+              const stickyKey = `raw-html:${messageId || 'msg'}:${segIndex}:${index}`;
+              let isPres = Boolean(
+                extracted.html &&
+                  shouldOpenPresentationViewer(extracted.html, {
+                    isStreaming: Boolean(isStreaming),
+                    presentationExpected,
+                    language: 'html',
+                  }),
+              );
+              isPres = markPresentationSticky(stickyKey, isPres);
+              if (isPres && extracted.html) {
                 return (
                   <React.Fragment key={segIndex * 10000 + index}>
-                    {tableExtraction.before.trim() &&
-                      renderMarkdownText(
-                        tableExtraction.before,
-                        (segIndex * 10000 + index) * 1000 + 1,
-                      )}
-                    {renderTable(
-                      tableData.headers,
-                      tableData.rows,
-                      (segIndex * 10000 + index) * 1000 + 2,
-                    )}
-                    {tableExtraction.after.trim() &&
-                      renderMarkdownText(
-                        tableExtraction.after,
-                        (segIndex * 10000 + index) * 1000 + 3,
-                      )}
+                    {extracted.before.trim()
+                      ? renderTextWithTables(extracted.before, segIndex * 10000 + index + 2000)
+                      : null}
+                    <InlinePresentationViewer
+                      html={extracted.html}
+                      isStreaming={Boolean(isStreaming)}
+                    />
+                    {extracted.after.trim()
+                      ? renderTextWithTables(extracted.after, segIndex * 10000 + index + 3000)
+                      : null}
                   </React.Fragment>
                 );
               }
             }
 
-            return renderMarkdownText(part, segIndex * 10000 + index);
+            return renderTextWithTables(part, segIndex * 10000 + index);
           })}
         </React.Fragment>
       );
@@ -1095,7 +1191,15 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
   };
 
   // Рендер кодового блока с подсветкой синтаксиса
-  const renderCodeBlock = (codeBlock: string, index: number) => {
+  const renderCodeBlock = (
+    codeBlock: string,
+    index: number,
+    options?: { streamFenceOpen?: boolean },
+  ) => {
+    // Незакрытый fence на стриме: для парсинга подставляем ```, но closed должен оставаться false.
+    const streamFenceOpen =
+      options?.streamFenceOpen ??
+      (Boolean(isStreaming) && !String(codeBlock).trimEnd().endsWith('```'));
     // Допускаем ```html, ```HTML, ```html с пробелами после языка
     let codeMatch = codeBlock.match(/```(\w+)[^\n]*\n([\s\S]*?)```/);
     let language = 'text';
@@ -1150,19 +1254,23 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
 
       // Fallback: обычный ```mermaid / ```svg без :::artifact всё равно открываем как артефакт
       // (модели часто забывают обёртку, а пользователю нужна визуализация).
+      // Только если у активного агента включены артефакты.
       const langLower = (language || '').toLowerCase();
       const looksLikeMermaidSource =
         /^\s*(graph|flowchart|sequenceDiagram|classDiagram|stateDiagram|erDiagram|journey|gantt|pie|mindmap|timeline|gitGraph|xychart-beta|xychart)\b/m.test(
           code,
         );
-      if (langLower === 'mermaid' || (looksLikeMermaidSource && langLower === 'text')) {
+      if (
+        artifactsAllowed &&
+        (langLower === 'mermaid' || (looksLikeMermaidSource && langLower === 'text'))
+      ) {
         const artifact = {
           id: `fence-mermaid-${messageId || 'msg'}-${index}`,
           identifier: `mermaid-diagram-${index}`,
           type: 'application/vnd.mermaid',
           title: 'Диаграмма Mermaid',
           content: sanitizeMermaidSource(code),
-          closed: !(isStreaming && !codeBlock.endsWith('```')),
+          closed: !streamFenceOpen,
           messageId,
         };
         return (
@@ -1174,7 +1282,10 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
           />
         );
       }
-      if (langLower === 'svg' || (langLower === 'xml' && /<svg[\s>]/i.test(code))) {
+      if (
+        artifactsAllowed &&
+        (langLower === 'svg' || (langLower === 'xml' && /<svg[\s>]/i.test(code)))
+      ) {
         const artifact = {
           id: `fence-svg-${messageId || 'msg'}-${index}`,
           identifier: `svg-image-${index}`,
@@ -1195,14 +1306,37 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
       }
 
       // Обычный HTML (диаграммы, страницы) → inline-артефакт, НЕ presentation viewer.
-      // Presentation viewer только для GPB-слайдов (.slide / content-zone / …).
-      const isPresentationHtml =
-        isGpbPresentationHtml(code) ||
-        (isStreaming && isGpbPresentationStreaming(code, language || editorLanguage));
-
+      // Presentation viewer: GPB-слайды ИЛИ skill презентации у агента/в чате (сразу со стрима).
+      const stickyFenceKey = `fence-html:${messageId || 'msg'}:${index}`;
+      const langForPresentation = language || editorLanguage;
+      let isPresentationHtml = shouldOpenPresentationViewer(code, {
+        isStreaming: Boolean(isStreaming),
+        presentationExpected,
+        language: langForPresentation,
+      });
       if (
         !isPresentationHtml &&
-        (isHtmlFenceLanguage(language) || isHtmlFenceLanguage(editorLanguage))
+        shouldTreatHtmlFenceAsPresentationStream(code, codeBlock, langForPresentation, {
+          isStreaming: Boolean(isStreaming),
+          presentationExpected,
+        })
+      ) {
+        isPresentationHtml = true;
+      }
+      isPresentationHtml = markPresentationSticky(stickyFenceKey, isPresentationHtml);
+
+      const fenceLooksHtml =
+        isHtmlFenceBlock(codeBlock) ||
+        isHtmlFenceLanguage(language) ||
+        isHtmlFenceLanguage(editorLanguage);
+
+      // Презентация GPB — единый return ниже (со sourceSlot для кнопки «код»).
+
+      // HTML-артефакт: isHtmlFenceBlock ловит ```html до перевода строки (иначе Monaco+HTML → #185).
+      if (
+        (viewerAllowed || artifactsAllowed) &&
+        !isPresentationHtml &&
+        fenceLooksHtml
       ) {
         const artifact = {
           id: `fence-html-${messageId || 'msg'}-${index}`,
@@ -1210,7 +1344,7 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
           type: 'text/html',
           title: 'HTML',
           content: code,
-          closed: !(isStreaming && !String(codeBlock).trimEnd().endsWith('```')),
+          closed: !streamFenceOpen,
           messageId,
         };
         return (
@@ -1223,8 +1357,8 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
         );
       }
 
-      // Презентация GPB: при стриме — viewer со спиннером, когда уже есть признаки слайдов.
-      if (isPresentationHtml && isStreaming) {
+      // Презентация GPB: при стриме — viewer со спиннером сразу (skill агента/чата или признаки слайдов).
+      if (artifactsAllowed && isPresentationHtml && isStreaming) {
         return (
           <InlinePresentationViewer
             key={`presentation-${index}`}
@@ -1253,7 +1387,7 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
       }
 
       const codeEditorBlock = (
-        <Box key={isPresentationHtml ? undefined : index} sx={{ position: 'relative', my: isPresentationHtml ? 0 : 2 }}>
+        <Box key={isPresentationHtml ? undefined : index} sx={{ position: 'relative', my: isPresentationHtml ? 0 : 2, maxWidth: '100%', minWidth: 0 }}>
           <Box
             sx={{
               backgroundColor: '#1e1e1e',
@@ -1261,6 +1395,8 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
               p: 0,
               position: 'relative',
               overflow: 'hidden',
+              maxWidth: '100%',
+              minWidth: 0,
             }}
           >
             {/* Заголовок блока кода */}
@@ -1333,6 +1469,12 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
                 cursor: 'text',
                 userSelect: 'text',
                 position: 'relative',
+                maxWidth: '100%',
+                minWidth: 0,
+                overflowX: 'auto',
+                '& .monaco-editor': {
+                  maxWidth: '100% !important',
+                },
                 '& .monaco-editor .margin': {
                   backgroundColor: '#1e1e1e',
                 },
@@ -1344,6 +1486,28 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
                 },
               }}
             >
+              {isStreaming ? (
+                <Box
+                  component="pre"
+                  sx={{
+                    m: 0,
+                    px: 2,
+                    py: 1.5,
+                    color: '#c8c8c8',
+                    fontFamily: 'Consolas, "Courier New", monospace',
+                    fontSize: '0.85rem',
+                    lineHeight: 1.6,
+                    background: '#1e1e1e',
+                    overflow: 'auto',
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-all',
+                    height: `${Math.min(editorHeight, 480)}px`,
+                    maxHeight: 480,
+                  }}
+                >
+                  {code}
+                </Box>
+              ) : (
               <Editor
                 height={`${editorHeight}px`}
                 language={editorLanguage}
@@ -1416,7 +1580,7 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
                   matchBrackets: 'always',
                   guides: { indentation: true },
                   cursorStyle: 'line',
-                  automaticLayout: true,
+                  automaticLayout: !isStreaming,
                   padding: { top: 12, bottom: 12 },
                   fontSize: 14,
                   lineHeight: 22,
@@ -1428,13 +1592,14 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
                   overviewRulerLanes: 0,
                 }}
               />
+              )}
             </Box>
           </Box>
         </Box>
       );
 
       // Готовая презентация — viewer в чате, HTML по кнопке «код».
-      if (isPresentationHtml) {
+      if (artifactsAllowed && isPresentationHtml) {
         return (
           <InlinePresentationViewer
             key={`presentation-${index}`}
@@ -1493,6 +1658,11 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
 
     // Нормализуем em-теги перед markdown/inline парсингом.
     text = sanitizeRawContent(text);
+
+    // Целые HTML-блоки от LLM (ul/ol/pre/blockquote/…) — до построчной нарезки.
+    const preserved = extractPreservedHtmlBlocks(text);
+    text = preserved.text;
+    const htmlBlocks = preserved.blocks;
 
     // Обрабатываем специальные блоки с эмодзи (✅, ⚠️, ❌, ℹ️, 📝, 💡)
     const specialBlockRegex = /^[►✅⚠️❌ℹ️📝💡🔔]\s*(.+)$/gim;
@@ -1591,6 +1761,19 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
      
      const processedLines = lines.map((line, lineIndex) => {
       const trimmedLine = line.trim();
+
+      const htmlBlockMatch = trimmedLine.match(/^__ASTRA_HTML_BLOCK_(\d+)__$/);
+      if (htmlBlockMatch) {
+        const blockHtml = htmlBlocks[Number(htmlBlockMatch[1])];
+        if (blockHtml) {
+          return (
+            <Box key={`${index}-htmlblock-${lineIndex}`} sx={{ my: 0.75 }}>
+              <ChatInlineHtml text={blockHtml} keyPrefix={`${index}-hb-${lineIndex}`} />
+            </Box>
+          );
+        }
+      }
+
       // Обрабатываем специальные блоки
       if (line.includes('<special-block')) {
         const typeMatch = line.match(/type="(\w+)"/);
@@ -1653,30 +1836,53 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
             listItemValue = orderedListCounter;
           }
         }
-        
-        const listItemProps: any = {
-          key: `${index}-${lineIndex}`,
-          component: 'li',
-          sx: {
-            display: 'list-item',
-            ml: 2,
-            mb: 0.5,
-            '&::marker': {
-              color: 'primary.main',
-            },
-          },
-        };
-        
-        // Добавляем атрибут value для нумерованных списков
-        if (currentListType === 'ordered' && listItemValue !== undefined) {
-          listItemProps.value = listItemValue;
-        }
-        
-        const listItem = (
-          <Box {...listItemProps}>
-            <ChatInlineHtml text={content} />
-          </Box>
-        );
+
+        const listItem =
+          currentListType === 'ordered' ? (
+            <Box
+              key={`${index}-${lineIndex}`}
+              component="li"
+              sx={{
+                display: 'flex',
+                alignItems: 'flex-start',
+                gap: 0.75,
+                mb: 0.5,
+                listStyle: 'none',
+              }}
+            >
+              <Box
+                component="span"
+                sx={{
+                  color: 'primary.main',
+                  fontWeight: 600,
+                  flexShrink: 0,
+                  minWidth: `${Math.max(2, String(listItemValue ?? 0).length + 1)}ch`,
+                  textAlign: 'right',
+                  fontVariantNumeric: 'tabular-nums',
+                }}
+              >
+                {listItemValue}.
+              </Box>
+              <Box sx={{ flex: 1, minWidth: 0 }}>
+                <ChatInlineHtml text={content} />
+              </Box>
+            </Box>
+          ) : (
+            <Box
+              key={`${index}-${lineIndex}`}
+              component="li"
+              sx={{
+                display: 'list-item',
+                ml: 2,
+                mb: 0.5,
+                '&::marker': {
+                  color: 'primary.main',
+                },
+              }}
+            >
+              <ChatInlineHtml text={content} />
+            </Box>
+          );
         
         if (!inList || listType !== currentListType) {
           // Начинаем новый список или меняем тип
@@ -1688,8 +1894,8 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
                 component={listType === 'ordered' ? 'ol' : 'ul'}
                 sx={{
                   margin: '8px 0',
-                  paddingLeft: '20px',
-                  listStyleType: listType === 'ordered' ? 'decimal' : 'disc',
+                  paddingLeft: listType === 'ordered' ? '4px' : '20px',
+                  listStyleType: listType === 'ordered' ? 'none' : 'disc',
                 }}
               >
                 {listItems}
@@ -1723,8 +1929,8 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
             component={listType === 'ordered' ? 'ol' : 'ul'}
             sx={{
               margin: '8px 0',
-              paddingLeft: '20px',
-              listStyleType: listType === 'ordered' ? 'decimal' : 'disc',
+              paddingLeft: listType === 'ordered' ? '4px' : '20px',
+              listStyleType: listType === 'ordered' ? 'none' : 'disc',
             }}
           >
             {listItems}
@@ -1801,8 +2007,8 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
            component={listType === 'ordered' ? 'ol' : 'ul'}
            sx={{
              margin: '8px 0',
-             paddingLeft: '20px',
-             listStyleType: listType === 'ordered' ? 'decimal' : 'disc',
+             paddingLeft: listType === 'ordered' ? '4px' : '20px',
+             listStyleType: listType === 'ordered' ? 'none' : 'disc',
            }}
          >
            {listItems}
@@ -1820,7 +2026,18 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
 
   const renderedContent = useMemo(
     () => parseMarkdown(sanitizeRawContent(content)),
-    [content, isStreaming, sanitizeRawContent, fontSizeValue]
+    // parseMarkdown зависит от gate'ов viewer — иначе презентация «залипает» как текст.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      content,
+      isStreaming,
+      sanitizeRawContent,
+      fontSizeValue,
+      artifactsAllowed,
+      viewerAllowed,
+      presentationExpected,
+      messageId,
+    ],
   );
 
   return (
@@ -1830,6 +2047,7 @@ const MessageRendererComponent: React.FC<MessageRendererProps> = ({ content, isS
         position: 'relative',
         maxWidth: '100%',
         minWidth: 0,
+        overflowX: 'hidden',
         overflowWrap: 'anywhere',
         wordBreak: 'break-word',
       }}
@@ -1874,7 +2092,9 @@ const MessageRenderer = React.memo(MessageRendererComponent, (prevProps, nextPro
     prevProps.content === nextProps.content &&
     prevProps.isStreaming === nextProps.isStreaming &&
     prevProps.onSendMessage === nextProps.onSendMessage &&
-    prevProps.messageId === nextProps.messageId
+    prevProps.messageId === nextProps.messageId &&
+    prevProps.chatId === nextProps.chatId &&
+    prevProps.forceArtifacts === nextProps.forceArtifacts
   );
 });
 

@@ -74,6 +74,7 @@ import {
   HubOutlined as GearMenuMcpIcon,
   Code as GearMenuCodingIcon,
   SmartToyOutlined as GearMenuAgentsIcon,
+  WidgetsOutlined as GearMenuArtifactsIcon,
   Psychology as ThinkingModeIcon,
   Bolt as FastModeIcon,
   AutoAwesome as AutoModeIcon,
@@ -86,6 +87,7 @@ import ChatInputBar from '../components/ChatInputBar';
 import { ASTRA_INSERT_CHAT_TEXT, ASTRA_INSERT_CHAT_TEXT_KEY } from '../components/right_bar';
 import ChatInputStatusCluster from '../components/ChatInputStatusCluster';
 import ChatGearAgentsPanel from '../components/ChatGearAgentsPanel';
+import ChatGearArtifactsPanel from '../components/ChatGearArtifactsPanel';
 import ChatGearMcpPanel from '../components/ChatGearMcpPanel';
 import ChatGearCodingPanel from '../components/ChatGearCodingPanel';
 import ChatGearSkillsPanel from '../components/ChatGearSkillsPanel';
@@ -105,7 +107,9 @@ import ModelSelector from '../components/ModelSelector';
 import AgentSelector from '../components/AgentSelector';
 import { clearActiveAgent } from '../utils/clearActiveAgent';
 import { clearActiveSkills, copyActiveSkills } from '../utils/skillSelectionStorage';
+import { disableChatArtifactsToolsForChat } from '../utils/artifactsSelectionStorage';
 import { useActiveSkillIndicators } from '../hooks/useActiveSkillIndicators';
+import { useChatInputArtifactsIndicator } from '../hooks/useChatInputArtifactsIndicator';
 import {
   getProjectIconGlyphSx,
   getDropdownItemSx,
@@ -264,9 +268,9 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
   const [isUploading, setIsUploading] = useState(false);
   const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
   /** Раскрытый подпункт меню «Инструменты» (панель агентов). */
-  const [gearToolsPanel, setGearToolsPanel] = useState<'main' | 'agents' | 'skills' | 'mcp' | 'coding' | 'model-mode'>('main');
+  const [gearToolsPanel, setGearToolsPanel] = useState<'main' | 'agents' | 'artifacts' | 'skills' | 'mcp' | 'coding' | 'model-mode'>('main');
   const gearSubPanelOpen =
-    gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding';
+    gearToolsPanel === 'agents' || gearToolsPanel === 'artifacts' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding';
   const [modelThinkingMode, setModelThinkingMode] = useState<ModelThinkingMode>(() => {
     const saved = (localStorage.getItem(MODEL_THINKING_MODE_STORAGE_KEY) || 'fast') as ModelThinkingMode;
     return saved === 'auto' || saved === 'thinking' || saved === 'fast' ? saved : 'fast';
@@ -352,6 +356,7 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
 
   const mcpScopeChatId = projectId ? projectMcpChatKey(projectId) : null;
   const activeMcpServers = useChatInputMcpIndicators(mcpScopeChatId);
+  const artifactsIndicator = useChatInputArtifactsIndicator(mcpScopeChatId);
   const activeSkills = useActiveSkillIndicators(mcpScopeChatId);
   const { activeMcpTools } = useMcpStreamingTools();
   const isDarkMode = theme.palette.mode === 'dark';
@@ -377,6 +382,12 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
     showNotification('info', 'Skills отключены');
   }, [showNotification, mcpScopeChatId]);
 
+  const handleClearArtifactsTools = useCallback(() => {
+    if (!mcpScopeChatId) return;
+    disableChatArtifactsToolsForChat(mcpScopeChatId);
+    showNotification('info', 'Режим артефактов отключён');
+  }, [mcpScopeChatId, showNotification]);
+
   const libraryInputBadge = useMemo(
     () => (
       <ChatInputStatusCluster
@@ -389,6 +400,9 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
         onSkillsToggle={activeSkills.length ? handleClearSkills : undefined}
         activeMcpServers={activeMcpServers}
         onMcpClick={handleOpenMcpGearPanel}
+        artifactsActive={artifactsIndicator.active}
+        artifactsTooltip={artifactsIndicator.tooltip}
+        onArtifactsToggle={artifactsIndicator.active ? handleClearArtifactsTools : undefined}
       />
     ),
     [
@@ -401,6 +415,9 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
       handleClearSkills,
       activeMcpServers,
       handleOpenMcpGearPanel,
+      artifactsIndicator.active,
+      artifactsIndicator.tooltip,
+      handleClearArtifactsTools,
     ],
   );
 
@@ -439,6 +456,7 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
       mcpLabel,
       activeSkills.length > 0,
       skillsLabel,
+      artifactsIndicator.active,
     );
     return getToolsButtonInsetSp(chatInputStyle, clusterWidth);
   }, [
@@ -446,6 +464,7 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
     myAgentSelection?.name,
     activeMcpServers,
     activeSkills,
+    artifactsIndicator.active,
     chatInputStyle,
   ]);
 
@@ -1137,7 +1156,7 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
                         gearToolsPaperHeightPx < CHAT_GEAR_MENU_PAPER_MAX_HEIGHT_PX ? 'auto' : 'hidden',
                     }
                   : { maxHeight: CHAT_GEAR_MENU_PAPER_MAX_HEIGHT, overflowY: 'auto' }),
-                ...((gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding')
+                ...((gearToolsPanel === 'agents' || gearToolsPanel === 'artifacts' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding')
                   ? CHAT_GEAR_SCROLL_AREA_NO_VISIBLE_SCROLLBAR_SX
                   : {}),
               },
@@ -1149,15 +1168,15 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
               display: 'flex',
               flexDirection: 'row',
               alignItems: 'stretch',
-              gap: gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding' ? `${CHAT_GEAR_MENU_PANELS_GAP_PX}px` : 0,
+              gap: gearToolsPanel === 'agents' || gearToolsPanel === 'artifacts' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding' ? `${CHAT_GEAR_MENU_PANELS_GAP_PX}px` : 0,
               width:
-                (gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding') && gearToolsMenuWidthPx != null
+                (gearToolsPanel === 'agents' || gearToolsPanel === 'artifacts' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding') && gearToolsMenuWidthPx != null
                   ? `${gearToolsMenuWidthPx}px`
-                  : gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding'
+                  : gearToolsPanel === 'agents' || gearToolsPanel === 'artifacts' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding'
                     ? CHAT_GEAR_MENU_EXPANDED_WIDTH_PX
                     : CHAT_GEAR_MENU_PANEL_WIDTH_PX,
               maxWidth:
-                (gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding') && gearToolsMenuWidthPx != null
+                (gearToolsPanel === 'agents' || gearToolsPanel === 'artifacts' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding') && gearToolsMenuWidthPx != null
                   ? `${gearToolsMenuWidthPx}px`
                   : 'min(96vw, 580px)',
               minHeight: gearToolsPaperHeightPx != null ? `${gearToolsPaperHeightPx}px` : undefined,
@@ -1171,7 +1190,7 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
               sx={{
                 ...dropdownPanelSx,
                 width:
-                  gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding'
+                  gearToolsPanel === 'agents' || gearToolsPanel === 'artifacts' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding'
                     ? CHAT_GEAR_MENU_LEFT_RAIL_WIDTH_PX
                     : '100%',
                 flexShrink: 0,
@@ -1213,6 +1232,36 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
                     ...DROPDOWN_CHEVRON_SX,
                     flexShrink: 0,
                     transform: gearToolsPanel === 'agents' ? 'rotate(90deg)' : 'none',
+                  }}
+                />
+              </Box>
+              <Box
+                onClick={() => setGearToolsPanel((p) => (p === 'artifacts' ? 'main' : 'artifacts'))}
+                sx={{
+                  ...dropdownItemSx,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 1,
+                  color: isDarkMode ? 'white' : '#333',
+                  bgcolor:
+                    gearToolsPanel === 'artifacts'
+                      ? isDarkMode
+                        ? DROPDOWN_ITEM_HOVER_BG_DARK
+                        : DROPDOWN_ITEM_HOVER_BG_LIGHT
+                      : 'transparent',
+                }}
+              >
+                <GearMenuArtifactsIcon
+                  sx={{ fontSize: 18, color: isDarkMode ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.6)', flexShrink: 0 }}
+                />
+                <Typography sx={{ flex: 1, minWidth: 0, fontSize: MENU_ACTION_TEXT_SIZE, whiteSpace: 'nowrap' }}>
+                  Артефакты
+                </Typography>
+                <ChevronRightIcon
+                  sx={{
+                    ...DROPDOWN_CHEVRON_SX,
+                    flexShrink: 0,
+                    transform: gearToolsPanel === 'artifacts' ? 'rotate(90deg)' : 'none',
                   }}
                 />
               </Box>
@@ -1388,7 +1437,7 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
                 </Typography>
               </Box>
             </Box>
-            {gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding' ? (
+            {gearToolsPanel === 'agents' || gearToolsPanel === 'artifacts' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding' ? (
               <Box
                 sx={{
                   ...dropdownPanelSx,
@@ -1403,6 +1452,8 @@ export default function ProjectPage({ sidebarOpen = true, sidebarHidden = false 
               >
                 {gearToolsPanel === 'agents' ? (
                   <ChatGearAgentsPanel isDarkMode={isDarkMode} />
+                ) : gearToolsPanel === 'artifacts' ? (
+                  <ChatGearArtifactsPanel isDarkMode={isDarkMode} chatId={mcpScopeChatId} />
                 ) : gearToolsPanel === 'skills' ? (
                 <ChatGearSkillsPanel isDarkMode={isDarkMode} chatId={mcpScopeChatId} />
               ) : gearToolsPanel === 'mcp' ? (

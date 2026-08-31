@@ -212,7 +212,7 @@ export default function ShareViewPage() {
                     </Box>
                     
                     <Box sx={{ width: '100%', color: 'inherit', '& *': { color: 'inherit' } }}>
-                      <MessageRenderer content={message.content} isStreaming={false} />
+                      <MessageRenderer content={message.content} isStreaming={false} forceArtifacts />
                     </Box>
 
                     {message.model && (

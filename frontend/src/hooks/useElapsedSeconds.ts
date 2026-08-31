@@ -13,7 +13,7 @@ export function useElapsedSeconds(
       return undefined;
     }
     const tick = () => {
-      setElapsed(Math.max(1, Math.floor((Date.now() - startedAtMs) / 1000)));
+      setElapsed(Math.max(0, Math.floor((Date.now() - startedAtMs) / 1000)));
     };
     tick();
     const id = window.setInterval(tick, 1000);

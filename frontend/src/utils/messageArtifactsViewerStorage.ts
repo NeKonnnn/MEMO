@@ -42,15 +42,27 @@ export function pinMessageArtifactsViewer(messageId?: string | null): void {
   writeSet(set);
 }
 
-/** Skill, который обычно порождает HTML-презентации / визуалы с viewer. */
-export function skillImpliesArtifactsViewer(slug: string): boolean {
+/** Skill, который порождает GPB HTML-презентации (не mermaid/диаграммы). */
+export function skillImpliesPresentation(slug: string): boolean {
   const s = (slug || '').trim().toLowerCase();
   if (!s) return false;
   return (
     s.includes('present') ||
     s.includes('html-prese') ||
     s.includes('gpb-html') ||
-    s.includes('slide') ||
+    s.includes('pptx') ||
+    s.includes('презента') ||
+    s.includes('слайд') ||
+    /(^|[-_])slide(s)?($|[-_])/.test(s)
+  );
+}
+
+/** Skill, который обычно порождает HTML-презентации / визуалы с viewer. */
+export function skillImpliesArtifactsViewer(slug: string): boolean {
+  const s = (slug || '').trim().toLowerCase();
+  if (!s) return false;
+  if (skillImpliesPresentation(s)) return true;
+  return (
     s.includes('mermaid') ||
     s.includes('artifact') ||
     s.includes('visual') ||

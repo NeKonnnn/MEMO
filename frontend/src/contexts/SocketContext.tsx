@@ -22,12 +22,15 @@ import {
 } from '../utils/browserNotifications';
 import { incrementTabNotification } from '../utils/tabNotifications';
 import { getMcpToolIdsForChat } from '../mcp/selectionStorage';
+import { getArtifactsSettingsForChat } from '../utils/artifactsSelectionStorage';
 import type { McpToolCallRecord } from '../mcp/types';
 import { isCodingModeEnabled, isCodingPlanModeEnabled } from '../coding/selectionStorage';
 import { resolveWorkspaceForChat } from '../coding/workspaceStorage';
 import { getApprovedPlan, setApprovedPlan, setDraftPlan } from '../coding/planStorage';
 import { extractSkillIds } from '../utils/skillMentions';
 import { getActiveSkillIds } from '../utils/skillSelectionStorage';
+import { skillImpliesPresentation } from '../utils/messageArtifactsViewerStorage';
+import { readAgentPresentationSkills } from '../utils/agentArtifactsEnabled';
 import { getApiUrl } from '../config/api';
 import { readSelectedImageGenPresetId } from '../utils/imageGenerationPresets';
 import { isImageGenerationModeEnabled, isVideoGenerationModeEnabled } from '../imageGeneration/selectionStorage';
@@ -365,10 +368,23 @@ export function SocketProvider({ children }: { children: ReactNode }) {
 
   const resolveMcpToolIds = (chatId: string): string[] => getMcpToolIdsForChat(chatId);
 
+  const resolveArtifactsSettings = (chatId: string) => {
+    const s = getArtifactsSettingsForChat(chatId);
+    return {
+      artifacts_enabled: s.artifacts_enabled,
+      shadcn_enabled: s.shadcn_enabled,
+      user_prompt_mode: s.user_prompt_mode,
+    };
+  };
+
   /** Mentions `$` + выбранные в меню «Инструменты → Skills» для этого чата. */
   const resolveSkillIds = (chatId: string, message: string): string[] => {
     const fromMention = extractSkillIds(message);
-    const fromMenu = getActiveSkillIds(chatId);
+    let fromMenu = getActiveSkillIds(chatId);
+    const agentIdRaw = typeof localStorage !== 'undefined' ? localStorage.getItem('active_agent_id') : null;
+    if (agentIdRaw && !readAgentPresentationSkills()) {
+      fromMenu = fromMenu.filter((id) => !skillImpliesPresentation(id));
+    }
     if (!fromMention.length && !fromMenu.length) return [];
     const seen = new Set<string>();
     const out: string[] = [];
@@ -1820,6 +1836,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
         : undefined,
       request_id: requestId,
       tool_ids: isCodingModeEnabled(chatId) ? [] : resolveMcpToolIds(chatId),
+      artifacts_settings: resolveArtifactsSettings(chatId),
       coding_mode: isCodingModeEnabled(chatId),
       plan_mode: isCodingPlanModeEnabled(chatId),
       workspace_path: resolveWorkspaceForChat(project?.workspacePath),
@@ -1950,6 +1967,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
       })(),
       request_id: requestId,
       tool_ids: isCodingModeEnabled(chatId) ? [] : resolveMcpToolIds(chatId),
+      artifacts_settings: resolveArtifactsSettings(chatId),
       coding_mode: isCodingModeEnabled(chatId),
       plan_mode: isCodingPlanModeEnabled(chatId),
       workspace_path: resolveWorkspaceForChat(project?.workspacePath),
@@ -2053,6 +2071,7 @@ export function SocketProvider({ children }: { children: ReactNode }) {
       })(),
       request_id: requestId,
       tool_ids: isCodingModeEnabled(chatId) ? [] : resolveMcpToolIds(chatId),
+      artifacts_settings: resolveArtifactsSettings(chatId),
       coding_mode: isCodingModeEnabled(chatId),
       plan_mode: isCodingPlanModeEnabled(chatId),
       workspace_path: (() => {

@@ -490,6 +490,24 @@ function sanitizeAttrs(tag: ChatInlineTag, raw: Record<string, string>): Record<
 }
 
 /**
+ * Вырезает целые HTML-блоки (списки, pre, цитаты, таблицы…) в плейсхолдеры,
+ * чтобы построчный markdown-рендер их не разорвал.
+ */
+const PRESERVE_BLOCK_TAGS = 'ul|ol|pre|blockquote|table|dl|details';
+
+export function extractPreservedHtmlBlocks(text: string): { text: string; blocks: string[] } {
+  if (!text || !text.includes('<')) return { text, blocks: [] };
+  const blocks: string[] = [];
+  const re = new RegExp(`<(${PRESERVE_BLOCK_TAGS})\\b[^>]*>[\\s\\S]*?<\\/\\1>`, 'gi');
+  const next = text.replace(re, (full) => {
+    const token = `\n__ASTRA_HTML_BLOCK_${blocks.length}__\n`;
+    blocks.push(full);
+    return token;
+  });
+  return { text: next, blocks };
+}
+
+/**
  * Разбор строки с уже вставленными whitelist-тегами в AST.
  * Неизвестный / незакрытый HTML остаётся как текст.
  */

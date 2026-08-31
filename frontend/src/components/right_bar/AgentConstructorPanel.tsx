@@ -100,6 +100,8 @@ import RagUploadingFileThumb from '../RagUploadingFileThumb';
 import RagFilesSearchField from '../RagFilesSearchField';
 import { filterByRagFilenameQuery } from '../../utils/ragFilesSearch';
 import AgentChainEditor from './AgentChainEditor';
+import AgentSubagentsEditor, { EMPTY_SUBAGENT_CONFIG, type SubagentConfig } from './AgentSubagentsEditor';
+import MaxAgentStepsField from './MaxAgentStepsField';
 import { fetchAgentChainConfig, parseAgentIds } from '../../constants/agentChain';
 import {
   createRagPendingUploads,
@@ -430,6 +432,10 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
   const [chainAgentIds, setChainAgentIds] = useState<number[]>([]);
   const [hideSequentialOutputs, setHideSequentialOutputs] = useState(false);
   const [chainMaxAgents, setChainMaxAgents] = useState(10);
+  const [defaultGraphSteps, setDefaultGraphSteps] = useState(50);
+  const [maxRecursionLimit, setMaxRecursionLimit] = useState(500);
+  const [recursionLimit, setRecursionLimit] = useState<number | ''>('');
+  const [subagentsConfig, setSubagentsConfig] = useState<SubagentConfig>(EMPTY_SUBAGENT_CONFIG);
 
   // Support contacts
   const [supportName, setSupportName] = useState('');
@@ -644,7 +650,11 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
     void loadModels();
     void loadUserModelSettings();
     void loadKbDocuments();
-    void fetchAgentChainConfig().then((cfg) => setChainMaxAgents(cfg.maxAgents));
+    void fetchAgentChainConfig().then((cfg) => {
+      setChainMaxAgents(cfg.maxAgents);
+      setDefaultGraphSteps(cfg.defaultRecursionLimit);
+      setMaxRecursionLimit(cfg.maxRecursionLimit);
+    });
     void (async () => {
       try {
         const srv = await fetchMcpServers();
@@ -793,6 +803,26 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
       ),
     );
     setHideSequentialOutputs(!!cfg.hide_sequential_outputs);
+    const rawRecursion = cfg.recursion_limit;
+    if (typeof rawRecursion === 'number' && rawRecursion > 0) {
+      setRecursionLimit(rawRecursion);
+    } else {
+      setRecursionLimit('');
+    }
+    const rawSub = cfg.subagents;
+    if (rawSub && typeof rawSub === 'object') {
+      setSubagentsConfig({
+        enabled: rawSub.enabled === true,
+        allow_self: rawSub.allow_self !== false && rawSub.allowSelf !== false,
+        agent_ids: parseAgentIds(
+          rawSub.agent_ids,
+          typeof selectedAgentId === 'number' ? selectedAgentId : null,
+          10,
+        ),
+      });
+    } else {
+      setSubagentsConfig(EMPTY_SUBAGENT_CONFIG);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- только смена агента; agents читаем из ref
   }, [selectedAgentId]);
 
@@ -821,6 +851,8 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
     setPluginIds([]);
     setChainAgentIds([]);
     setHideSequentialOutputs(false);
+    setRecursionLimit('');
+    setSubagentsConfig(EMPTY_SUBAGENT_CONFIG);
     setSupportName('');
     setSupportEmail('');
   }
@@ -1117,6 +1149,18 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
           chainMaxAgents,
         ),
         hide_sequential_outputs: hideSequentialOutputs,
+        ...(recursionLimit !== '' ? { recursion_limit: recursionLimit } : {}),
+        subagents: subagentsConfig.enabled
+          ? {
+              enabled: true,
+              allow_self: subagentsConfig.allow_self,
+              agent_ids: parseAgentIds(
+                subagentsConfig.agent_ids,
+                typeof selectedAgentId === 'number' ? selectedAgentId : null,
+                10,
+              ),
+            }
+          : { enabled: false, allow_self: subagentsConfig.allow_self, agent_ids: [] },
       },
       tag_ids: [],
       new_tags: [],
@@ -2213,6 +2257,27 @@ export default function AgentConstructorPanel({ isDarkMode, isOpen }: AgentConst
             )}
           </Box>
         </Box>
+
+        {/* ── Advanced agent limits ─────────────────────────────────────────── */}
+        <MaxAgentStepsField
+          value={recursionLimit}
+          onChange={setRecursionLimit}
+          defaultSteps={defaultGraphSteps}
+          maxSteps={maxRecursionLimit}
+          readOnly={readOnly}
+          panelChrome={panelChrome}
+          categoryFieldSx={categoryFieldSx}
+        />
+
+        <AgentSubagentsEditor
+          currentAgentId={selectedAgentId}
+          config={subagentsConfig}
+          onChange={setSubagentsConfig}
+          agents={agents}
+          readOnly={readOnly}
+          panelChrome={panelChrome}
+          categoryFieldSx={categoryFieldSx}
+        />
 
         {/* ── Agent chain (LibreChat Mixture-of-Agents) ─────────────────────── */}
         <AgentChainEditor

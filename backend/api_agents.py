@@ -36,10 +36,13 @@ _full_name_cache: Dict[str, Optional[str]] = {}
 async def get_agent_chain_config():
     """Лимиты цепочки и шагов графа из ConfigMap (AGENT_CHAIN_MAX_AGENTS, AGENT_GRAPH_STEPS)."""
     from backend.agents.chain import get_agent_graph_steps, get_max_chain_agents
+    from backend.agents.config import DEFAULT_RECURSION_LIMIT, MAX_RECURSION_LIMIT_CAP
 
     return {
         "max_agents": get_max_chain_agents(),
         "graph_steps": get_agent_graph_steps(),
+        "default_recursion_limit": get_agent_graph_steps() or DEFAULT_RECURSION_LIMIT,
+        "max_recursion_limit": MAX_RECURSION_LIMIT_CAP,
     }
 
 

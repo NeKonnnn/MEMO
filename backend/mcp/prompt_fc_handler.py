@@ -3,112 +3,36 @@
 from __future__ import annotations
 
 import json
-import re
 import time
+import uuid
 from typing import Any, Dict, List, Optional
 
 from backend.llm_providers import get_registry
 from backend.mcp.connection import McpServerSession
 from backend.mcp.events import McpEventCallback, emit_mcp_tool_end, emit_mcp_tool_start
 from backend.mcp.platform import McpPlatformService
-from backend.mcp.result_parser import compact_tool_result_for_llm, format_parsed_for_llm, parse_mcp_result_to_struct, preview_parsed_for_ui
-from backend.mcp.tool_adapter import to_openai_tools
+from backend.mcp.result_parser import (
+    append_download_links_to_content,
+    enrich_download_links,
+    format_parsed_for_llm,
+    format_tool_result_for_ui,
+    parse_mcp_result_to_struct,
+    preview_parsed_for_ui,
+)
+from backend.agents.subagents import NATIVE_SERVER_ID, execute_native_tool
 from backend.mcp.types import AgentLoopResult, McpCallContext, McpToolInfo
 from backend.settings.config import get_settings
 from backend.settings.logging import get_logger
 
 log = get_logger(__name__)
 
-DEFAULT_PROMPT_TEMPLATE = """Available Tools: {{TOOLS}}
-
-Your task is to choose and return the correct tool(s) from the list of available tools based on the query.
-
-- Return only the JSON object, without any additional text.
-- If the query asks about current weather, news, prices, dates, or any real-time / up-to-date facts, you MUST call the search tool first.
-- If the query is already answered by the tool results in History, return: {"tool_calls": []}
-- If search results already contain enough facts (snippets/descriptions), do NOT fetch full pages — return {"tool_calls": []}
-- Format:
-{
-  "tool_calls": [
-    {"name": "toolName1", "parameters": {"key1": "value1"}}
-  ]
-}
-"""
-
-SYNTHESIS_SYSTEM_PROMPT = (
-    "Ты помощник, который отвечает пользователю на основе результатов веб-поиска (MCP tools). "
-    "Используй ТОЛЬКО факты из блока «Результаты инструментов». "
-    "Дай конкретный, понятный ответ на русском языке. "
-    "Не говори, что у тебя нет доступа к интернету или актуальным данным, если они есть в результатах."
-)
-
-
-def _compact_history_for_fc(messages: List[Dict[str, Any]], *, max_chars: int = 12000) -> str:
-    """Короткая история для prompt_json_fc — без гигантских HTML."""
-    rows = []
-    for msg in messages[-6:]:
-        role = msg.get("role")
-        content = str(msg.get("content") or "")
-        if role == "user" and content.startswith("Tool results:"):
-            body = content.split("Tool results:\n", 1)[-1]
-            content = "Tool results:\n" + compact_tool_result_for_llm(body, max_chars=4000)
-        elif role == "assistant" and content.startswith("{"):
-            content = _truncate_fc_text(content, 800)
-        else:
-            content = _truncate_fc_text(content, 1500)
-        rows.append({"role": role, "content": content})
-    payload = json.dumps(rows, ensure_ascii=False)
-    if len(payload) <= max_chars:
-        return payload
-    return payload[: max_chars - 1] + "…"
-
-
-def _truncate_fc_text(text: str, limit: int) -> str:
-    s = (text or "").strip()
-    if len(s) <= limit:
-        return s
-    return s[: max(0, limit - 1)] + "…"
-
-
-def _build_synthesis_messages(
-    *,
-    user_query: str,
-    chat_messages: List[Dict[str, Any]],
-    tool_summaries: List[str],
-) -> List[Dict[str, Any]]:
-    """Финальный ответ: компактные tool results + исходный вопрос."""
-    base_system = ""
-    for msg in chat_messages:
-        if msg.get("role") == "system" and msg.get("content"):
-            base_system = str(msg["content"]).strip()
-            break
-    system_parts = [SYNTHESIS_SYSTEM_PROMPT]
-    if base_system:
-        system_parts.append(base_system)
-    tool_block = "\n\n---\n\n".join(tool_summaries) if tool_summaries else "(нет данных)"
-    return [
-        {"role": "system", "content": "\n\n".join(system_parts)},
-        {
-            "role": "user",
-            "content": (
-                f"Вопрос пользователя: {user_query}\n\n"
-                f"Результаты инструментов:\n{tool_block}\n\n"
-                "Сформулируй ответ пользователю."
-            ),
-        },
-    ]
+DEFAULT_PROMPT_TEMPLATE = 'Available Tools: {{TOOLS}}\n\nYour task is to choose and return the correct tool(s) from the list of available tools based on the query.\n\nRules:\n- Return only the JSON object, without any additional text.\n- If no tools match, return: {"tool_calls": []}\n- For multi-step tasks (presentations, documents, several edits), call ALL required tools across iterations until the task is fully complete.\n- Do NOT return empty tool_calls until every step is done (e.g. create → add slides/content → save/export).\n- You may return multiple tools in one response when they are independent.\n- Format:\n{\n  "tool_calls": [\n    {"name": "toolName1", "parameters": {"key1": "value1"}}\n  ]\n}\n'
 
 
 def _render_tools_prompt(tools: List[McpToolInfo]) -> str:
     specs = []
     for tool in tools:
-        specs.append(
-            {
-                "name": tool.qualified_name,
-                "description": tool.description,
-                "parameters": tool.parameters,
-            }
-        )
+        specs.append({"name": tool.qualified_name, "description": tool.description, "parameters": tool.parameters})
     tools_json = json.dumps(specs, ensure_ascii=False)
     return DEFAULT_PROMPT_TEMPLATE.replace("{{TOOLS}}", tools_json)
 
@@ -133,99 +57,6 @@ def _find_tool(name: str, tools: List[McpToolInfo]) -> Optional[McpToolInfo]:
     return None
 
 
-def _pick_search_tool(tools: List[McpToolInfo]) -> Optional[McpToolInfo]:
-    for tool in tools:
-        if tool.name == "search" or tool.qualified_name.endswith("_search"):
-            return tool
-    return None
-
-
-def _should_force_web_search(query: str) -> bool:
-    q = (query or "").lower()
-    if not q:
-        return False
-    markers = (
-        "погод", "weather", "новост", "news", "курс", "цена", "price",
-        "сегодня", "сейчас", "актуаль", "latest", "current", "сколько стоит",
-        "когда", "где", "who is", "what is",
-    )
-    return any(m in q for m in markers)
-
-
-async def _execute_tool_calls(
-    *,
-    calls: List[dict],
-    tools: List[McpToolInfo],
-    platform: McpPlatformService,
-    sessions: Dict[str, McpServerSession],
-    context: McpCallContext,
-    event_callback: Optional[McpEventCallback],
-) -> tuple[List[str], List[str], int]:
-    """Выполняет tool_calls; возвращает (tool_results, tool_summaries, executed_count)."""
-    tool_results: List[str] = []
-    tool_summaries: List[str] = []
-    executed = 0
-    for call in calls:
-        if not isinstance(call, dict):
-            continue
-        name = str(call.get("name") or "")
-        params = call.get("parameters") or call.get("arguments") or {}
-        tool_info = _find_tool(name, tools)
-        if not tool_info:
-            tool_results.append(f"Tool {name} not found")
-            continue
-        session = sessions.get(tool_info.server_id)
-        if not session:
-            tool_results.append(f"MCP session for {tool_info.server_id} unavailable")
-            continue
-        try:
-            started = time.perf_counter()
-            await emit_mcp_tool_start(
-                event_callback,
-                server_id=tool_info.server_id,
-                tool=tool_info.name,
-                qualified_name=tool_info.qualified_name,
-            )
-            raw = await platform.call_tool(
-                tool_info.server_id,
-                tool_info.name,
-                params if isinstance(params, dict) else {},
-                context,
-                session,
-            )
-            parsed = parse_mcp_result_to_struct(raw)
-            formatted = format_parsed_for_llm(parsed) or str(raw)
-            tool_results.append(formatted)
-            tool_summaries.append(formatted)
-            executed += 1
-            duration_ms = int((time.perf_counter() - started) * 1000)
-            await emit_mcp_tool_end(
-                event_callback,
-                server_id=tool_info.server_id,
-                tool=tool_info.name,
-                qualified_name=tool_info.qualified_name,
-                success=True,
-                duration_ms=duration_ms,
-                result_preview=preview_parsed_for_ui(parsed),
-                has_image=bool(parsed.images),
-                has_audio=bool(parsed.audio),
-                has_resource=bool(parsed.resources),
-            )
-        except Exception as exc:
-            duration_ms = int((time.perf_counter() - started) * 1000) if "started" in locals() else 0
-            await emit_mcp_tool_end(
-                event_callback,
-                server_id=tool_info.server_id,
-                tool=tool_info.name,
-                qualified_name=tool_info.qualified_name,
-                success=False,
-                duration_ms=duration_ms,
-                error=str(exc),
-            )
-            tool_results.append(f"Error calling {name}: {exc}")
-    return tool_results, tool_summaries, executed
-
-
 async def run_prompt_json_fc(
     *,
     messages: List[Dict[str, Any]],
@@ -240,6 +71,8 @@ async def run_prompt_json_fc(
     max_tokens: int = 1024,
     request_extra: Optional[Dict[str, Any]] = None,
     event_callback: Optional[McpEventCallback] = None,
+    subagent_ctx=None,
+    subagent_config=None,
 ) -> AgentLoopResult:
     settings = get_settings()
     effective_model_path = fc_model_path or model_path or settings.mcp.fc_task_model or model_path
@@ -248,56 +81,29 @@ async def run_prompt_json_fc(
     if not model_id:
         models = await provider.list_models()
         model_id = models[0].model_id if models else ""
-
     user_query = ""
     for msg in reversed(messages):
         if msg.get("role") == "user":
             user_query = str(msg.get("content") or "")
             break
-
     tool_calls_executed = 0
+    attachments: List[Dict[str, str]] = []
     working_messages = list(messages)
-    tool_summaries: List[str] = []
     req_extra = dict(request_extra or {})
-
     for iteration in range(max(1, max_iterations)):
         prompt = _render_tools_prompt(tools)
         fc_messages = [
             {"role": "system", "content": prompt},
             {
                 "role": "user",
-                "content": (
-                    f"History:\n{_compact_history_for_fc(working_messages)}\nQuery: {user_query}"
-                ),
+                "content": f"History:\n{json.dumps(working_messages[-4:], ensure_ascii=False)}\nQuery: {user_query}",
             },
         ]
         result = await provider.chat_completion(
-            fc_messages,
-            model_id,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            request_extra=req_extra,
+            fc_messages, model_id, temperature=temperature, max_tokens=max_tokens, request_extra=req_extra
         )
         payload = _extract_json_object(result.content)
         if not payload:
-            if tool_summaries:
-                final = await provider.chat(
-                    _build_synthesis_messages(
-                        user_query=user_query,
-                        chat_messages=messages,
-                        tool_summaries=tool_summaries,
-                    ),
-                    model_id,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    request_extra=req_extra,
-                )
-                return AgentLoopResult(
-                    content=final,
-                    tool_calls_executed=tool_calls_executed,
-                    mode="prompt_json_fc",
-                    iterations=iteration + 1,
-                )
             return AgentLoopResult(
                 content=result.content or "Не удалось распознать вызов инструмента.",
                 tool_calls_executed=tool_calls_executed,
@@ -306,73 +112,140 @@ async def run_prompt_json_fc(
             )
         calls = payload.get("tool_calls") or []
         if not calls:
-            if iteration == 0 and not tool_summaries and _should_force_web_search(user_query):
-                search_tool = _pick_search_tool(tools)
-                if search_tool:
-                    log.info("MCP prompt_json_fc: auto search query=%s", user_query[:120])
-                    calls = [
-                        {
-                            "name": search_tool.qualified_name,
-                            "parameters": {"query": user_query[:500]},
-                        }
-                    ]
-            if not calls:
-                final = await provider.chat(
-                    _build_synthesis_messages(
-                        user_query=user_query,
-                        chat_messages=messages,
-                        tool_summaries=tool_summaries,
-                    ),
-                    model_id,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    request_extra=req_extra,
+            if tool_calls_executed > 0 and iteration + 1 < max_iterations:
+                working_messages.append(
+                    {
+                        "role": "user",
+                        "content": "The task is likely not finished yet. If more MCP tools are required, respond with tool_calls JSON only. Return empty tool_calls only when the user request is fully completed (including export/download if applicable).",
+                    }
                 )
-                return AgentLoopResult(
-                    content=final,
-                    tool_calls_executed=tool_calls_executed,
-                    mode="prompt_json_fc",
-                    iterations=iteration + 1,
+                continue
+            final = await provider.chat(
+                working_messages, model_id, temperature=temperature, max_tokens=max_tokens, request_extra=req_extra
+            )
+            content = append_download_links_to_content(final, attachments)
+            return AgentLoopResult(
+                content=content,
+                tool_calls_executed=tool_calls_executed,
+                mode="prompt_json_fc",
+                iterations=iteration + 1,
+                attachments=attachments,
+            )
+        tool_results: List[str] = []
+        for call in calls:
+            if not isinstance(call, dict):
+                continue
+            name = str(call.get("name") or "")
+            params = call.get("parameters") or call.get("arguments") or {}
+            tool_info = _find_tool(name, tools)
+            if not tool_info:
+                tool_results.append(f"Tool {name} not found")
+                continue
+            if tool_info.server_id == NATIVE_SERVER_ID:
+                try:
+                    started = time.perf_counter()
+                    call_id = uuid.uuid4().hex
+                    tool_args = params if isinstance(params, dict) else {}
+                    await emit_mcp_tool_start(
+                        event_callback,
+                        server_id=tool_info.server_id,
+                        tool=tool_info.name,
+                        qualified_name=tool_info.qualified_name,
+                        call_id=call_id,
+                        arguments=tool_args,
+                    )
+                    content = await execute_native_tool(
+                        tool_info,
+                        tool_args,
+                        subagent_ctx=subagent_ctx,
+                        subagent_config=subagent_config,
+                    )
+                    tool_results.append(content)
+                    tool_calls_executed += 1
+                    duration_ms = int((time.perf_counter() - started) * 1000)
+                    await emit_mcp_tool_end(
+                        event_callback,
+                        server_id=tool_info.server_id,
+                        tool=tool_info.name,
+                        qualified_name=tool_info.qualified_name,
+                        success=True,
+                        duration_ms=duration_ms,
+                        call_id=call_id,
+                        arguments=tool_args,
+                        result=content,
+                    )
+                except Exception as exc:
+                    log.exception("Native tool error in prompt_json_fc")
+                    tool_results.append(f"Native tool error: {exc}")
+                continue
+            session = sessions.get(tool_info.server_id)
+            if not session:
+                tool_results.append(f"MCP session for {tool_info.server_id} unavailable")
+                continue
+            try:
+                started = time.perf_counter()
+                call_id = uuid.uuid4().hex
+                tool_args = params if isinstance(params, dict) else {}
+                await emit_mcp_tool_start(
+                    event_callback,
+                    server_id=tool_info.server_id,
+                    tool=tool_info.name,
+                    qualified_name=tool_info.qualified_name,
+                    call_id=call_id,
+                    arguments=tool_args,
                 )
-
-        tool_results, new_summaries, executed = await _execute_tool_calls(
-            calls=calls,
-            tools=tools,
-            platform=platform,
-            sessions=sessions,
-            context=context,
-            event_callback=event_callback,
-        )
-        tool_summaries.extend(new_summaries)
-        tool_calls_executed += executed
-
-        working_messages.append(
-            {
-                "role": "assistant",
-                "content": json.dumps({"tool_calls": calls}, ensure_ascii=False),
-            }
-        )
-        working_messages.append(
-            {
-                "role": "user",
-                "content": "Tool results:\n" + "\n".join(tool_results),
-            }
-        )
-
+                raw = await platform.call_tool(tool_info.server_id, tool_info.name, tool_args, context, session)
+                parsed = parse_mcp_result_to_struct(raw)
+                tool_results.append(format_parsed_for_llm(parsed) or str(raw))
+                tool_calls_executed += 1
+                download_links = enrich_download_links(parsed, tool_info.server_id)
+                result_ui = format_tool_result_for_ui(parsed, raw)
+                for link in download_links:
+                    if link["url"] not in {x["url"] for x in attachments}:
+                        attachments.append(link)
+                duration_ms = int((time.perf_counter() - started) * 1000)
+                await emit_mcp_tool_end(
+                    event_callback,
+                    server_id=tool_info.server_id,
+                    tool=tool_info.name,
+                    qualified_name=tool_info.qualified_name,
+                    success=True,
+                    duration_ms=duration_ms,
+                    result_preview=preview_parsed_for_ui(parsed),
+                    has_image=bool(parsed.images),
+                    has_audio=bool(parsed.audio),
+                    has_resource=bool(parsed.resources),
+                    download_urls=download_links or None,
+                    call_id=call_id,
+                    arguments=tool_args,
+                    result=result_ui,
+                )
+            except Exception as exc:
+                log.exception("Error calling")
+                duration_ms = int((time.perf_counter() - started) * 1000) if "started" in locals() else 0
+                await emit_mcp_tool_end(
+                    event_callback,
+                    server_id=tool_info.server_id,
+                    tool=tool_info.name,
+                    qualified_name=tool_info.qualified_name,
+                    success=False,
+                    duration_ms=duration_ms,
+                    error=str(exc),
+                    call_id=call_id if "call_id" in locals() else None,
+                    arguments=tool_args if "tool_args" in locals() else None,
+                    result=str(exc),
+                )
+                tool_results.append(f"Error calling {name}: {exc}")
+        working_messages.append({"role": "assistant", "content": json.dumps({"tool_calls": calls}, ensure_ascii=False)})
+        working_messages.append({"role": "user", "content": "Tool results:\n" + "\n".join(tool_results)})
     final = await provider.chat(
-        _build_synthesis_messages(
-            user_query=user_query,
-            chat_messages=messages,
-            tool_summaries=tool_summaries,
-        ),
-        model_id,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        request_extra=req_extra,
+        working_messages, model_id, temperature=temperature, max_tokens=max_tokens, request_extra=req_extra
     )
+    content = append_download_links_to_content(final, attachments)
     return AgentLoopResult(
-        content=final,
+        content=content,
         tool_calls_executed=tool_calls_executed,
         mode="prompt_json_fc",
         iterations=max_iterations,
+        attachments=attachments,
     )

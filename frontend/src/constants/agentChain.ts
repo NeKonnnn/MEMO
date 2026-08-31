@@ -25,6 +25,8 @@ export interface AgentChainCurrent {
 export interface AgentChainConfig {
   maxAgents: number;
   graphSteps: number;
+  defaultRecursionLimit: number;
+  maxRecursionLimit: number;
 }
 
 let cachedConfig: AgentChainConfig | null = null;
@@ -37,7 +39,14 @@ function clampLimit(raw: unknown, fallback: number, lo: number, hi: number): num
 }
 
 export function getCachedChainConfig(): AgentChainConfig {
-  return cachedConfig || { maxAgents: DEFAULT_MAX_CHAIN_AGENTS, graphSteps: DEFAULT_GRAPH_STEPS };
+  return (
+    cachedConfig || {
+      maxAgents: DEFAULT_MAX_CHAIN_AGENTS,
+      graphSteps: DEFAULT_GRAPH_STEPS,
+      defaultRecursionLimit: DEFAULT_GRAPH_STEPS,
+      maxRecursionLimit: 500,
+    }
+  );
 }
 
 export async function fetchAgentChainConfig(): Promise<AgentChainConfig> {
@@ -52,10 +61,27 @@ export async function fetchAgentChainConfig(): Promise<AgentChainConfig> {
         cachedConfig = {
           maxAgents: clampLimit(data.max_agents ?? data.maxAgents, DEFAULT_MAX_CHAIN_AGENTS, 1, 50),
           graphSteps: clampLimit(data.graph_steps ?? data.graphSteps, DEFAULT_GRAPH_STEPS, 1, 500),
+          defaultRecursionLimit: clampLimit(
+            data.default_recursion_limit ?? data.graph_steps ?? data.graphSteps,
+            DEFAULT_GRAPH_STEPS,
+            1,
+            500,
+          ),
+          maxRecursionLimit: clampLimit(
+            data.max_recursion_limit ?? data.maxRecursionLimit,
+            500,
+            1,
+            500,
+          ),
         };
         return cachedConfig;
       } catch {
-        cachedConfig = { maxAgents: DEFAULT_MAX_CHAIN_AGENTS, graphSteps: DEFAULT_GRAPH_STEPS };
+        cachedConfig = {
+          maxAgents: DEFAULT_MAX_CHAIN_AGENTS,
+          graphSteps: DEFAULT_GRAPH_STEPS,
+          defaultRecursionLimit: DEFAULT_GRAPH_STEPS,
+          maxRecursionLimit: 500,
+        };
         return cachedConfig;
       }
     })();

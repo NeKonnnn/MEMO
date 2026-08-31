@@ -40,6 +40,7 @@ from backend.realtime.helpers import (
     agent_mcp_tool_ids,
     agent_plugin_ids,
     kb_search_agent_documents,
+    merge_chat_artifacts_settings,
 )
 from backend.services.user_feedback_context import (
     build_user_feedback_system_block,
@@ -847,6 +848,10 @@ def register_handlers(sio):
             agent_profile = await enrich_agent_profile_with_user_settings(
                 agent_profile, validated_user.get("user_id") if validated_user else None
             )
+            agent_profile = merge_chat_artifacts_settings(
+                agent_profile if isinstance(agent_profile, dict) else {},
+                data if isinstance(data, dict) else {},
+            )
             _agent_ms = agent_profile.get("model_settings") if isinstance(agent_profile, dict) else None
             # Биндим ИТОГ (персональные настройки + карточка агента поверх), а не
             # одну карточку: иначе ключи, которых в ней нет, приезжали бы из
@@ -1484,7 +1489,7 @@ async def _handle_multi_llm(
         return
     n_models = len(multi_llm_models)
     tool_ids = resolve_chat_tool_ids(data.get("tool_ids") or data.get("mcp_tool_ids"))
-    mcp_enabled = bool(tool_ids and current_user and (not inline_imgs))
+    mcp_enabled = bool((tool_ids or (_ap.get("subagents") or {}).get("enabled")) and current_user and (not inline_imgs))
     _ap = agent_profile if isinstance(agent_profile, dict) else {}
     mcp_temperature = float(
         data.get("temperature") if data.get("temperature") is not None else (_ap.get("temperature") or 0.7)
@@ -2505,7 +2510,7 @@ async def _handle_direct(
             )
         except Exception:
             logger.exception("Coding agent loop error")
-    elif not canned and tool_ids and current_user:
+    elif not canned and (tool_ids or (agent_profile and (agent_profile.get("subagents") or {}).get("enabled"))) and current_user:
         try:
             from backend.mcp.chat_integration import run_mcp_for_chat
 

@@ -189,10 +189,18 @@ def _values_equal(a: Any, b: Any) -> bool:
 
 
 def _strip_legacy_default_overrides(stored: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Убрать «замороженные» старые дефолты кластера из строки сущности.
+
+    INDEX_AFFECTING_KEYS не трогаем: save() пишет их всегда (даже если значение
+    совпало с дефолтом), и осознанный выбор вроде hierarchical при ConfigMap=fixed
+    иначе снова схлопывался бы в fixed — UI откатывался, перечанковка не стартовала.
+    """
     if not isinstance(stored, dict):
         return {}
     out = dict(stored)
     for key, legacy_val in _LEGACY_CLUSTER_ENTITY_DEFAULTS.items():
+        if key in INDEX_AFFECTING_KEYS:
+            continue
         if key in out and _values_equal(out[key], legacy_val):
             del out[key]
     return out
@@ -292,7 +300,10 @@ async def save_entity_rag_settings(
 
     defaults = _defaults_from_app_state()
     payload = {
-        k: v for k, v in stored.items() if k in RAG_SETTING_KEYS and v != defaults.get(k)
+        k: v
+        for k, v in stored.items()
+        if k in RAG_SETTING_KEYS
+        and (k in INDEX_AFFECTING_KEYS or v != defaults.get(k))
     }
     if payload:
         await repo.upsert(sc, ek, payload, updated_by)

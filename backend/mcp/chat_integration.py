@@ -4,47 +4,65 @@ from __future__ import annotations
 
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
-from backend.llm_providers.routing import thinking_request_extra
+from backend.agents.config import resolve_recursion_limit
+from backend.agents.subagents import (
+    SubagentRunContext,
+    build_subagent_tools,
+    load_subagent_agent_names,
+    subagents_from_profile,
+)
+from backend.llm_providers.routing import (
+    merge_sampling_request_extra,
+    thinking_request_extra,
+)
 from backend.mcp.agent_loop import get_mcp_agent_loop
-from backend.mcp.events import McpEventCallback
 from backend.mcp.platform import get_mcp_platform
-from backend.mcp.resolvers import build_chat_messages, parse_mcp_server_ids, resolve_chat_tool_ids
-from backend.mcp.types import AgentLoopResult, McpCallContext
+from backend.mcp.resolvers import build_chat_messages, parse_mcp_server_ids
+from backend.mcp.types import AgentLoopResult, McpCallContext, McpToolInfo
+from backend.settings.config import get_settings
 from backend.settings.logging import get_logger
 
 log = get_logger(__name__)
 
+McpEventCallback = Callable[[Dict[str, Any]], Awaitable[None]]
 
-async def _ensure_mcp_model_loaded(model_path: str) -> bool:
-    """MCP FC требует готовую модель; иначе llm-svc отвечает 503 и чат падает в plain LLM."""
-    from backend.llm_providers import get_registry
 
-    registry = await get_registry()
-    provider, model_id = registry.resolve(model_path)
-    if not model_id:
-        models = await provider.list_models()
-        model_id = models[0].model_id if models else ""
-    if not model_id:
-        log.warning("MCP: не удалось определить model_id для %s", model_path)
-        return False
-    if not await provider.ensure_model_loaded(model_id):
-        log.warning("MCP: модель %s недоступна на провайдере %s", model_id, provider.id)
-        return False
-    return True
+def _extract_provider_id(model_path: Optional[str]) -> str:
+    raw = str(model_path or "").strip()
+    if not raw:
+        return ""
+    if raw.lower().startswith("llm-svc://"):
+        rest = raw[len("llm-svc://") :].strip().lstrip("/")
+        if "/" in rest:
+            return rest.split("/", 1)[0].strip()
+        return ""
+    if "/" in raw:
+        return raw.split("/", 1)[0].strip()
+    return raw
+
+
+def is_mcp_provider_allowed(model_path: Optional[str]) -> bool:
+    """MCP LLM provider allowlist (B-29)."""
+    allowlist = get_settings().mcp.llm_provider_allowlist
+    if not allowlist:
+        return True
+    allowed = [str(x).strip() for x in allowlist if str(x).strip()]
+    if not allowed:
+        return True
+    provider_id = _extract_provider_id(model_path)
+    if not provider_id:
+        return True
+    return provider_id in allowed
 
 
 def build_mcp_context_from_user(
-    user: dict,
-    *,
-    chat_id: Optional[str] = None,
-    message_id: Optional[str] = None,
+    user: dict, *, chat_id: Optional[str] = None, message_id: Optional[str] = None
 ) -> McpCallContext:
     return McpCallContext(
         user_id=str(user.get("user_id") or user.get("username") or ""),
         username=str(user.get("username") or ""),
         chat_id=chat_id,
         message_id=message_id,
-        email=user.get("email"),
         is_admin=bool(user.get("is_admin")),
         groups=list(user.get("groups") or user.get("ldap_groups") or []),
         ldap_groups=list(user.get("ldap_groups") or user.get("groups") or []),
@@ -64,63 +82,84 @@ async def maybe_run_mcp_agent(
     enable_thinking: bool = False,
     event_callback: Optional[McpEventCallback] = None,
     max_iterations: Optional[int] = None,
+    native_tools: Optional[List[McpToolInfo]] = None,
+    subagent_ctx: Optional[SubagentRunContext] = None,
+    subagent_config=None,
+    agent_profile: Optional[dict] = None,
 ) -> Optional[AgentLoopResult]:
     platform = get_mcp_platform()
-    if not platform.enabled or not platform.initialized:
+    native_tools = list(native_tools or [])
+    sub_cfg = subagent_config
+    sub_ctx = subagent_ctx
+
+    if agent_profile is not None and sub_cfg is None:
+        sub_cfg = subagents_from_profile(agent_profile)
+    if agent_profile is not None and sub_cfg.enabled and not native_tools:
+        parent_id = agent_profile.get("agent_id")
+        names = await load_subagent_agent_names(
+            sub_cfg.agent_ids,
+            user_id=mcp_context.user_id or None,
+        )
+        if parent_id is not None and agent_profile.get("name"):
+            names[int(parent_id)] = str(agent_profile["name"])
+        native_tools = build_subagent_tools(
+            sub_cfg,
+            parent_agent_id=int(parent_id) if parent_id is not None else None,
+            agent_names=names,
+        )
+
+    has_native = bool(native_tools)
+    mcp_tools: List[McpToolInfo] = []
+    enabled_ids: List[str] = []
+
+    if platform.enabled and platform.initialized and is_mcp_provider_allowed(model_path):
+        server_ids = parse_mcp_server_ids(tool_ids)
+        if server_ids:
+            enabled_ids = platform.list_enabled_server_ids(server_ids)
+            for sid in enabled_ids:
+                try:
+                    mcp_tools.extend(await platform.list_tools_for_server(sid, mcp_context))
+                except Exception:
+                    log.exception("MCP list_tools failed server=")
+            mcp_tools = platform.filter_tools_by_context(
+                mcp_tools, mcp_context, enabled_server_ids=enabled_ids
+            )
+
+    if not has_native and not mcp_tools:
         return None
 
-    from backend.mcp.policy import is_mcp_provider_allowed
-
-    if not is_mcp_provider_allowed(model_path):
-        log.warning("MCP blocked: provider not in MCP_LLM_PROVIDER_ALLOWLIST model=%s", model_path)
+    if not has_native and not platform.enabled:
         return None
 
-    resolved_tool_ids = resolve_chat_tool_ids(tool_ids)
-    if not await _ensure_mcp_model_loaded(model_path):
-        return None
+    step_limit = max_iterations
+    if step_limit is None:
+        step_limit = resolve_recursion_limit(agent_profile)
 
-    server_ids = parse_mcp_server_ids(resolved_tool_ids)
-    if not server_ids:
-        return None
-
-    enabled_ids = platform.list_enabled_server_ids(server_ids)
-    if not enabled_ids:
-        return None
-
-    all_tools = []
-    for sid in enabled_ids:
-        try:
-            all_tools.extend(await platform.list_tools_for_server(sid, mcp_context))
-        except Exception as exc:
-            log.warning("MCP list_tools failed server=%s: %s", sid, exc)
-
-    all_tools = platform.filter_tools_by_context(all_tools, mcp_context, enabled_server_ids=enabled_ids)
-    if not all_tools:
-        log.info("MCP enabled but no tools available for servers=%s", enabled_ids)
-        return None
-
-    messages = build_chat_messages(
-        user_message=user_message,
-        history=history,
-        system_prompt=system_prompt,
+    log.debug(
+        "MCP chat tool_ids=%s servers=%s native_tools=%s max_iterations=%s",
+        tool_ids,
+        enabled_ids,
+        len(native_tools),
+        step_limit,
     )
-    # UI «Быстрый»/«Мышление»: явно вкл/выкл (раньше при False флаг не слался).
+    messages = build_chat_messages(user_message=user_message, history=history, system_prompt=system_prompt)
     request_extra = thinking_request_extra(bool(enable_thinking))
+    request_extra = merge_sampling_request_extra(request_extra)
     loop = get_mcp_agent_loop()
-    from backend.agents.chain import get_agent_graph_steps
-
-    iterations = max_iterations if max_iterations is not None else get_agent_graph_steps()
     return await loop.run(
         messages=messages,
         model_path=model_path,
-        mcp_tools=all_tools,
+        mcp_tools=mcp_tools,
         mcp_context=mcp_context,
         enabled_server_ids=enabled_ids,
+        max_iterations=step_limit,
         temperature=temperature,
         max_tokens=max_tokens,
         request_extra=request_extra,
         event_callback=event_callback,
-        max_iterations=iterations,
+        native_tools=native_tools,
+        subagent_ctx=sub_ctx,
+        subagent_config=sub_cfg,
     )
 
 
@@ -138,7 +177,8 @@ async def run_mcp_for_chat(
     max_tokens: int = 1024,
     enable_thinking: bool = False,
     emit_event: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
-    max_iterations: Optional[int] = None,
+    agent_profile: Optional[dict] = None,
+    subagent_executor=None,
 ) -> Optional[AgentLoopResult]:
     """
     Единая точка входа MCP для socket и REST chat (B-40).
@@ -148,6 +188,37 @@ async def run_mcp_for_chat(
     ``model`` в ``emit_event`` callback на стороне handler.
     """
     mcp_ctx = build_mcp_context_from_user(user, chat_id=chat_id, message_id=message_id)
+    sub_cfg = subagents_from_profile(agent_profile) if agent_profile else None
+    sub_ctx = None
+    if agent_profile and sub_cfg and sub_cfg.enabled:
+        from backend.agents.subagent_runner import run_isolated_subagent
+
+        parent_id = agent_profile.get("agent_id")
+        step_limit = resolve_recursion_limit(agent_profile)
+
+        async def _executor(**kwargs):
+            return await run_isolated_subagent(
+                target_agent_id=kwargs["target_agent_id"],
+                prompt=kwargs["prompt"],
+                parent_profile=kwargs["parent_profile"],
+                user=user,
+                user_id=mcp_ctx.user_id or None,
+                depth=kwargs.get("depth", 0),
+                remaining_steps=kwargs.get("remaining_steps", step_limit - 1),
+                enable_thinking=enable_thinking,
+                emit_event=emit_event,
+            )
+
+        sub_ctx = SubagentRunContext(
+            parent_agent_id=int(parent_id) if parent_id is not None else None,
+            parent_profile=dict(agent_profile),
+            user=user,
+            user_id=mcp_ctx.user_id or None,
+            depth=0,
+            remaining_steps=step_limit - 1,
+            executor=subagent_executor or _executor,
+        )
+
     return await maybe_run_mcp_agent(
         tool_ids=tool_ids,
         user_message=user_message,
@@ -159,5 +230,7 @@ async def run_mcp_for_chat(
         max_tokens=max_tokens,
         enable_thinking=enable_thinking,
         event_callback=emit_event,
-        max_iterations=max_iterations,
+        agent_profile=agent_profile,
+        subagent_ctx=sub_ctx,
+        subagent_config=sub_cfg,
     )

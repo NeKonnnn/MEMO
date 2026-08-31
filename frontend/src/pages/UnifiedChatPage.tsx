@@ -46,6 +46,7 @@ import {
   Code as GearMenuCodingIcon,
   ImageOutlined as GearMenuImageGenIcon,
   SmartToyOutlined as GearMenuAgentsIcon,
+  WidgetsOutlined as GearMenuArtifactsIcon,
   ChevronLeft as ChevronLeftIcon,
   ChevronRight as ChevronRightIcon,
   Add as AddIcon,
@@ -87,6 +88,7 @@ import InlineAttachmentsList from '../components/InlineAttachmentsList';
 import InlineImageLightbox from '../components/InlineImageLightbox';
 import ImageGenerationPlaceholder from '../components/ImageGenerationPlaceholder';
 import ChatGearAgentsPanel from '../components/ChatGearAgentsPanel';
+import ChatGearArtifactsPanel from '../components/ChatGearArtifactsPanel';
 import ChatGearMcpPanel from '../components/ChatGearMcpPanel';
 import ChatGearCodingPanel from '../components/ChatGearCodingPanel';
 import ChatGearGenerationPanel from '../components/ChatGearGenerationPanel';
@@ -113,7 +115,9 @@ import {
 } from '../utils/ragReindexBlock';
 import { clearActiveAgent } from '../utils/clearActiveAgent';
 import { clearActiveSkills } from '../utils/skillSelectionStorage';
+import { disableChatArtifactsToolsForChat } from '../utils/artifactsSelectionStorage';
 import { useActiveSkillIndicators } from '../hooks/useActiveSkillIndicators';
+import { useChatInputArtifactsIndicator } from '../hooks/useChatInputArtifactsIndicator';
 import { useChatContextUsage } from '../hooks/useChatContextUsage';
 import { useChatInputMcpIndicators } from '../mcp/hooks/useChatInputMcpIndicators';
 import { useMcpStreamingTools } from '../mcp/hooks/useMcpStreamingTools';
@@ -298,8 +302,7 @@ function ChatThinkingIndicator({
   agentName?: string | null;
 }) {
   const elapsedSec = useElapsedSeconds(startedAtMs, true);
-  const timerLabel =
-    elapsedSec !== null && elapsedSec > 0 ? formatGenerationDuration(elapsedSec) : null;
+  const timerLabel = formatGenerationDuration(elapsedSec ?? 0);
 
   return (
     <Box
@@ -370,7 +373,7 @@ function ChatThinkingIndicator({
             </Box>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, minHeight: '24px' }}>
               <ThinkingShimmerText isDarkMode={isDarkMode} fontSize="0.875rem" fontWeight={500}>
-                {timerLabel ? `думает...\u00A0${timerLabel}` : 'думает...'}
+                {`думает...\u00A0${timerLabel}`}
               </ThinkingShimmerText>
             </Box>
           </CardContent>
@@ -383,10 +386,7 @@ function ChatThinkingIndicator({
 /** Живой таймер в чипе multi-LLM «Генерируется…». */
 function MultiLlmGeneratingChip({ startedAtMs }: { startedAtMs?: number }) {
   const elapsed = useElapsedSeconds(startedAtMs, true);
-  const label =
-    elapsed !== null && elapsed > 0
-      ? `Генерируется… ${formatGenerationDuration(elapsed)}`
-      : 'Генерируется...';
+  const label = `Генерируется… ${formatGenerationDuration(elapsed ?? 0)}`;
   return <Chip label={label} size="small" color="info" />;
 }
 
@@ -514,9 +514,7 @@ const ReasoningBlock = React.memo(({
 
   const headerLabel =
     isThinkingStreaming
-      ? liveThinkingSec !== null && liveThinkingSec > 0
-        ? `Думает…\u00A0${liveThinkingSec}\u00A0сек`
-        : 'Думает…'
+      ? `Думает…\u00A0${liveThinkingSec ?? 0}\u00A0сек`
       : durationSec !== null
         ? `Думала\u00A0${durationSec}\u00A0сек`
         : 'Цепочка рассуждений';
@@ -739,6 +737,7 @@ const MessageCardComponent = ({
     if (isNowThinking && !wasThinking) {
       thinkingStartRef.current = Date.now();
       setThinkingDurationSec(null);
+      setLiveThinkingSec(0);
     } else if (!isNowThinking && wasThinking && thinkingStartRef.current) {
       const secs = Math.round((Date.now() - thinkingStartRef.current) / 1000);
       setThinkingDurationSec(secs > 0 ? secs : 1);
@@ -754,7 +753,7 @@ const MessageCardComponent = ({
     }
     const tick = () => {
       if (thinkingStartRef.current) {
-        setLiveThinkingSec(Math.max(1, Math.floor((Date.now() - thinkingStartRef.current) / 1000)));
+        setLiveThinkingSec(Math.max(0, Math.floor((Date.now() - thinkingStartRef.current) / 1000)));
       }
     };
     tick();
@@ -777,6 +776,7 @@ const MessageCardComponent = ({
       if (isThinkingStreaming && !was) {
         multiThinkingStartRef.current[respIndex] = Date.now();
         setMultiThinkingDurationSec((p: Record<number, number | null>) => ({ ...p, [respIndex]: null }));
+        setMultiLiveThinkingSec((p) => ({ ...p, [respIndex]: 0 }));
       } else if (!isThinkingStreaming && was && multiThinkingStartRef.current[respIndex]) {
         const secs = Math.round((Date.now() - multiThinkingStartRef.current[respIndex]!) / 1000);
         setMultiThinkingDurationSec((p: Record<number, number | null>) => ({ ...p, [respIndex]: secs > 0 ? secs : 1 }));
@@ -808,7 +808,7 @@ const MessageCardComponent = ({
         const next = { ...prev };
         for (const respIndex of thinkingIndices) {
           const start = multiThinkingStartRef.current[respIndex];
-          if (start) next[respIndex] = Math.max(1, Math.floor((Date.now() - start) / 1000));
+          if (start) next[respIndex] = Math.max(0, Math.floor((Date.now() - start) / 1000));
         }
         return next;
       });
@@ -1666,10 +1666,11 @@ export default function UnifiedChatPage({
   const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
   /** Раскрытый подпункт меню «Инструменты» (колонка справа, как в LeChat). */
   const [gearToolsPanel, setGearToolsPanel] = useState<
-    'main' | 'agents' | 'skills' | 'mcp' | 'coding' | 'generation' | 'model-mode'
+    'main' | 'agents' | 'artifacts' | 'skills' | 'mcp' | 'coding' | 'generation' | 'model-mode'
   >('main');
   const gearSubPanelOpen =
     gearToolsPanel === 'agents'
+    || gearToolsPanel === 'artifacts'
     || gearToolsPanel === 'skills'
     || gearToolsPanel === 'model-mode'
     || gearToolsPanel === 'mcp'
@@ -2303,6 +2304,7 @@ export default function UnifiedChatPage({
   
   // Состояние для режима multi-llm
   const activeMcpServers = useChatInputMcpIndicators(currentChat?.id);
+  const artifactsIndicator = useChatInputArtifactsIndicator(currentChat?.id);
   const activeSkills = useActiveSkillIndicators(currentChat?.id);
   const { activeMcpTools } = useMcpStreamingTools();
 
@@ -2507,6 +2509,12 @@ export default function UnifiedChatPage({
     showNotification('info', 'Skills отключены');
   }, [showNotification, currentChat?.id]);
 
+  const handleClearArtifactsTools = useCallback(() => {
+    if (!currentChat?.id) return;
+    disableChatArtifactsToolsForChat(currentChat.id);
+    showNotification('info', 'Режим артефактов отключён');
+  }, [currentChat?.id, showNotification]);
+
   const libraryInputBadge = useMemo(
     () => (
       <ChatInputStatusCluster
@@ -2522,6 +2530,9 @@ export default function UnifiedChatPage({
         onSkillsToggle={activeSkills.length ? handleClearSkills : undefined}
         activeMcpServers={activeMcpServers}
         onMcpClick={handleOpenMcpGearPanel}
+        artifactsActive={artifactsIndicator.active}
+        artifactsTooltip={artifactsIndicator.tooltip}
+        onArtifactsToggle={artifactsIndicator.active ? handleClearArtifactsTools : undefined}
       />
     ),
     [
@@ -2537,6 +2548,9 @@ export default function UnifiedChatPage({
       handleClearSkills,
       activeMcpServers,
       handleOpenMcpGearPanel,
+      artifactsIndicator.active,
+      artifactsIndicator.tooltip,
+      handleClearArtifactsTools,
     ],
   );
 
@@ -2676,6 +2690,7 @@ export default function UnifiedChatPage({
       mcpLabel,
       activeSkills.length > 0,
       skillsLabel,
+      artifactsIndicator.active,
     );
     return getToolsButtonInsetSp(interfaceSettings.chatInputStyle, clusterWidth);
   }, [
@@ -2683,6 +2698,7 @@ export default function UnifiedChatPage({
     myAgentSelection?.name,
     activeMcpServers,
     activeSkills,
+    artifactsIndicator.active,
     interfaceSettings.chatInputStyle,
   ]);
 
@@ -2932,7 +2948,7 @@ export default function UnifiedChatPage({
 
   const removeModelWindow = (id: string): void => {
     if (modelWindows.length <= 1) {
-      showNotification('warning', 'Должна остаться хотя бы одна модель');
+      void handleToggleMultiLlmMode();
       return;
     }
     setModelWindows((prev) => prev.filter((w) => w.id !== id));
@@ -4311,21 +4327,19 @@ export default function UnifiedChatPage({
                 }
               />
             </FormControl>
-            {modelWindows.length > 1 ? (
-              <Tooltip title="Убрать колонку">
-                <span>
-                  <IconButton
-                    size="small"
-                    onClick={() => removeModelWindow(window.id)}
-                    color="error"
-                    sx={{ flexShrink: 0 }}
-                    disabled={hasActiveChatStreaming}
-                  >
-                    <CloseIcon fontSize="small" />
-                  </IconButton>
-                </span>
-              </Tooltip>
-            ) : null}
+            <Tooltip title={modelWindows.length > 1 ? 'Убрать колонку' : 'Выйти из режима сравнения'}>
+              <span>
+                <IconButton
+                  size="small"
+                  onClick={() => removeModelWindow(window.id)}
+                  color="error"
+                  sx={{ flexShrink: 0 }}
+                  disabled={hasActiveChatStreaming || currentChatLoading}
+                >
+                  <CloseIcon fontSize="small" />
+                </IconButton>
+              </span>
+            </Tooltip>
           </Box>
         ))}
         <Popover
@@ -4972,7 +4986,7 @@ export default function UnifiedChatPage({
                        gearToolsPaperHeightPx < CHAT_GEAR_MENU_PAPER_MAX_HEIGHT_PX ? 'auto' : 'hidden',
                    }
                  : { maxHeight: CHAT_GEAR_MENU_PAPER_MAX_HEIGHT, overflowY: 'auto' }),
-                ...((gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding' || gearToolsPanel === 'generation')
+                ...((gearToolsPanel === 'agents' || gearToolsPanel === 'artifacts' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding' || gearToolsPanel === 'generation')
                 ? CHAT_GEAR_SCROLL_AREA_NO_VISIBLE_SCROLLBAR_SX
                 : {}),
              },
@@ -4984,15 +4998,15 @@ export default function UnifiedChatPage({
              display: 'flex',
              flexDirection: 'row',
              alignItems: 'stretch',
-            gap: gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding' || gearToolsPanel === 'generation' ? `${CHAT_GEAR_MENU_PANELS_GAP_PX}px` : 0,
+            gap: gearToolsPanel === 'agents' || gearToolsPanel === 'artifacts' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding' || gearToolsPanel === 'generation' ? `${CHAT_GEAR_MENU_PANELS_GAP_PX}px` : 0,
              width:
-             (gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding' || gearToolsPanel === 'generation') && gearToolsMenuWidthPx != null
+             (gearToolsPanel === 'agents' || gearToolsPanel === 'artifacts' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding' || gearToolsPanel === 'generation') && gearToolsMenuWidthPx != null
                  ? `${gearToolsMenuWidthPx}px`
-                : gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding' || gearToolsPanel === 'generation'
+                : gearToolsPanel === 'agents' || gearToolsPanel === 'artifacts' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding' || gearToolsPanel === 'generation'
                    ? CHAT_GEAR_MENU_EXPANDED_WIDTH_PX
                    : CHAT_GEAR_MENU_PANEL_WIDTH_PX,
              maxWidth:
-             (gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding' || gearToolsPanel === 'generation') && gearToolsMenuWidthPx != null
+             (gearToolsPanel === 'agents' || gearToolsPanel === 'artifacts' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding' || gearToolsPanel === 'generation') && gearToolsMenuWidthPx != null
                  ? `${gearToolsMenuWidthPx}px`
                  : 'min(96vw, 580px)',
              minHeight: gearToolsPaperHeightPx != null ? `${gearToolsPaperHeightPx}px` : undefined,
@@ -5006,7 +5020,7 @@ export default function UnifiedChatPage({
              sx={{
                ...dropdownPanelSx,
                width:
-               gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding' || gearToolsPanel === 'generation'
+               gearToolsPanel === 'agents' || gearToolsPanel === 'artifacts' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding' || gearToolsPanel === 'generation'
                   ? CHAT_GEAR_MENU_LEFT_RAIL_WIDTH_PX
                   : '100%',
                flexShrink: 0,
@@ -5048,6 +5062,36 @@ export default function UnifiedChatPage({
                    ...DROPDOWN_CHEVRON_SX,
                    flexShrink: 0,
                    transform: gearToolsPanel === 'agents' ? 'rotate(90deg)' : 'none',
+                 }}
+               />
+             </Box>
+             <Box
+               onClick={() => setGearToolsPanel((p) => (p === 'artifacts' ? 'main' : 'artifacts'))}
+               sx={{
+                 ...dropdownItemSx,
+                 display: 'flex',
+                 alignItems: 'center',
+                 gap: 1,
+                 color: isDarkMode ? 'white' : '#333',
+                 bgcolor:
+                   gearToolsPanel === 'artifacts'
+                     ? isDarkMode
+                       ? DROPDOWN_ITEM_HOVER_BG_DARK
+                       : DROPDOWN_ITEM_HOVER_BG_LIGHT
+                     : 'transparent',
+               }}
+             >
+               <GearMenuArtifactsIcon
+                 sx={{ fontSize: 18, color: isDarkMode ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.6)', flexShrink: 0 }}
+               />
+               <Typography sx={{ flex: 1, minWidth: 0, fontSize: MENU_ACTION_TEXT_SIZE, whiteSpace: 'nowrap' }}>
+                 Артефакты
+               </Typography>
+               <ChevronRightIcon
+                 sx={{
+                   ...DROPDOWN_CHEVRON_SX,
+                   flexShrink: 0,
+                   transform: gearToolsPanel === 'artifacts' ? 'rotate(90deg)' : 'none',
                  }}
                />
              </Box>
@@ -5235,7 +5279,7 @@ export default function UnifiedChatPage({
                </span>
              </Tooltip>
            </Box>
-          {gearToolsPanel === 'agents' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding' || gearToolsPanel === 'generation' ? (
+          {gearToolsPanel === 'agents' || gearToolsPanel === 'artifacts' || gearToolsPanel === 'skills' || gearToolsPanel === 'model-mode' || gearToolsPanel === 'mcp' || gearToolsPanel === 'coding' || gearToolsPanel === 'generation' ? (
              <Box
                sx={{
                  ...dropdownPanelSx,
@@ -5250,6 +5294,8 @@ export default function UnifiedChatPage({
              >
               {gearToolsPanel === 'agents' ? (
                 <ChatGearAgentsPanel isDarkMode={isDarkMode} />
+              ) : gearToolsPanel === 'artifacts' ? (
+                <ChatGearArtifactsPanel isDarkMode={isDarkMode} chatId={currentChat?.id} />
               ) : gearToolsPanel === 'skills' ? (
                 <ChatGearSkillsPanel isDarkMode={isDarkMode} chatId={currentChat?.id} />
               ) : gearToolsPanel === 'mcp' ? (

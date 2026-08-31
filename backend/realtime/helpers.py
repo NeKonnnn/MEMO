@@ -161,6 +161,7 @@ async def _resolve_agent_chat_params(agent_id_raw, user_id=None) -> dict:
         "agent_ids": [],
         "hide_sequential_outputs": False,
         "recursion_limit": None,
+        "subagents": None,
     }
     if agent_id_raw is None:
         return empty
@@ -250,6 +251,8 @@ async def _resolve_agent_chat_params(agent_id_raw, user_id=None) -> dict:
         out["agent_ids"] = parse_agent_ids(cfg.get("agent_ids"), exclude_id=aid)
         out["hide_sequential_outputs"] = bool(cfg.get("hide_sequential_outputs", False))
         out["recursion_limit"] = parse_recursion_limit(cfg.get("recursion_limit"))
+        if isinstance(cfg.get("subagents"), dict):
+            out["subagents"] = dict(cfg["subagents"])
         logger.info(
             f"[chat] agent_id={aid} → model_path={out['model_path']}, "
             f"max_tokens={out['max_tokens']}, temperature={out['temperature']}, "
@@ -261,12 +264,28 @@ async def _resolve_agent_chat_params(agent_id_raw, user_id=None) -> dict:
             f"shadcn_enabled={out['shadcn_enabled']}, "
             f"user_prompt_mode={out['user_prompt_mode']}, "
             f"agent_ids={out['agent_ids']}, hide_sequential={out['hide_sequential_outputs']}, "
-            f"recursion_limit={out['recursion_limit']}"
+            f"recursion_limit={out['recursion_limit']}, "
+            f"subagents_enabled={bool((out.get('subagents') or {}).get('enabled'))}"
         )
         return out
     except Exception:
         logger.exception("_resolve_agent_chat_params")
         return empty
+
+
+def merge_chat_artifacts_settings(agent_profile: dict, data: dict) -> dict:
+    """Пер-чат override артефактов из UI «Инструменты → Артефакты»."""
+    raw = data.get("artifacts_settings") if isinstance(data, dict) else None
+    if not isinstance(raw, dict):
+        return agent_profile
+    out = dict(agent_profile) if isinstance(agent_profile, dict) else {}
+    if "artifacts_enabled" in raw:
+        out["artifacts_enabled"] = bool(raw.get("artifacts_enabled"))
+    if "shadcn_enabled" in raw:
+        out["shadcn_enabled"] = bool(raw.get("shadcn_enabled"))
+    if "user_prompt_mode" in raw:
+        out["user_prompt_mode"] = bool(raw.get("user_prompt_mode"))
+    return out
 
 
 def agent_mcp_tool_ids(agent_profile: dict) -> List[str]:

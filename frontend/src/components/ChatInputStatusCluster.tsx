@@ -8,6 +8,7 @@ import {
   SmartToyOutlined as AgentStatusIcon,
   HubOutlined as HubIcon,
   HistoryEdu as SkillStatusIcon,
+  ViewQuiltOutlined as ArtifactsStatusIcon,
 } from '@mui/icons-material';
 import type { ActiveMcpServerIndicator } from '../mcp/hooks/useChatInputMcpIndicators';
 import type { ActiveSkillRef } from '../utils/skillSelectionStorage';
@@ -25,6 +26,11 @@ export interface ChatInputStatusClusterProps {
   onMcpClick?: () => void;
   activeSkills?: ActiveSkillRef[];
   onSkillsToggle?: () => void;
+  /** Артефакты включены для текущего чата */
+  artifactsActive?: boolean;
+  artifactsTooltip?: string;
+  /** Снять режим артефактов для чата (клик по иконке) */
+  onArtifactsToggle?: () => void;
 }
 
 export default function ChatInputStatusCluster({
@@ -40,12 +46,16 @@ export default function ChatInputStatusCluster({
   onMcpClick,
   activeSkills = [],
   onSkillsToggle,
+  artifactsActive = false,
+  artifactsTooltip = '',
+  onArtifactsToggle,
 }: ChatInputStatusClusterProps) {
   const theme = useTheme();
   const agentActive = Boolean(myAgentName);
   const mcpActive = activeMcpServers.length > 0;
   const skillsActive = activeSkills.length > 0;
   const generationActive = generationImageActive || generationVideoActive;
+  const artifactsOn = Boolean(artifactsActive);
 
   const mcpLabel = useMemo(() => {
     if (activeMcpServers.length === 0) return '';
@@ -102,6 +112,15 @@ export default function ChatInputStatusCluster({
         `MCP: ${activeMcpServers.map((s) => s.display_name).join(', ')}. Инструменты → MCP.`,
       );
     }
+    if (artifactsOn) {
+      parts.push(
+        onArtifactsToggle
+          ? artifactsTooltip
+            ? `${artifactsTooltip} Нажмите, чтобы отключить.`
+            : 'Режим артефактов включён. Нажмите, чтобы отключить.'
+          : artifactsTooltip || 'Режим артефактов включён.',
+      );
+    }
     return parts.join(' ');
   }, [
     libraryActive,
@@ -115,20 +134,24 @@ export default function ChatInputStatusCluster({
     activeMcpServers,
     onAgentToggle,
     onSkillsToggle,
+    artifactsOn,
+    artifactsTooltip,
+    onArtifactsToggle,
   ]);
 
-  if (!libraryActive && !generationActive && !agentActive && !skillsActive && !mcpActive) return null;
+  if (!libraryActive && !generationActive && !agentActive && !skillsActive && !mcpActive && !artifactsOn) return null;
 
   const borderC = alpha(theme.palette.primary.main, 0.4);
   const bg = alpha(theme.palette.primary.main, 0.12);
   const dividerColor = isDarkMode ? 'rgba(255,255,255,0.28)' : 'rgba(0,0,0,0.18)';
 
-  const segments: Array<'library' | 'genImage' | 'genVideo' | 'agent' | 'skills' | 'mcp'> = [];
+  const segments: Array<'library' | 'genImage' | 'genVideo' | 'agent' | 'skills' | 'artifacts' | 'mcp'> = [];
   if (libraryActive) segments.push('library');
   if (generationImageActive) segments.push('genImage');
   if (generationVideoActive) segments.push('genVideo');
   if (agentActive) segments.push('agent');
   if (skillsActive) segments.push('skills');
+  if (artifactsOn) segments.push('artifacts');
   if (mcpActive) segments.push('mcp');
 
   const segmentButtonSx = {
@@ -282,6 +305,30 @@ export default function ChatInputStatusCluster({
                     {skillsLabel}
                   </Typography>
                 ) : null}
+              </Box>
+            ) : null}
+            {seg === 'artifacts' ? (
+              <Box
+                component={onArtifactsToggle ? 'button' : 'div'}
+                type={onArtifactsToggle ? 'button' : undefined}
+                onClick={
+                  onArtifactsToggle
+                    ? (e: React.MouseEvent) => {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        onArtifactsToggle();
+                      }
+                    : undefined
+                }
+                sx={{
+                  ...segmentButtonSx,
+                  width: 36,
+                  p: 0,
+                  cursor: onArtifactsToggle ? 'pointer' : 'default',
+                  '&:hover': onArtifactsToggle ? { bgcolor: alpha(theme.palette.primary.main, 0.12) } : {},
+                }}
+              >
+                <ArtifactsStatusIcon sx={{ fontSize: '1.15rem' }} />
               </Box>
             ) : null}
             {seg === 'mcp' ? (

@@ -1,4 +1,5 @@
 import { persistAgentMcpConfig } from './applyAgentMcp';
+import { clearAgentArtifactsEnabled } from './agentArtifactsEnabled';
 
 const STORAGE_AGENT_ID = 'active_agent_id';
 const STORAGE_AGENT_NAME = 'active_agent_name';
@@ -11,6 +12,7 @@ export function clearActiveAgent(): void {
     localStorage.removeItem(STORAGE_AGENT_NAME);
     localStorage.removeItem(STORAGE_AGENT_PROMPT);
     persistAgentMcpConfig(null);
+    clearAgentArtifactsEnabled();
     window.dispatchEvent(new CustomEvent('agentSelected', { detail: null }));
   } catch {
     /* */
