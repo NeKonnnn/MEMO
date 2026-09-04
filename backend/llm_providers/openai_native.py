@@ -24,6 +24,12 @@ class OpenAIProvider(OpenAICompatProvider):
     HEALTH_PATH: str = "/v1/models"
     HEALTH_FALLBACK_TO_MODELS: bool = True
 
+    #: api.openai.com валидирует тело запроса строго и на поля управления
+    #: мышлением отвечает ``400 Unrecognized request arguments supplied:
+    #: chat_template_kwargs, enable_thinking`` — то есть отклоняет весь запрос.
+    #: Эти поля понимают llm-svc / vLLM / шлюзы, у них поведение не меняется.
+    UNSUPPORTED_REQUEST_EXTRA_KEYS = frozenset({"enable_thinking", "chat_template_kwargs"})
+
     _capabilities = ProviderCapabilities(
         hot_swap=False,
         multi_loaded=True,
@@ -39,6 +45,11 @@ class OpenRouterProvider(OpenAIProvider):
     Единственное отличие: рекомендуется добавлять ``HTTP-Referer`` и
     ``X-Title`` заголовки. Но это не обязательно — работает без них.
     """
+
+    #: OpenRouter не проверялся. Менять поведение эндпоинта, по которому нет
+    #: данных, не стоит, поэтому исключение, унаследованное от OpenAIProvider,
+    #: здесь явно снято: поля мышления отправляются как раньше.
+    UNSUPPORTED_REQUEST_EXTRA_KEYS = frozenset()
 
     def _headers(self, *, accept_sse: bool = False):
         headers = super()._headers(accept_sse=accept_sse)
