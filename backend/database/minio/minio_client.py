@@ -124,17 +124,22 @@ class MinIOClient:
         file_data: bytes,
         object_name: str,
         content_type: str = "application/octet-stream",
-        bucket_name: str = None
+        bucket_name: str = None,
+        *,
+        cef_display_name: Optional[str] = None,
+        cef_audit: bool = True
     ) -> str:
         """
         Загружает файл в MinIO
-        
+
         Args:
             file_data: Данные файла в виде bytes
             object_name: Имя объекта в MinIO (путь к файлу)
             content_type: MIME тип файла
             bucket_name: Имя bucket (если None, используется self.bucket_name)
-            
+            cef_display_name: человекочитаемое имя файла для CEF (по умолчанию object_name)
+            cef_audit: писать CEF FS003/FS004 на запись
+
         Returns:
             object_name: Имя загруженного объекта
         """
@@ -142,10 +147,10 @@ class MinIOClient:
         try:
             # Убеждаемся, что bucket существует
             self._ensure_bucket_exists(bucket)
-            
+
             file_stream = BytesIO(file_data)
             file_size = len(file_data)
-            
+
             self.client.put_object(
                 bucket,
                 object_name,
@@ -153,10 +158,18 @@ class MinIOClient:
                 file_size,
                 content_type=content_type
             )
-            
+
             logger.debug(f"Файл загружен в MinIO: {bucket}/{object_name} ({file_size} байт)")
+            if cef_audit:
+                from backend.settings.cef_logger.storage_audit import log_minio_write_success
+
+                log_minio_write_success(object_name, bucket, display_name=cef_display_name)
             return object_name
         except S3Error as e:
+            if cef_audit:
+                from backend.settings.cef_logger.storage_audit import log_minio_write_failure
+
+                log_minio_write_failure(object_name, bucket, str(e), display_name=cef_display_name)
             logger.error(f"Ошибка загрузки файла в MinIO: {e}")
             raise
     
