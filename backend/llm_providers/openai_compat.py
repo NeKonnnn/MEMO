@@ -198,6 +198,12 @@ class OpenAICompatProvider(LLMProvider):
     #: HEALTH_PATH (полезно для OpenAI.com, у которого health просто нет).
     HEALTH_FALLBACK_TO_MODELS: bool = True
 
+    #: Поля ``request_extra``, которые этот REST не понимает и на которые
+    #: отвечает ошибкой. Пусто для OpenAI-совместимых шлюзов (vLLM, llm-svc,
+    #: LiteLLM, Ollama): они читают ``enable_thinking`` /
+    #: ``chat_template_kwargs`` и должны получать их как раньше.
+    UNSUPPORTED_REQUEST_EXTRA_KEYS: frozenset = frozenset()
+
     _capabilities = ProviderCapabilities(
         hot_swap=False,
         multi_loaded=True,
@@ -208,6 +214,33 @@ class OpenAICompatProvider(LLMProvider):
         prompt_json_fc=True,
         langgraph_agent=True,
     )
+
+    def _apply_request_extra(
+        self, payload: Dict[str, Any], request_extra: Optional[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Переносит ``request_extra`` в payload, отбрасывая непонятные этому REST поля.
+
+        Провайдер сам решает, какие дополнительные поля запроса он понимает:
+        отправитель (``thinking_request_extra`` и пр.) знает про режим мышления,
+        но не про то, какой эндпоинт по ту сторону.
+        """
+        if not request_extra:
+            return payload
+        dropped = []
+        for key, value in request_extra.items():
+            if value is None:
+                continue
+            if key in self.UNSUPPORTED_REQUEST_EXTRA_KEYS:
+                dropped.append(key)
+                continue
+            payload[key] = value
+        if dropped:
+            logger.debug(
+                "[%s] поля запроса не поддерживаются этим провайдером, отброшены: %s",
+                self.id,
+                sorted(dropped),
+            )
+        return payload
 
     def __init__(self, config: LLMProviderConfig) -> None:
         super().__init__(config)
@@ -556,10 +589,7 @@ class OpenAICompatProvider(LLMProvider):
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = tool_choice if tool_choice is not None else "auto"
-        if request_extra:
-            for k, v in request_extra.items():
-                if v is not None:
-                    payload[k] = v
+        self._apply_request_extra(payload, request_extra)
         cef_rid = uuid.uuid4().hex
         log_cef_int003_llm_request(
             base_url=self.base_url,
@@ -612,10 +642,7 @@ class OpenAICompatProvider(LLMProvider):
             "max_tokens": max_tokens,
             "stream": False,
         }
-        if request_extra:
-            for k, v in request_extra.items():
-                if v is not None:
-                    payload[k] = v
+        self._apply_request_extra(payload, request_extra)
         logger.info(
             "[%s] chat flags: enable_thinking=%r payload_keys=%s",
             self.id,
@@ -653,10 +680,7 @@ class OpenAICompatProvider(LLMProvider):
             "max_tokens": max_tokens,
             "stream": True,
         }
-        if request_extra:
-            for k, v in request_extra.items():
-                if v is not None:
-                    payload[k] = v
+        self._apply_request_extra(payload, request_extra)
         logger.info(
             "[%s] stream enable_thinking=%r model=%r url=%s/v1/chat/completions",
             self.id,
